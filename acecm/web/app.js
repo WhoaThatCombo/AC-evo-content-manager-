@@ -59,19 +59,14 @@ async function dashboard() {
   };
   const bStop = el('button', 'danger', 'Stop all servers');
   bStop.onclick = async () => { await api('server/stop', {}); toast('Stopped'); setTimeout(dashboard, 800); };
-  const bJoin = el('button', null, 'Join server directly');
-  bJoin.title = 'Pushes the client straight into the server, skipping the menus';
-  bJoin.onclick = async () => {
-    if (!profs.length) { toast('Create a server profile first'); return; }
-    const js = await api('join/state');
-    if (!js.control) { toast(js.hint || 'Start the proxy backend first', true); return; }
-    if (!js.client_connected) { toast('No game client attached — launch the game first', true); return; }
-    const r = await api('join', { id: profs[0].server_id || 'local-0000-0000-0000-000000000001' });
-    toast(r.ok ? 'Sent go-to-server' : (r.error || 'Join failed'), !r.ok);
-  };
+  // "Join server directly" was removed: the backend accepts the go-to-server
+  // push and the client acknowledges it, but the join never completes, so the
+  // button did nothing a user could see. Join through the in-game browser -
+  // the proxy injects local servers into that list. The API endpoints are
+  // still there for when the push is understood.
   const bGame = el('button', null, 'Launch game');
   bGame.onclick = async () => { const r = await api('game/launch', {}); if (r.ok) toast('Launching game'); };
-  row.append(bStart, bStop, bGame, bJoin);
+  row.append(bStart, bStop, bGame);
   c.append(row);
   p.append(c);
 
@@ -846,6 +841,105 @@ async function gameSettingsPage() {
   sel.onchange = () => { gsFile = sel.value; gameSettingsPage(); };
   pick.append(sel);
   p.append(pick);
+
+  // ---- backup / share ----------------------------------------------------
+  const share = el('div', 'card');
+  share.innerHTML = '<h2>Backup &amp; share</h2>'
+    + '<div class="tiny dim">Exports your settings as readable JSON rather '
+    + 'than raw files: you can diff it, edit it, and it re-encodes against '
+    + 'whatever schema the receiving machine has. Every import backs up what '
+    + 'it replaces.</div>';
+  const srow = el('div', 'row wrap');
+  srow.style.margin = '10px 0';
+  const bAll = el('button', 'primary sm', 'Export all settings');
+  const bOne = el('button', 'sm', 'Export this file only');
+  const bImp = el('button', 'sm', 'Import bundle…');
+  const devs = el('label', 'tiny dim');
+  const devChk = el('input');
+  devChk.type = 'checkbox';
+  devs.append(devChk, document.createTextNode(' include device bindings'));
+  devs.title = 'Bindings reference specific hardware, so they are skipped '
+             + 'unless you ask for them';
+  const bBack = el('button', 'sm', 'Backups of this file…');
+  srow.append(bAll, bOne, bImp, bBack, devs);
+  const snote = el('div', 'tiny dim');
+  share.append(srow, snote);
+  p.append(share);
+
+  function download(name, obj) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)],
+                          { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+  const stamp = () => new Date().toISOString().slice(0, 10);
+
+  bAll.onclick = async () => {
+    snote.textContent = 'exporting…';
+    const b = await api('gamesettings/export');
+    download(`ace-settings-${stamp()}.json`, b);
+    snote.textContent = `exported ${Object.keys(b.files || {}).length} file(s)`
+      + (Object.keys(b.skipped || {}).length
+         ? `, skipped ${Object.keys(b.skipped).length}` : '');
+  };
+  bOne.onclick = async () => {
+    const b = await api('gamesettings/export?file=' + encodeURIComponent(gsFile));
+    download(`ace-${gsFile.replace(/[^a-z0-9]+/gi, '-')}-${stamp()}.json`, b);
+    snote.textContent = 'exported ' + gsFile;
+  };
+  bImp.onclick = () => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'application/json,.json';
+    inp.onchange = async () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      let bundle;
+      try { bundle = JSON.parse(await f.text()); }
+      catch (e) { toast('That file is not valid JSON', true); return; }
+      const names = Object.keys(bundle.files || {});
+      if (!confirm(`Apply ${names.length} settings file(s) from ${f.name}?
+
+`
+                   + 'Whatever they replace is backed up first.')) return;
+      const r = await api('gamesettings/import',
+        { bundle, include_devices: devChk.checked });
+      snote.innerHTML = r.ok
+        ? `applied ${(r.applied || []).length} file(s)`
+          + ((r.skipped && Object.keys(r.skipped).length)
+             ? `, skipped ${Object.keys(r.skipped).length} (device bindings)` : '')
+        : `<b>${esc(r.error || 'import failed')}</b>`;
+      if (r.failed && Object.keys(r.failed).length)
+        snote.innerHTML += '<pre class="log">' + esc(JSON.stringify(r.failed, null, 2)) + '</pre>';
+      toast(r.ok ? 'Settings imported' : 'Import failed', !r.ok);
+      if (r.ok) setTimeout(gameSettingsPage, 900);
+    };
+    inp.click();
+  };
+  bBack.onclick = async () => {
+    const r = await api('gamesettings/backups?file=' + encodeURIComponent(gsFile));
+    const list = r.backups || [];
+    if (!list.length) { snote.textContent = 'no backups of this file yet'; return; }
+    snote.innerHTML = '';
+    list.forEach(b => {
+      const row = el('div', 'chk',
+        `<span class="name">${esc(b.name)}<div class="tiny dim">`
+        + `${new Date(b.mtime * 1000).toLocaleString()} · ${b.size} bytes</div></span>`);
+      const rb = el('button', 'sm', 'Restore');
+      rb.onclick = async () => {
+        if (!confirm('Restore ' + b.name + '?')) return;
+        const res = await api('gamesettings/restore_backup',
+                              { file: gsFile, name: b.name });
+        toast(res.ok ? 'Restored' : (res.error || 'Failed'), !res.ok);
+        if (res.ok) setTimeout(gameSettingsPage, 800);
+      };
+      row.append(rb);
+      snote.append(row);
+    });
+  };
 
   const r = await api('gamesettings/read?file=' + encodeURIComponent(gsFile));
   if (!r.ok) { p.append(el('div', 'card').appendChild(
