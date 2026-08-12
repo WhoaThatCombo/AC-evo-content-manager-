@@ -358,11 +358,97 @@ function editor(prof, trk, opts) {
 }
 
 /* ----------------------------------------------------------------- cars -- */
+
+/* The 3D viewer picker. These are the cars inside the CLIENT package, which is
+   a different set from cars.json above: that lists what the dedicated server
+   can load, this lists what actually has geometry to show. */
+let viewFilter = '';
+async function viewerCard(p) {
+  const card = el('div', 'card');
+  card.innerHTML = '<h2>3D viewer</h2>'
+    + '<div class="tiny dim" style="margin-bottom:9px">Opens a car in the '
+    + 'model viewer. Cars are read straight out of the game package - '
+    + 'nothing is extracted or written to disk.</div>';
+  p.append(card);
+
+  const st = await api('viewer/status');
+  if (!st.package) {
+    card.append(el('div', 'empty',
+      'Game install not found — set the game folder in Settings.'));
+    return;
+  }
+  if (!st.exe) {
+    card.append(el('div', 'empty',
+      'evoview.exe not found. Put it in the tools folder next to ACECM, '
+      + 'or set viewer_exe in Settings.'));
+    return;
+  }
+
+  const search = el('input');
+  search.placeholder = 'Search cars to view…';
+  search.value = viewFilter;
+  card.append(search);
+  const list = el('div', 'list');
+  list.style.marginTop = '10px';
+  card.append(list);
+  list.append(el('div', 'empty', 'Reading the game package…'));
+
+  const d = await api('viewer/cars');
+  if (d.error) {
+    list.innerHTML = '';
+    list.append(el('div', 'empty', esc(d.error)));
+    return;
+  }
+  search.oninput = () => { viewFilter = search.value.toLowerCase(); draw(); };
+
+  function draw() {
+    list.innerHTML = '';
+    const rows = (d.cars || []).filter(c =>
+      !viewFilter || c.label.toLowerCase().includes(viewFilter)
+      || c.id.toLowerCase().includes(viewFilter));
+    if (!rows.length) { list.append(el('div', 'empty', 'No matches')); return; }
+    rows.slice(0, 400).forEach(car => {
+      const r = el('div', 'chk');
+      r.innerHTML = `<span class="name">${esc(car.label)}</span>`
+        + (car.mod ? '<span class="pill">mod</span>' : '')
+        + `<span class="id">${esc(car.id)}</span>`;
+      const b = el('button', 'small');
+      b.textContent = 'View';
+      b.onclick = async () => {
+        b.disabled = true;
+        b.textContent = 'Opening…';
+        await api('viewer/open', { id: car.id });
+        // Extraction runs in the background; report what it is doing rather
+        // than leaving a dead button.
+        const poll = setInterval(async () => {
+          const j = await api('viewer/job?id=' + encodeURIComponent(car.id));
+          if (j.state === 'extracting') b.textContent = j.detail || 'Extracting…';
+          if (j.state === 'open' || j.state === 'ready') {
+            clearInterval(poll);
+            b.textContent = 'View';
+            b.disabled = false;
+          }
+          if (j.state === 'error') {
+            clearInterval(poll);
+            b.textContent = 'Failed';
+            b.disabled = false;
+            toast(j.detail || 'could not open the viewer');
+          }
+        }, 700);
+      };
+      r.append(b);
+      list.append(r);
+    });
+  }
+  draw();
+}
+
 let carFilter = '';
 async function carsPage() {
   const d = await api('cars');
   const p = $('#page');
   p.innerHTML = '';
+  viewerCard(p);
   const c = el('div', 'card');
   c.innerHTML = `<h2>Cars &middot; ${d.total ?? 0} total, `
     + `${d.kunos ?? 0} Kunos, ${d.mods ?? 0} modded</h2>`;
