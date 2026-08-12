@@ -123,21 +123,40 @@ def find_server_dir():
 
 
 def server_dir():
-    d = CFG.get("server_dir") or ""
-    if not d:
-        d = find_server_dir()
-        if d:
-            save({"server_dir": d})
-    return d
+    """The dedicated-server folder: the setting if it is real, else detected."""
+    d = (CFG.get("server_dir") or "").strip()
+    if d and os.path.isdir(d):
+        return d
+    if d:
+        from . import logs
+        logs.LOG.warning("configured server_dir %r does not exist - detecting "
+                         "instead", d)
+    found = find_server_dir()
+    if found:
+        save({"server_dir": found})
+    return found
 
 
 def server_exe():
-    """Full path to the dedicated-server executable."""
-    from . import detect
+    """Full path to the dedicated-server executable.
+
+    ⚠ A configured value only wins while it is TRUE. Early builds saved
+    `server_exe` as a filename that existed only on the development machine, so
+    upgrading left that stale value in config.json - and because an explicit
+    setting outranks detection, a perfectly good install kept reporting the
+    executable as missing even after the default was fixed. A setting that
+    points at nothing is dropped in favour of what is actually on disk.
+    """
+    from . import detect, logs
     name = (CFG.get("server_exe") or "").strip()
     if name:
         # An explicit setting may be a bare filename or a full path.
-        return name if os.path.isabs(name) else os.path.join(server_dir(), name)
+        p = name if os.path.isabs(name) else os.path.join(server_dir(), name)
+        if os.path.isfile(p):
+            return p
+        logs.LOG.warning("configured server_exe %r does not exist - ignoring it "
+                         "and detecting instead", name)
+        save({"server_exe": ""})          # stop it biting again next launch
     return detect.find("server_exe")
 
 
