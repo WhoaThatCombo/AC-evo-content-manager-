@@ -473,6 +473,54 @@ async function settingsPage() {
   c.append(g);
   const save = el('button', 'primary', 'Save settings');
   save.onclick = async () => { await api('config', draft); toast('Saved — restart ACECM to apply ports'); };
+
+  // ---- updates ----------------------------------------------------------
+  const uc = el('div', 'card');
+  uc.innerHTML = '<h2>Updates</h2>'
+    + '<div class="tiny dim">Checks this project&rsquo;s latest GitHub Release '
+    + 'for an <code>ACECM.exe</code>, verifies it against the SHA-256 GitHub '
+    + 'publishes, and swaps the exe on restart. The old build is kept as '
+    + '<code>.old</code>.</div>';
+  const urow = el('div', 'row wrap');
+  urow.style.margin = '10px 0';
+  const vpill = el('span', 'pill off', '<i class="dot"></i>checking version…');
+  const chk = el('button', 'sm', 'Check for updates');
+  const get = el('button', 'sm primary', 'Download & install');
+  get.style.display = 'none';
+  const unote = el('div', 'tiny dim');
+  urow.append(chk, get, vpill);
+  uc.append(urow, unote);
+  p.append(uc);
+
+  api('version').then(v => {
+    vpill.className = 'pill on';
+    vpill.innerHTML = `<i class="dot"></i>v${esc(v.version)}`
+      + (v.frozen ? '' : ' (running from source)');
+  });
+  chk.onclick = async () => {
+    unote.textContent = 'checking…';
+    const r = await api('update/check');
+    if (!r.ok) { unote.innerHTML = `<b>${esc(r.error || 'check failed')}</b>`
+      + (r.hint ? '<br>' + esc(r.hint) : ''); return; }
+    if (!r.checked) { unote.textContent = r.hint || 'update checks are off'; return; }
+    if (r.available) {
+      unote.innerHTML = `<b>v${esc(r.latest)}</b> is available `
+        + `(you have v${esc(r.current)})`
+        + (r.notes ? '<pre class="log" style="max-height:160px">'
+                     + esc(r.notes) + '</pre>' : '');
+      get.style.display = '';
+    } else {
+      unote.textContent = `up to date (latest is v${r.latest || '?'})`;
+      get.style.display = 'none';
+    }
+    if (r.error) unote.innerHTML += '<br>' + esc(r.error);
+  };
+  get.onclick = async () => {
+    unote.textContent = 'downloading…';
+    const r = await api('update/apply', {});
+    unote.textContent = r.ok ? (r.note || 'downloaded') : (r.error || 'failed');
+    if (r.ok) toast('Update ready — close ACECM to finish', false);
+  };
   c.append(save);
   p.append(c);
 }

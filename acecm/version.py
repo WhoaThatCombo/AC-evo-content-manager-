@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 from . import config
@@ -39,12 +40,22 @@ def _newer(a, b):
     return pa > pb
 
 
+def _headers():
+    h = {"Accept": "application/vnd.github+json",
+         # GitHub rejects requests with no User-Agent
+         "User-Agent": f"ACECM/{VERSION}"}
+    # ⚠ A PRIVATE repo answers 404, not 403, to an unauthenticated request -
+    # indistinguishable from "no such repo". A token is required to see it at
+    # all, and also to download its release assets.
+    tok = (config.CFG.get("update_token") or
+           os.environ.get("ACECM_GITHUB_TOKEN") or "").strip()
+    if tok:
+        h["Authorization"] = f"Bearer {tok}"
+    return h
+
+
 def _get_json(url, timeout=20):
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/vnd.github+json",
-        # GitHub rejects requests with no User-Agent
-        "User-Agent": f"ACECM/{VERSION}",
-    })
+    req = urllib.request.Request(url, headers=_headers())
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -86,6 +97,17 @@ def check():
                 "latest": latest, "available": _newer(latest, VERSION),
                 "notes": man.get("notes", ""), "url": man.get("url", ""),
                 "sha256": man.get("sha256", "")}
+    except urllib.error.HTTPError as ex:
+        hint = ""
+        if ex.code == 404:
+            hint = ("either that repo has no releases yet, or it is PRIVATE - "
+                    "a private repo returns 404 to an unauthenticated check. "
+                    "Make it public, or set update_token to a GitHub token "
+                    "with 'repo' scope.")
+        elif ex.code in (401, 403):
+            hint = "the token was rejected, or the API rate limit was hit."
+        return {"ok": False, "current": VERSION, "repo": repo,
+                "error": f"HTTP {ex.code}", "hint": hint}
     except Exception as ex:
         return {"ok": False, "current": VERSION,
                 "error": f"{type(ex).__name__}: {ex}"}
@@ -105,7 +127,11 @@ def apply(url=None, sha256=None):
     exe = sys.executable
     new = exe + ".new"
     try:
-        with urllib.request.urlopen(url, timeout=300) as r, open(new, "wb") as f:
+        req = urllib.request.Request(url, headers={
+            **_headers(),
+            # asset downloads need the octet-stream Accept, not the JSON one
+            "Accept": "application/octet-stream"})
+        with urllib.request.urlopen(req, timeout=300) as r, open(new, "wb") as f:
             h = hashlib.sha256()
             while True:
                 chunk = r.read(1 << 20)

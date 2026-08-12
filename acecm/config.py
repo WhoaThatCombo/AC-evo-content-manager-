@@ -54,6 +54,8 @@ DEFAULTS = {
     # older manual-manifest route and is only used if update_repo is empty.
     "update_repo": "WhoaThatCombo/AC-evo-content-manager-",
     "update_url": "",
+    # only needed if update_repo is PRIVATE (a token with repo scope)
+    "update_token": "",
     # ports we own
     "ui_port": 8092,
     "telemetry_port": 8091,
