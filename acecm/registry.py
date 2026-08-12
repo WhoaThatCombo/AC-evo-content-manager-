@@ -1,0 +1,202 @@
+"""A public server list, with the content each server requires.
+
+The game cannot deliver content itself. A client missing a car or track is
+simply rejected (`JoinErrorMessage_CONTENT_UNAVAILABLE`), and nothing in the
+protocol offers a download - `MultiplayerServerListEntry` has 43 fields and not
+one is a URL. So content distribution has to live beside the game, which is how
+Content Manager solved the same problem for AC1.
+
+This module is that side:
+
+  * a registry of servers, each declaring the mods and tracks it requires
+  * a manifest per server: every required file with its size and SHA-256
+  * the files themselves, served over the same HTTP port as the UI
+
+A player runs `acecm_sync.py <registry-url>`: it compares hashes, downloads only
+what is missing, installs to the right folders, and then the server is joinable.
+
+⚠ Hashing a 700 MB mod is slow, so hashes are cached by (path, size, mtime) and
+only recomputed when the file actually changes.
+"""
+import hashlib
+import json
+import os
+import time
+import uuid
+
+from . import config, install
+
+REGISTRY = os.path.join(config.DATA, "registry.json")
+HASHCACHE = os.path.join(config.DATA, "hashes.json")
+
+TEMPLATE = {
+    "id": "",
+    "name": "My EVO server",
+    "description": "",
+    "ip": "",                    # public address players should use
+    "port": 9700,
+    "profile_id": "",            # link to a local server profile, optional
+    "required_mods": [],         # mod base names in the server's mod folder
+    "required_tracks": [],       # track package folder names
+    "public": True,
+}
+
+
+# ------------------------------------------------------------------ hashes --
+def _cache():
+    try:
+        return json.load(open(HASHCACHE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_cache(c):
+    json.dump(c, open(HASHCACHE, "w", encoding="utf-8"))
+
+
+def file_digest(path):
+    """SHA-256, cached on (size, mtime) so big mods are hashed once."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = os.path.abspath(path)
+    c = _cache()
+    hit = c.get(key)
+    if hit and hit.get("size") == st.st_size and hit.get("mtime") == int(st.st_mtime):
+        return hit["sha256"]
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    c[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "sha256": digest}
+    _save_cache(c)
+    return digest
+
+
+# ---------------------------------------------------------------- registry --
+def load():
+    try:
+        return json.load(open(REGISTRY, encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save(items):
+    json.dump(items, open(REGISTRY, "w", encoding="utf-8"), indent=2)
+    return items
+
+
+def upsert(entry):
+    entry = {**TEMPLATE, **entry}
+    if not entry.get("id"):
+        # ⚠ int(time.time()) collides for anything created in the same
+        # second - two profiles made together got the SAME id and one
+        # silently overwrote the other. Add randomness.
+        entry["id"] = f"srv{int(time.time())}{uuid.uuid4().hex[:4]}"
+    items = [e for e in load() if e["id"] != entry["id"]]
+    items.append(entry)
+    save(items)
+    return entry
+
+
+def remove(sid):
+    save([e for e in load() if e["id"] != sid])
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- manifest --
+def _mod_files(name):
+    """Both halves of a car mod. A .kspkg without its .json installs fine and
+    then never appears in the car list, so the manifest always carries both."""
+    d = install.mods_dir()
+    out = []
+    for ext in (".kspkg", ".json"):
+        p = os.path.join(d, name + ext)
+        if os.path.isfile(p):
+            out.append(("mods/" + name + ext, p))
+    return out
+
+
+def _track_files(folder):
+    """Everything in a track package folder, relative paths preserved."""
+    roots = [os.path.join(config.DATA, "track_packages", folder),
+             os.path.join(config.server_dir(), "track_packages", folder),
+             os.path.join(os.path.expanduser("~"), "Downloads", folder)]
+    out = []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for base, _, files in os.walk(root):
+            for f in files:
+                p = os.path.join(base, f)
+                rel = os.path.relpath(p, root).replace("\\", "/")
+                out.append((f"tracks/{folder}/{rel}", p))
+        break
+    return out
+
+
+def manifest(sid, base_url=""):
+    entry = next((e for e in load() if e["id"] == sid), None)
+    if not entry:
+        return {"ok": False, "error": "no such server"}
+    files, missing = [], []
+    for mod in entry.get("required_mods", []):
+        got = _mod_files(mod)
+        if not got:
+            missing.append(f"mod {mod}")
+        for rel, path in got:
+            files.append({"path": rel, "size": os.path.getsize(path),
+                          "sha256": file_digest(path), "kind": "mod",
+                          "url": f"{base_url}/api/registry/file?id={sid}"
+                                 f"&path={rel}"})
+    for trk in entry.get("required_tracks", []):
+        got = _track_files(trk)
+        if not got:
+            missing.append(f"track {trk}")
+        for rel, path in got:
+            files.append({"path": rel, "size": os.path.getsize(path),
+                          "sha256": file_digest(path), "kind": "track",
+                          "url": f"{base_url}/api/registry/file?id={sid}"
+                                 f"&path={rel}"})
+    return {"ok": True, "server": {k: entry[k] for k in
+                                   ("id", "name", "description", "ip", "port")},
+            "files": files,
+            "total_bytes": sum(f["size"] for f in files),
+            "missing_locally": missing}
+
+
+def resolve(sid, rel):
+    """Map a manifest path back to a real file, refusing anything outside."""
+    entry = next((e for e in load() if e["id"] == sid), None)
+    if not entry:
+        return None
+    for mod in entry.get("required_mods", []):
+        for r, p in _mod_files(mod):
+            if r == rel:
+                return p
+    for trk in entry.get("required_tracks", []):
+        for r, p in _track_files(trk):
+            if r == rel:
+                return p
+    return None                      # not declared -> not served
+
+
+def public_list(base_url=""):
+    """What a player's sync tool fetches first."""
+    out = []
+    for e in load():
+        if not e.get("public", True):
+            continue
+        m = manifest(e["id"], base_url)
+        out.append({
+            "id": e["id"], "name": e["name"], "description": e.get("description", ""),
+            "ip": e.get("ip", ""), "port": e.get("port", 9700),
+            "join": f"join:{e.get('ip','')}:{e.get('port',9700)}",
+            "required_mods": e.get("required_mods", []),
+            "required_tracks": e.get("required_tracks", []),
+            "content_bytes": m.get("total_bytes", 0) if m.get("ok") else 0,
+            "manifest": f"{base_url}/api/registry/manifest?id={e['id']}",
+        })
+    return {"servers": out, "generated": int(time.time())}

@@ -1,0 +1,70 @@
+# Build ACECM.exe and attach it to a GitHub Release.
+#
+# The in-app updater reads the latest Release and looks for an asset named
+# exactly `ACECM.exe`, so that name matters. Tag a version to publish:
+#
+#     git tag v0.4.0 && git push origin v0.4.0
+#
+# ⚠ Windows runner only: the app uses ReadProcessMemory, PowerShell and the
+# Edge WebView2 runtime. There is nothing to cross-compile here.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:          # lets you build without tagging, to test
+
+permissions:
+  contents: write             # needed to create the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller protobuf numpy pywebview cryptography websockets capstone
+
+      - name: Check the version matches the tag
+        # A build whose reported version does not match its tag makes the
+        # updater loop: it downloads "0.4.0", still reports 0.3.0, and offers
+        # the same update forever.
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER=$(python -c "import re;print(re.search(r'VERSION = \"([^\"]+)\"', open('acecm/version.py').read()).group(1))")
+          echo "tag=$TAG  acecm/version.py=$VER"
+          if [ -n "$TAG" ] && [ "$TAG" != "$VER" ]; then
+            echo "::error::tag $TAG does not match VERSION $VER in acecm/version.py"
+            exit 1
+          fi
+
+      - name: Build
+        run: python build.py --clean
+
+      - name: Checksum
+        shell: bash
+        run: |
+          cd dist
+          sha256sum ACECM.exe | tee ACECM.exe.sha256
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/ACECM.exe
+            dist/ACECM.exe.sha256
+          generate_release_notes: true
+
+      - uses: actions/upload-artifact@v4
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        with:
+          name: ACECM-exe
+          path: dist/ACECM.exe

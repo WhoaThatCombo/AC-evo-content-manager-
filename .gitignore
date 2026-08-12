@@ -1,0 +1,35 @@
+# --- user data and machine-specific state -----------------------------------
+# Profiles, logs, runtime pids. Never someone else's business.
+data/
+config.json
+
+# ⚠ NEVER COMMIT THESE ---------------------------------------------------------
+# Protobuf descriptors are extracted from the user's OWN game binary at runtime
+# (see acecm/protos.py). They are derived from Kunos' executable, so they are
+# not ours to redistribute.
+**/protos/
+*.desc
+
+# TLS keys are generated per machine. A private key in a public repo is the
+# same key for every user, which is no security at all.
+**/certs/
+*.pem
+*.key
+
+# Game/server binaries and content. This project manages an install; it does
+# not ship one.
+*.kspkg
+AssettoCorsaEVOServer*.exe
+AssettoCorsaEVO.exe
+
+# --- build output -------------------------------------------------------------
+dist/
+build_tmp/
+*.spec
+__pycache__/
+*.pyc
+
+# --- scratch ------------------------------------------------------------------
+*.tmp
+*.bak
+*.log
