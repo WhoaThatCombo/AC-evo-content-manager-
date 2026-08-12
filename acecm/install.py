@@ -43,10 +43,15 @@ MODS = os.path.join(os.path.expanduser("~"), "Saved Games", "ACE-Server", "mods"
 CLIENT_MODS = os.path.join(os.path.expanduser("~"), "Saved Games", "ACE", "mods")
 
 
-def mods_dir():
+def mods_dir(create=False):
     from . import detect
-    return ((config.CFG.get("mods_dir") or "").strip()
-            or detect.find("server_mods") or MODS)
+    d = ((config.CFG.get("mods_dir") or "").strip()
+         or detect.find("server_mods") or MODS)
+    # ⚠ On a fresh machine this folder does not exist until the server has run
+    # once. Installing a mod is exactly when it should be created.
+    if create and d:
+        os.makedirs(d, exist_ok=True)
+    return d
 
 
 def client_mods_dir():

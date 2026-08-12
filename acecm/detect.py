@@ -190,9 +190,16 @@ def ace_dir():
 
 
 def ace_server_dir():
-    return _first_dir([os.path.join(saved_games(), "ACE-Server"),
-                       os.path.join(os.path.expanduser("~"), "Saved Games",
-                                    "ACE-Server")])
+    """Where the dedicated server keeps its own data.
+
+    ⚠ This folder does not exist until the server has run once, so "not found"
+    on a fresh install is normal rather than a fault. Return where it WILL be
+    so mods can be staged before the first run - callers create it on demand.
+    """
+    found = _first_dir([os.path.join(saved_games(), "ACE-Server"),
+                        os.path.join(os.path.expanduser("~"), "Saved Games",
+                                     "ACE-Server")])
+    return found or os.path.join(saved_games(), "ACE-Server")
 
 
 def client_mods():
@@ -203,6 +210,11 @@ def client_mods():
 def server_mods():
     d = ace_server_dir()
     return os.path.join(d, "mods") if d else ""
+
+
+def expected(what):
+    """Paths we are happy to create, versus ones that must already exist."""
+    return what in ("ace_server_dir", "server_mods", "client_mods")
 
 
 # ----------------------------------------------------------------- cache --
@@ -267,7 +279,12 @@ def all_paths(refresh=False):
     out, t0 = {}, time.perf_counter()
     for what in FINDERS:
         p = find(what, refresh)
-        out[what] = {"path": p, "exists": bool(p and os.path.exists(p)),
+        exists = bool(p and os.path.exists(p))
+        out[what] = {"path": p, "exists": exists,
+                     # A folder the server creates on first run is not an
+                     # error before that run - saying "missing" made a healthy
+                     # fresh install look broken.
+                     "pending": bool(p and not exists and expected(what)),
                      "source": "setting" if (config.CFG.get(what) or "").strip()
                                else "detected"}
     return {"paths": out,

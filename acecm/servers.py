@@ -257,6 +257,13 @@ def _watch_memory(pid, limit_gb=None):
             return
 
 
+# Ports claimed by a launch that has not finished starting yet: port -> when.
+# A dedicated server takes ~30 s to bind, and until it does, nothing on the
+# machine shows it as in use.
+_LAUNCHING = {}
+STARTUP_GRACE = float(os.environ.get("ACECM_STARTUP_GRACE", "45"))
+
+
 def port_busy(port):
     """Is anything already listening here?"""
     import socket
@@ -276,8 +283,39 @@ def start(profile):
     exhausted the pagefile and hung the whole machine (288 MB of log in eight
     minutes). One cheap check is worth more than any amount of cleanup.
     """
-    for label, port in (("game", profile.get("tcp_port", 9700)),
-                        ("HTTP", profile.get("http_port", 8080))):
+    tcp = profile.get("tcp_port", 9700)
+    http = profile.get("http_port", 8080)
+
+    # ⚠ A LISTENING check alone is not enough. The server needs ~30 s to bind,
+    # so a second Start click a few seconds later sails straight through and
+    # you get two servers on one port - exactly the runaway above. Seen in the
+    # wild on a fresh install: two launches on 9700/8080 seven seconds apart,
+    # because nothing looked like it was happening yet.
+    now = time.time()
+    for port in (tcp, http):
+        started = _LAUNCHING.get(port, 0)
+        if now - started < STARTUP_GRACE:
+            msg = (f"a server is already starting on port {port} "
+                   f"({int(now - started)}s ago) - give it up to "
+                   f"{STARTUP_GRACE:.0f}s to come up")
+            logs.LOG.error("refusing to start %r: %s", profile.get("name"), msg)
+            return {"ok": False, "error": msg}
+
+    # A different profile whose process is alive and which owns these ports.
+    rt = runtime()
+    live = _server_pids()
+    for other in load():
+        if other.get("id") == profile.get("id"):
+            continue
+        pid = (rt.get(other.get("id") or "") or {}).get("pid")
+        if pid and pid in live and (other.get("tcp_port") == tcp
+                                    or other.get("http_port") == http):
+            msg = (f"{other.get('name')!r} is already running on those ports "
+                   f"(pid {pid}) - stop it first")
+            logs.LOG.error("refusing to start %r: %s", profile.get("name"), msg)
+            return {"ok": False, "error": msg}
+
+    for label, port in (("game", tcp), ("HTTP", http)):
         if port_busy(port):
             msg = (f"{label} port {port} is already in use - stop whatever "
                    f"is on it first (a server left running on these ports "
@@ -285,6 +323,10 @@ def start(profile):
             logs.LOG.error("refusing to start %r: %s",
                            profile.get("name"), msg)
             return {"ok": False, "error": msg}
+
+    # Claim the ports BEFORE launching, so a second click within the startup
+    # window is refused even though nothing is listening yet.
+    _LAUNCHING[tcp] = _LAUNCHING[http] = now
     env = dict(os.environ)
     env.update({
         "SERVER_EXE": config.CFG["server_exe"],
@@ -378,6 +420,9 @@ def start(profile):
                                           "http_port": profile.get("http_port")}})
                 threading.Thread(target=_watch_memory, args=(pid,),
                                  daemon=True).start()
+                # It exists now, so the normal checks can take over.
+                _LAUNCHING.pop(profile.get("tcp_port", 9700), None)
+                _LAUNCHING.pop(profile.get("http_port", 8080), None)
                 return
     import threading
     threading.Thread(target=_capture, daemon=True).start()

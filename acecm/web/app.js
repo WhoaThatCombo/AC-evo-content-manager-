@@ -124,7 +124,29 @@ async function serversPage() {
     const row = el('div', 'row wrap');
     row.style.marginTop = '10px';
     const start = el('button', 'primary sm', 'Start');
-    start.onclick = async () => { await api('server/start', { id: prof.id }); toast('Starting…'); };
+    // ⚠ A dedicated server takes ~30 s to bind its ports. Without visible
+    // feedback people click Start again, and a second server on the same port
+    // spins retrying its sockets until it exhausts memory. Disable the button
+    // for the whole startup window and say what is happening.
+    start.onclick = async () => {
+      start.disabled = true;
+      const was = start.textContent;
+      let left = 30;
+      start.textContent = `starting… ${left}s`;
+      const tick = setInterval(() => {
+        left -= 1;
+        start.textContent = left > 0 ? `starting… ${left}s` : 'starting…';
+      }, 1000);
+      const r = await api('server/start', { id: prof.id });
+      if (!r.ok) {
+        clearInterval(tick);
+        start.disabled = false; start.textContent = was;
+        toast(r.error || 'Could not start', true);
+        return;
+      }
+      toast('Starting — this takes about 30 seconds');
+      setTimeout(() => { clearInterval(tick); serversPage(); }, 31000);
+    };
     const edit = el('button', 'sm', 'Edit');
     edit.onclick = () => { editing = { ...prof }; serversPage(); };
     const logs = el('button', 'sm', 'Logs');
@@ -496,8 +518,9 @@ async function settingsPage() {
       dlist.append(el('div', 'chk',
         `<span class="name">${esc(k)}`
         + `<div class="tiny dim">${esc(v.path || 'not found')}</div></span>`
-        + `<span class="pill ${v.exists ? 'on' : 'off'}">`
-        + `<i class="dot"></i>${v.exists ? v.source : 'missing'}</span>`));
+        + `<span class="pill ${v.exists ? 'on' : (v.pending ? '' : 'off')}">`
+        + `<i class="dot"></i>${v.exists ? v.source
+             : (v.pending ? 'created on first use' : 'missing')}</span>`));
     });
   }
   redo.onclick = () => showPaths(true);
