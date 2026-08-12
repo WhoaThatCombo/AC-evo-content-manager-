@@ -183,6 +183,59 @@ def server_dir():
     return _first_dir(cands, contains=lambda n: bool(SERVER_EXE_RE.match(n)))
 
 
+# Variants we must never pick automatically. `.percar` / `.test` are binaries
+# patched for virtual-AI cars, and we do not ship or default to AI bots;
+# `.bak*` are pre-patch backups.
+_PATCHED = re.compile(r"\.(percar|test|bak[^.]*)\.exe$|\.bak", re.I)
+
+
+def server_exe():
+    """The dedicated-server executable, by what is actually on disk.
+
+    ⚠ Do NOT assume a filename. A stock Steam install has exactly
+    `AssettoCorsaEVOServer.exe`; anything else is a copy someone made. Shipping
+    a default of `AssettoCorsaEVOServer.stock.exe` - a name that only existed
+    on the development machine - made a perfectly good install report
+    "Dedicated server executable not found".
+
+    ⚠ Uses the EFFECTIVE server folder, not a fresh detection. With both a
+    Steam install and a portable copy present, re-detecting here resolved the
+    exe from a different folder than everything else was using.
+    """
+    d = config.server_dir()
+    if not d:
+        return ""
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return ""
+    cands = [n for n in names
+             if SERVER_EXE_RE.match(n) and not _PATCHED.search(n)]
+    if not cands:
+        return ""
+    # Prefer the stock name, then a clean copy, then whatever is left.
+    for want in ("assettocorsaevoserver.exe", "assettocorsaevoserver.stock.exe"):
+        for n in cands:
+            if n.lower() == want:
+                return os.path.join(d, n)
+    return os.path.join(d, sorted(cands)[0])
+
+
+def server_candidates():
+    """Every server executable in the server folder, for diagnostics.
+
+    When the exe cannot be resolved, saying WHAT is there turns "not found"
+    into something the user can act on.
+    """
+    d = config.server_dir()
+    if not d:
+        return []
+    try:
+        return sorted(n for n in os.listdir(d) if SERVER_EXE_RE.match(n))
+    except OSError:
+        return []
+
+
 def ace_dir():
     """Where the client keeps settings and mods."""
     return _first_dir([os.path.join(saved_games(), "ACE"),
@@ -222,6 +275,7 @@ FINDERS = {
     "game_dir": game_dir,
     "game_exe": game_exe,
     "server_dir": server_dir,
+    "server_exe": server_exe,
     "ace_dir": ace_dir,
     "ace_server_dir": ace_server_dir,
     "client_mods": client_mods,

@@ -268,7 +268,10 @@ class Handler(BaseHTTPRequestHandler):
             "running": any(servers.status(p)["running"] for p in profs[:1]),
             "backend": backend.state(),
             "server_dir": config.server_dir(),
-            "server_exe_ok": os.path.exists(config.server_exe()),
+            "server_exe_ok": bool(config.server_exe())
+                             and os.path.exists(config.server_exe()),
+            "server_exe": config.server_exe(),
+            "server_exe_found": detect.server_candidates(),
             "tools_ok": os.path.isdir(config.tools_dir()),
         }
 
