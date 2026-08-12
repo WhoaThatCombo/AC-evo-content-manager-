@@ -1,5 +1,7 @@
 # Assetto Corsa EVO Content Manager
 
+WARNING THIS IS CURRENTLY FOR TESTING PURPOSES AND IS VERY UNFINISHED
+
 A desktop app for hosting modded AC EVO multiplayer: content, server profiles,
 live telemetry, and the self-hosted lobby that makes joining possible at all.
 
