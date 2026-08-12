@@ -43,7 +43,11 @@ DEFAULTS = {
     # patched for virtual-AI cars; we deliberately do not ship AI bots, so the
     # unpatched server is what a build runs. (That patched copy also carried
     # the chat-logging patch - see notes if you want that back on a stock base.)
-    "server_exe": "AssettoCorsaEVOServer.stock.exe",
+    # ⚠ Leave EMPTY. A stock install has exactly AssettoCorsaEVOServer.exe;
+    # any other name is a copy someone made. Defaulting to a name that only
+    # existed on the development machine made real installs report the
+    # executable as missing. Set this only to force a specific binary.
+    "server_exe": "",
     # our own lobby backend + client patches; empty = use the bundled copy
     "tools_dir": "",
     # game client (for direct launch); empty = auto-detect via Steam
@@ -71,9 +75,22 @@ DEFAULTS = {
 }
 
 
+def config_path():
+    """Where settings live.
+
+    ⚠ Normally beside the data folder's parent, but when ACECM_DATA is set
+    explicitly the config follows it - otherwise "run with a clean data dir"
+    silently keeps the old settings, which made a fresh-install test look like
+    it passed when it had not.
+    """
+    if os.environ.get("ACECM_DATA"):
+        return os.path.join(DATA, "config.json")
+    return os.path.join(ROOT, "config.json")
+
+
 def _load():
     cfg = dict(DEFAULTS)
-    path = os.path.join(ROOT, "config.json")
+    path = config_path()
     if os.path.exists(path):
         try:
             cfg.update(json.load(open(path, encoding="utf-8")))
@@ -89,7 +106,7 @@ def save(patch):
     """Persist a settings change (only keys we know about)."""
     cfg = _load()
     cfg.update({k: v for k, v in patch.items() if k in DEFAULTS})
-    path = os.path.join(ROOT, "config.json")
+    path = config_path()
     json.dump(cfg, open(path, "w", encoding="utf-8"), indent=2)
     CFG.update(cfg)
     return cfg
@@ -115,7 +132,13 @@ def server_dir():
 
 
 def server_exe():
-    return os.path.join(server_dir(), CFG["server_exe"])
+    """Full path to the dedicated-server executable."""
+    from . import detect
+    name = (CFG.get("server_exe") or "").strip()
+    if name:
+        # An explicit setting may be a bare filename or a full path.
+        return name if os.path.isabs(name) else os.path.join(server_dir(), name)
+    return detect.find("server_exe")
 
 
 def tools_dir():

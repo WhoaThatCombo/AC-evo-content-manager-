@@ -32,10 +32,20 @@ async function dashboard() {
   const p = $('#page');
   p.innerHTML = '';
 
-  if (!s.server_exe_ok)
+  if (!s.server_exe_ok) {
+    // Say what WAS found - "not found" alone gives the user nothing to act on.
+    const found = s.server_exe_found || [];
     p.append(el('div', 'err',
-      'Dedicated server executable not found. Set <b>server_dir</b> / '
-      + '<b>server_exe</b> in Settings.'));
+      '<b>Dedicated server executable not found.</b><br>'
+      + (s.server_dir
+         ? 'Looked in <code>' + esc(s.server_dir) + '</code>'
+         : 'No dedicated-server folder was detected.')
+      + (found.length
+         ? '<br>Found there: ' + found.map(f => '<code>' + esc(f) + '</code>').join(', ')
+           + '<br>Set <b>server_exe</b> in Settings to the one to use.'
+         : '<br>Install the AC EVO Dedicated Server, or set <b>server_dir</b> '
+           + 'in Settings to where it lives.')));
+  }
 
   const g = el('div', 'grid g3');
   const tiles = [
