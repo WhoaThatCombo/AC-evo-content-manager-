@@ -14,7 +14,8 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-from . import (backend, config, content, hooking, install, logs, patching, version,
+from . import (backend, config, content, detect, hooking, install, logs,
+               patching, version,
                registry, servers, settings as gamesettings,
                telemetry, tracks as trackdeploy)
 
@@ -110,6 +111,9 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, backend.state())
             if path == "/api/telemetry":
                 return _json(self, telemetry.cars((q.get("id") or [None])[0]))
+            if path == "/api/detect":
+                return _json(self, detect.all_paths(
+                    (q.get("refresh") or ["0"])[0] == "1"))
             if path == "/api/version":
                 return _json(self, {"name": version.NAME,
                                     "version": version.VERSION,

@@ -469,6 +469,40 @@ async function settingsPage() {
   const save = el('button', 'primary', 'Save settings');
   save.onclick = async () => { await api('config', draft); toast('Saved — restart ACECM to apply ports'); };
 
+  // ---- detected locations -----------------------------------------------
+  const dc = el('div', 'card');
+  dc.innerHTML = '<h2>Detected locations</h2>'
+    + '<div class="tiny dim">Found from Steam&rsquo;s own library list and '
+    + 'Windows known folders, so extra drives and a relocated '
+    + '&ldquo;Saved Games&rdquo; are handled. Leave the matching setting above '
+    + 'blank to use detection; anything you type there wins.</div>';
+  const drow = el('div', 'row wrap');
+  drow.style.margin = '10px 0';
+  const redo = el('button', 'sm primary', 'Re-detect');
+  const dnote = el('span', 'tiny dim');
+  drow.append(redo, dnote);
+  const dlist = el('div');
+  dc.append(drow, dlist);
+  p.append(dc);
+
+  async function showPaths(refresh) {
+    dnote.textContent = refresh ? 'scanning…' : '';
+    const r = await api('detect' + (refresh ? '?refresh=1' : ''));
+    dnote.textContent = `${r.took_ms} ms · steam: ${r.steam || 'not found'}`
+      + ` · ${(r.libraries || []).length} librar`
+      + ((r.libraries || []).length === 1 ? 'y' : 'ies');
+    dlist.innerHTML = '';
+    Object.entries(r.paths || {}).forEach(([k, v]) => {
+      dlist.append(el('div', 'chk',
+        `<span class="name">${esc(k)}`
+        + `<div class="tiny dim">${esc(v.path || 'not found')}</div></span>`
+        + `<span class="pill ${v.exists ? 'on' : 'off'}">`
+        + `<i class="dot"></i>${v.exists ? v.source : 'missing'}</span>`));
+    });
+  }
+  redo.onclick = () => showPaths(true);
+  showPaths(false);
+
   // ---- updates ----------------------------------------------------------
   const uc = el('div', 'card');
   uc.innerHTML = '<h2>Updates</h2>'

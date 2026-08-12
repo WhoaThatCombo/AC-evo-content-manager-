@@ -70,7 +70,14 @@ def _proto():
 
 
 def settings_dir():
-    return config.CFG.get("ace_dir") or ACE_DIR
+    """Where the client keeps its settings.
+
+    ⚠ Not necessarily under the user profile - Windows lets "Saved Games" be
+    relocated, so this is detected via the known-folder API rather than built
+    from %USERPROFILE%.
+    """
+    from . import detect
+    return (config.CFG.get("ace_dir") or "").strip() or detect.find("ace_dir")         or ACE_DIR
 
 
 def message_for(path):
