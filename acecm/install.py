@@ -32,6 +32,9 @@ import zipfile
 
 from . import config
 
+# Fallbacks only. The real locations are detected - "Saved Games" is a known
+# folder and can be relocated, so building these paths by hand quietly points
+# at nothing on a machine that moved it.
 MODS = os.path.join(os.path.expanduser("~"), "Saved Games", "ACE-Server", "mods")
 # The CLIENT keeps its mods somewhere else entirely. Both sides need the same
 # .kspkg + .json pair, and they drift apart easily: a car present on the server
@@ -41,11 +44,15 @@ CLIENT_MODS = os.path.join(os.path.expanduser("~"), "Saved Games", "ACE", "mods"
 
 
 def mods_dir():
-    return config.CFG.get("mods_dir") or MODS
+    from . import detect
+    return ((config.CFG.get("mods_dir") or "").strip()
+            or detect.find("server_mods") or MODS)
 
 
 def client_mods_dir():
-    return config.CFG.get("client_mods_dir") or CLIENT_MODS
+    from . import detect
+    return ((config.CFG.get("client_mods_dir") or "").strip()
+            or detect.find("client_mods") or CLIENT_MODS)
 
 
 def _size(path):

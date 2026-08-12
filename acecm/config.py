@@ -47,7 +47,12 @@ DEFAULTS = {
     # our own lobby backend + client patches; empty = use the bundled copy
     "tools_dir": "",
     # game client (for direct launch); empty = auto-detect via Steam
+    # Leave these EMPTY to auto-detect (Steam libraries + known folders).
+    # Anything set here wins over detection.
     "game_exe": "",
+    "ace_dir": "",
+    "mods_dir": "",
+    "client_mods_dir": "",
     "steam_appid": "3058630",
     # Where to look for new builds. update_repo is a GitHub "owner/name" and
     # is checked against that project's latest Release; update_url is the
@@ -91,26 +96,13 @@ def save(patch):
 
 
 def find_server_dir():
-    """Locate a dedicated-server install without being told where it is.
+    """Locate a dedicated-server install.
 
-    A shipped build cannot assume anyone's folder layout, so look in the
-    obvious places and accept the first that actually holds a server exe.
+    ⚠ Imported lazily: acecm.detect imports this module, so a top-level import
+    here would be circular.
     """
-    home = os.path.expanduser("~")
-    guesses = [
-        os.path.join(home, "Downloads", "ACE_server_portable"),
-        os.path.join(home, "Downloads", "AssettoCorsaEVOServer"),
-        r"C:\ACE_server", r"C:\AssettoCorsaEVOServer",
-    ]
-    for drive in "CDEFG":
-        guesses.append(rf"{drive}:\SteamLibrary\steamapps\common"
-                       r"\Assetto Corsa EVO Dedicated Server")
-    for g in guesses:
-        if os.path.isdir(g) and any(f.lower().startswith("assettocorsaevoserver")
-                                    and f.lower().endswith(".exe")
-                                    for f in os.listdir(g)):
-            return g
-    return ""
+    from . import detect
+    return detect.find("server_dir")
 
 
 def server_dir():

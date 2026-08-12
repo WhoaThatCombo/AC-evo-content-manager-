@@ -40,15 +40,11 @@ def cache_dir():
 
 def _sources():
     """Executables worth scanning, best first."""
+    from . import detect
     out = []
-    game = config.CFG.get("game_exe") or ""
+    game = (config.CFG.get("game_exe") or "").strip() or detect.find("game_exe")
     if game and os.path.isfile(game):
         out.append(game)
-    for base in (r"C:\Program Files (x86)\Steam\steamapps\common\Assetto Corsa EVO",
-                 r"C:\Program Files\Steam\steamapps\common\Assetto Corsa EVO"):
-        p = os.path.join(base, "AssettoCorsaEVO.exe")
-        if os.path.isfile(p) and p not in out:
-            out.append(p)
     srv = config.server_exe()
     if srv and os.path.isfile(srv):
         out.append(srv)
