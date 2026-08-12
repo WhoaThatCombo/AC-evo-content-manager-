@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler
 from . import (backend, config, content, detect, hooking, install, logs,
                patching, version,
                registry, servers, settings as gamesettings,
-               telemetry, tracks as trackdeploy)
+               telemetry, tracks as trackdeploy, viewer)
 
 
 def _json(handler, obj, code=200):
@@ -45,6 +45,18 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, self._state())
             if path == "/api/cars":
                 return _json(self, content.cars())
+            # 3D viewer: which cars can be shown, and how a pending
+            # extraction is getting on
+            if path == "/api/viewer/cars":
+                return _json(self, viewer.index(
+                    (q.get("refresh") or [""])[0] == "1"))
+            if path == "/api/viewer/job":
+                return _json(self, viewer.job((q.get("id") or [""])[0]))
+            if path == "/api/viewer/status":
+                return _json(self, {
+                    "exe": viewer.viewer_exe(),
+                    "package": viewer.package(),
+                })
             if path == "/api/models":
                 return _json(self, content.models_seen())
             if path == "/api/mods":
@@ -160,6 +172,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             body = {}
         try:
+            if path == "/api/viewer/open":
+                return _json(self, viewer.start_open(
+                    body.get("id") or "", body.get("paint") or ""))
             if path == "/api/profiles/save":
                 return _json(self, servers.upsert(body))
             if path == "/api/profiles/delete":

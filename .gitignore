@@ -33,3 +33,5 @@ __pycache__/
 *.tmp
 *.bak
 *.log
+tools/evoview.exe
+verify_out/

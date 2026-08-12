@@ -47,6 +47,8 @@ SOURCES = {
         "acevo_proto.py", "dump_protos.py",
     ],
     HERE: ["acecm_sync.py"],
+    # the Vulkan car viewer, built separately with cargo
+    os.path.join(_DL, "evoview", "target", "release"): ["evoview.exe"],
 }
 
 
@@ -73,6 +75,14 @@ def stage_tools():
                 missing.append(n)
     have = len([f for f in os.listdir(TOOLS) if f.endswith((".py", ".sh"))])
     print(f"tools/: {have} helper script(s) ({updated} refreshed from dev copies)")
+    # ⚠ The viewer is a real dependency of the Cars page, not an optional
+    # extra: without it the picker can list cars but not open any of them.
+    viewer = os.path.join(TOOLS, "evoview.exe")
+    if os.path.isfile(viewer):
+        print(f"  viewer: evoview.exe ({os.path.getsize(viewer)/1e6:.1f} MB)")
+    else:
+        print("  ! evoview.exe missing - the 3D viewer will not work in this "
+              "build (cargo build --release in the evoview checkout)")
     for m in missing:
         print(f"  ! missing entirely: {m}")
     return have, missing
