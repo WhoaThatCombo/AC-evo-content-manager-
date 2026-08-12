@@ -92,6 +92,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/gamesettings":
                 return _json(self, {**gamesettings.state(),
                                     **gamesettings.discover()})
+            if path == "/api/gamesettings/export":
+                only = [x for x in (q.get("file") or []) if x]
+                return _json(self, gamesettings.export_bundle(only or None))
+            if path == "/api/gamesettings/backups":
+                return _json(self, gamesettings.backups(
+                    (q.get("file") or [""])[0]))
             if path == "/api/gamesettings/read":
                 return _json(self, gamesettings.read(
                     (q.get("file") or [""])[0]))
@@ -226,6 +232,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/update/apply":
                 return _json(self, version.apply(body.get("url"),
                                                  body.get("sha256")))
+            if path == "/api/gamesettings/import":
+                return _json(self, gamesettings.import_bundle(
+                    body.get("bundle") or {}, body.get("only"),
+                    bool(body.get("include_devices"))))
+            if path == "/api/gamesettings/restore_backup":
+                return _json(self, gamesettings.restore_backup(
+                    body.get("file"), body.get("name")))
             if path == "/api/backend/start":
                 return _json(self, backend.start(body.get("mode", "proxy")))
             if path == "/api/backend/stop":

@@ -125,9 +125,13 @@ def read(rel):
         "ok": True, "file": rel, "message": msg_name,
         # preserving_proto_field_name keeps snake_case, which matches what the
         # schemas and the game's own logs use - easier to correlate.
-        "values": json_format.MessageToDict(obj,
-                                           preserving_proto_field_name=True,
-                                           always_print_fields_with_no_presence=True),
+        # ⚠ descriptor_pool matters: some settings embed an Any (e.g. a
+        # TimeAttack.Specialization), and without our pool json_format cannot
+        # resolve the type_url and raises instead of decoding.
+        "values": json_format.MessageToDict(
+            obj, preserving_proto_field_name=True,
+            always_print_fields_with_no_presence=True,
+            descriptor_pool=protolib._pool()[0]),
     }
 
 
@@ -161,6 +165,115 @@ def write(rel, values):
         fh.write(blob)
     return {"ok": True, "file": rel, "bytes": len(blob),
             "backup": os.path.basename(bak), "history": os.path.basename(hist)}
+
+
+BUNDLE_KIND = "acecm.gamesettings"
+
+
+def export_bundle(files=None):
+    """Decoded settings, as one shareable JSON document.
+
+    Values, not bytes: a raw settings file is opaque, tied to the exact schema
+    of one build, and impossible to review before applying. Decoded JSON can be
+    read, diffed and edited by hand, and re-encoded against whatever schema the
+    receiving machine actually has.
+
+    ⚠ Bindings reference DEVICES. A wheel someone else does not own will not
+    map onto their hardware, so device configuration is exported but flagged,
+    and the importer skips those files unless asked for them explicitly.
+    """
+    from . import version
+    picked, skipped = {}, {}
+    for info in discover().get("files", []):
+        rel = info["file"]
+        if files and rel not in files:
+            continue
+        if not info.get("decodable"):
+            if files:
+                skipped[rel] = "no schema for this file"
+            continue
+        try:
+            r = read(rel)
+        except Exception as ex:
+            # Export is a bulk operation over 1000+ files; one that cannot be
+            # decoded is a note in the bundle, not a failed backup.
+            skipped[rel] = f"{type(ex).__name__}: {ex}"
+            continue
+        if r.get("ok"):
+            picked[rel] = {"message": r["message"], "values": r["values"]}
+        else:
+            skipped[rel] = r.get("error", "could not read")
+    return {
+        "kind": BUNDLE_KIND, "bundle_version": 1,
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "acecm": version.VERSION,
+        "files": picked,
+        "skipped": skipped,
+        "note": "device bindings only make sense on identical hardware",
+    }
+
+
+def _is_device_file(rel):
+    low = rel.lower()
+    return "device" in low or "input_devices" in low
+
+
+def import_bundle(bundle, only=None, include_devices=False):
+    """Apply a bundle produced by export_bundle. Every file is backed up first."""
+    if not isinstance(bundle, dict) or bundle.get("kind") != BUNDLE_KIND:
+        return {"ok": False,
+                "error": "that is not an ACECM game-settings bundle"}
+    if _game_running():
+        return {"ok": False, "error":
+                "close the game first - it rewrites these files on exit and "
+                "would overwrite whatever we import"}
+    applied, failed, skipped = [], {}, {}
+    for rel, entry in (bundle.get("files") or {}).items():
+        if only and rel not in only:
+            continue
+        if _is_device_file(rel) and not include_devices:
+            skipped[rel] = ("device bindings are tied to specific hardware - "
+                            "tick 'include device bindings' to apply anyway")
+            continue
+        # ⚠ Re-encode against THIS machine's schema rather than trusting the
+        # sender's. If a field no longer exists here, that is a clear error on
+        # one file instead of a corrupt settings file.
+        r = write(rel, entry.get("values") or {})
+        if r.get("ok"):
+            applied.append(rel)
+        else:
+            failed[rel] = r.get("error")
+    return {"ok": not failed, "applied": applied, "failed": failed,
+            "skipped": skipped}
+
+
+def backups(rel):
+    """Every timestamped copy we have taken of one settings file."""
+    path = os.path.join(settings_dir(), rel.replace("/", os.sep))
+    d, base = os.path.dirname(path), os.path.basename(path)
+    out = []
+    if os.path.isdir(d):
+        for f in sorted(os.listdir(d), reverse=True):
+            if f.startswith(base + ".") and f.endswith((".bak", ".bak_acecm")):
+                p = os.path.join(d, f)
+                out.append({"name": f, "size": os.path.getsize(p),
+                            "mtime": int(os.path.getmtime(p))})
+    return {"ok": True, "file": rel, "backups": out}
+
+
+def restore_backup(rel, name):
+    """Put a specific timestamped backup back."""
+    path = os.path.join(settings_dir(), rel.replace("/", os.sep))
+    src = os.path.join(os.path.dirname(path), os.path.basename(name))
+    if not os.path.isfile(src):
+        return {"ok": False, "error": "no such backup"}
+    if _game_running():
+        return {"ok": False, "error": "close the game first"}
+    # keep the current state too, so restoring is itself undoable
+    if os.path.exists(path):
+        shutil.copy2(path, f"{path}.{time.strftime('%Y%m%d-%H%M%S')}.bak")
+    shutil.copy2(src, path)
+    return {"ok": True, "restored": rel, "from": os.path.basename(src)}
 
 
 def restore(rel):
