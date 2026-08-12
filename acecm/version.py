@@ -20,9 +20,9 @@ import sys
 import urllib.error
 import urllib.request
 
-from . import config
+from . import config, logs
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 NAME = "Assetto Corsa EVO Content Manager"
 
 
@@ -113,6 +113,47 @@ def check():
                 "error": f"{type(ex).__name__}: {ex}"}
 
 
+def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True):
+    """The script that replaces a running exe once it exits.
+
+    Split out so it can be tested without downloading anything - the swap is
+    the one part of updating that cannot be exercised in normal use.
+    """
+    bat = bat or os.path.join(config.DATA, "_update.bat")
+    blog = blog or os.path.join(config.DATA, "_update.log")
+    with open(bat, "w", encoding="utf-8") as f:
+        f.write(
+            "@echo off\r\n"
+            # ⚠ Delayed expansion is required: %VAR% inside a parenthesised
+            # block is expanded when the block is PARSED, so a retry counter
+            # written that way never changes and the loop never ends.
+            "setlocal enabledelayedexpansion\r\n"
+            f'set LOG="{blog}"\r\n'
+            f'echo [%date% %time%] waiting for pid {pid} > %LOG%\r\n'
+            "rem Wait for ACECM to exit - Windows will not let a running exe be\r\n"
+            "rem replaced. ⚠ Use ping, not timeout: timeout needs a console and\r\n"
+            "rem fails outright in a windowless process.\r\n"
+            ":wait\r\n"
+            f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n'
+            "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)\r\n"
+            "rem the file can stay locked for a moment after the process goes\r\n"
+            "ping -n 3 127.0.0.1 >nul\r\n"
+            "set TRIES=0\r\n"
+            ":swap\r\n"
+            f'move /y "{exe}" "{exe}.old" >>%LOG% 2>&1\r\n'
+            "if errorlevel 1 (\r\n"
+            "  set /a TRIES+=1\r\n"
+            "  if !TRIES! lss 10 (ping -n 2 127.0.0.1 >nul & goto swap)\r\n"
+            "  echo could not replace the exe - it is still locked >>%LOG%\r\n"
+            "  exit /b 1\r\n"
+            ")\r\n"
+            f'move /y "{new}" "{exe}" >>%LOG% 2>&1\r\n'
+            'echo swapped ok >>%LOG%\r\n'
+            + (f'start "" "{exe}"\r\n' if relaunch else "")
+            + 'del "%~f0"\r\n')
+    return bat, blog
+
+
 def apply(url=None, sha256=None):
     """Download a new build and schedule the swap on exit."""
     if not config.FROZEN:
@@ -152,19 +193,19 @@ def apply(url=None, sha256=None):
                 "error": f"checksum mismatch (got {got[:12]}, "
                          f"expected {sha256[:12]})"}
 
-    bat = os.path.join(config.DATA, "_update.bat")
-    with open(bat, "w", encoding="utf-8") as f:
-        f.write(
-            "@echo off\r\n"
-            "rem wait for ACECM to exit before touching its own exe\r\n"
-            ":wait\r\n"
-            f'tasklist /fi "PID eq {os.getpid()}" | find "{os.getpid()}" >nul\r\n'
-            "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n"
-            f'move /y "{exe}" "{exe}.old" >nul\r\n'
-            f'move /y "{new}" "{exe}" >nul\r\n'
-            f'start "" "{exe}"\r\n'
-            'del "%~f0"\r\n')
-    subprocess.Popen(["cmd", "/c", bat], creationflags=0x00000008)  # DETACHED
-    return {"ok": True, "version": info.get("latest"),
+    bat, blog = _write_swap_script(exe, new, os.getpid())
+    # ⚠ CREATE_NO_WINDOW, not DETACHED_PROCESS. Detached leaves the batch with
+    # no console at all, and the commands it needs (timeout, and reliable
+    # redirection) fail outright there - the first version scheduled a swap
+    # that silently never happened. CREATE_NEW_PROCESS_GROUP keeps it alive
+    # when this process and its group go away.
+    CREATE_NO_WINDOW = 0x08000000
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+    subprocess.Popen(["cmd", "/c", bat],
+                     creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                     close_fds=True, cwd=config.DATA)
+    logs.LOG.info("update to %s downloaded and verified; swap scheduled (%s)",
+                  info.get("latest"), blog)
+    return {"ok": True, "version": info.get("latest"), "log": blog,
             "note": "downloaded and verified; close ACECM to finish the update "
                     "- it will relaunch itself"}
