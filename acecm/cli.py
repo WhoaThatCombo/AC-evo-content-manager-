@@ -55,6 +55,26 @@ def _run_tool(name, argv):
 def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--tool":
         raise SystemExit(_run_tool(sys.argv[2], sys.argv[3:]))
+
+    # Put a downloaded exe somewhere permanent, with a shortcut, so it never
+    # has to be found again. Runs and exits - it is a setup step, not the app.
+    if "--install" in sys.argv or "--uninstall" in sys.argv:
+        from . import installer
+        if "--uninstall" in sys.argv:
+            r = installer.uninstall(remove_exe="--purge" in sys.argv)
+            for f in r.get("removed", []):
+                print(f"removed {f}")
+            print(f"your settings and profiles are untouched: {r['data_kept']}")
+            raise SystemExit(0 if r.get("ok") else 1)
+        r = installer.install(desktop="--no-desktop" not in sys.argv)
+        if not r.get("ok"):
+            print(f"install failed: {r.get('error')}")
+            raise SystemExit(1)
+        print(f"installed to {r['exe']}")
+        for s in r.get("shortcuts", []):
+            print(f"  shortcut: {s}")
+        print("launch it from the Start Menu from now on")
+        raise SystemExit(0)
     # A native window is the default, but this is also a server tool - it has
     # to be runnable on a box with no desktop at all.
     mode = "window"

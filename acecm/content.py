@@ -48,23 +48,67 @@ def cars():
         raw = json.load(open(path, encoding="utf-8"))["cars"]
     except Exception as ex:
         return {"error": f"cannot read cars.json: {ex}", "cars": []}
-    # A mod's own .json declares display_name for the preset ids it ships, so
-    # installed manifests are the one truthful source of real names for the
-    # preset_<code> scheme. Kunos presets are not covered by any file we have.
+    # A mod's own .json declares display_name for the preset ids it ships.
+    # Kunos presets are bound to a model folder via *.mechanicalcarpreset /
+    # *.carfinalstate paths inside content.kspkg — see carsmap.py.
     declared = {}
     try:
         declared = install.car_names()
     except Exception:
         pass
+    try:
+        from . import carsmap
+        cmap = carsmap.table()
+        presets = cmap.get("presets") or {}
+    except Exception:
+        presets = {}
+    # ⚠ carsmap is built from the BASE archive, so a mod's presets are never in
+    # it and every modded car came back with no model at all. That is the one
+    # group where it matters most: no model means no thumbnail, and mods are
+    # exactly the cars someone picks by sight. Fall back to the ids the viewer
+    # found inside the mod packages themselves.
+    # ⚠ NOT called `known` - the mod loop below already uses that name for the
+    # ids it has emitted, and shadowing it there would be a silent mess.
+    viewer_ids = set()
+    try:
+        from . import viewer
+        viewer_ids = {c["id"] for c in viewer.index().get("cars", [])}
+    except Exception:
+        pass
+
+    def guess_model(name):
+        """The model folder a preset belongs to, when carsmap cannot say.
+
+        preset_mazda_rx_s_mech_1 -> ks_mazda_rx_s. Only ids the viewer actually
+        found are returned, so this can name a model that does not exist.
+        """
+        if name in viewer_ids:
+            return name
+        code = re.sub(r"^preset_|_mech_\d+$", "", name)
+        for cand in (f"ks_{code}", code):
+            if cand in viewer_ids:
+                return cand
+        hits = [k for k in viewer_ids if code and code in k]
+        return hits[0] if len(hits) == 1 else ""
+
     out = []
     for c in raw:
         name = c.get("name", "")
         is_kunos = bool(MECH.match(name))
+        model = (presets.get(name) or presets.get(name.lower())
+                 or guess_model(name))
+        if name in declared:
+            label = declared[name]
+        elif model:
+            label = _pretty(model)
+        else:
+            label = _pretty(name)
         out.append({
             "id": name,
-            "label": declared.get(name) or _pretty(name),
-            "named": name in declared,
-            "brand": (_pretty(name).split(" ") or [""])[0],
+            "model": model,
+            "label": label,
+            "named": name in declared or bool(model),
+            "brand": (label.split(" ") or [""])[0],
             "kunos": is_kunos,
             # a mod is anything the server's own package cannot resolve; letting
             # a player pick one is a broken join, so the UI flags it loudly
@@ -76,7 +120,14 @@ def cars():
     known = {c["id"] for c in out}
     for cid, label in declared.items():
         if cid not in known:
-            out.append({"id": cid, "label": label, "brand": label.split(" ")[0],
+            # ⚠ Same fallback as above. Cars declared by a mod's own manifest
+            # are appended HERE, not in the loop over cars.json - so fixing the
+            # model only up there left every modded car without one, which is
+            # precisely the group that needs a picture.
+            model = (presets.get(cid) or presets.get(cid.lower())
+                     or guess_model(cid))
+            out.append({"id": cid, "model": model, "label": label,
+                        "brand": label.split(" ")[0],
                         "kunos": False, "mod": True, "named": True,
                         "from_mod": True})
     out.sort(key=lambda c: (not c["kunos"], c["label"]))

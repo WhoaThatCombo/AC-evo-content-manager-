@@ -110,10 +110,16 @@ def build(clean=False):
         # the entry script top-level, where relative imports fail.
         os.path.join(HERE, "launcher.py"),
     ]
-    # protobuf and numpy both need help being found inside a frozen build
+    # protobuf and numpy both need help being found inside a frozen build.
+    # ⚠ texture2ddecoder and PIL are imported INSIDE a function (so a missing
+    # decoder degrades to "no cover" instead of breaking the app), and a lazy
+    # import is invisible to PyInstaller's scanner. Without these two named
+    # here the frozen build silently ships four track covers instead of
+    # nineteen, and nothing in the log says why.
     for mod in ("google.protobuf", "numpy", "capstone", "acecm", "acecm.cli",
             "webview", "webview.platforms.edgechromium", "clr_loader",
-            "pythonnet", "cryptography", "websockets"):
+            "pythonnet", "cryptography", "websockets",
+            "texture2ddecoder", "PIL", "PIL.Image"):
         args += ["--hidden-import", mod]
     if clean:
         args.append("--clean")

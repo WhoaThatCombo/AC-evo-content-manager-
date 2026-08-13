@@ -178,6 +178,108 @@ def apply_fix(name):
     return {"ok": True, "copied": fix["dst"], "what": fix["what"]}
 
 
+def _copy_file(src, dst, force=False):
+    """Copy one file. Skip if dest exists and matches, unless force."""
+    if not os.path.isfile(src):
+        return "missing"
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    if os.path.isfile(dst) and not force:
+        if _size(src) == _size(dst):
+            return "same"
+        return "differs"
+    shutil.copy2(src, dst)
+    return "copied"
+
+
+def sync(direction="to_server", force=False, names=None):
+    """Make client and server mod folders agree.
+
+    direction:
+      to_server  copy complete client pairs onto the dedicated server
+      to_client  copy complete server pairs onto the game client
+      both       fill gaps both ways; never overwrite a different-sized
+                 file unless force=True
+
+    A join needs the same <mod>.kspkg + <mod>.json on both sides. After
+    the copy we refresh lobby.json so the DRIVE list includes the new ids.
+    """
+    direction = (direction or "to_server").strip().lower()
+    if direction not in ("to_server", "to_client", "both"):
+        return {"ok": False, "error": f"unknown direction {direction}"}
+    srv = mods_dir(create=True)
+    cli = client_mods_dir()
+    if not cli:
+        return {"ok": False, "error": "client mods folder not found"}
+    os.makedirs(cli, exist_ok=True)
+
+    au = audit()
+    wanted = names or [r["name"] for r in au["mods"]]
+    copied, skipped, errors = [], [], []
+
+    def one(name, src_dir, dst_dir, label):
+        for ext in (".kspkg", ".json"):
+            src, dst = os.path.join(src_dir, name + ext), os.path.join(dst_dir, name + ext)
+            if not os.path.isfile(src):
+                continue
+            try:
+                st = _copy_file(src, dst, force=force)
+            except OSError as ex:
+                errors.append(f"{name}{ext}: {ex}")
+                continue
+            rec = f"{label}:{name}{ext}"
+            if st == "copied":
+                copied.append(rec)
+            else:
+                skipped.append({"file": rec, "why": st})
+
+    for name in wanted:
+        row = next((r for r in au["mods"] if r["name"] == name), None)
+        if direction in ("to_server", "both"):
+            one(name, cli, srv, "->server")
+        if direction in ("to_client", "both"):
+            one(name, srv, cli, "->client")
+        if row is None and direction != "both":
+            # audit only lists names present on at least one side; a
+            # brand-new pair on the source is already covered.
+            pass
+
+    lobby_info = None
+    try:
+        lobby_info = _refresh_lobby()
+    except Exception as ex:
+        errors.append(f"lobby refresh: {ex}")
+
+    again = audit()
+    return {
+        "ok": not errors,
+        "direction": direction,
+        "copied": copied,
+        "skipped": skipped,
+        "errors": errors,
+        "server_dir": srv,
+        "client_dir": cli,
+        "problems_before": au.get("problems"),
+        "problems_after": again.get("problems"),
+        "lobby": lobby_info,
+    }
+
+
+def _refresh_lobby():
+    """Rebuild the advertised car list from whatever profile we last used."""
+    from . import lobby, servers
+    items = servers.load()
+    current = lobby.read()
+    chosen = None
+    if current.get("server_id"):
+        chosen = next((p for p in items if p.get("id") == current["server_id"]),
+                      None)
+    if chosen is None and items:
+        chosen = items[0]
+    if chosen is None:
+        return lobby.write({})
+    return lobby.write(chosen)
+
+
 def car_names():
     """preset_<code>_mech_<n> -> display name, from installed mod manifests.
 

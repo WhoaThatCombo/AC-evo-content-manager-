@@ -295,16 +295,8 @@ def restore(rel):
 
 
 def _game_running():
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command",
-             "(Get-Process -Name 'AssettoCorsaEVO' -ErrorAction SilentlyContinue "
-             "| Measure-Object).Count"],
-            capture_output=True, text=True, timeout=15).stdout.strip()
-        return out.isdigit() and int(out) > 0
-    except Exception:
-        return False
+    from . import winproc
+    return bool(winproc.pids_named("AssettoCorsaEVO"))
 
 
 def state():

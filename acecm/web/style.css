@@ -57,6 +57,17 @@ header .grow{flex:1}
 .grid{display:grid;gap:12px}
 .g2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
 .g3{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+/* Stat tiles wrap to whatever fits, and the LAST ROW STRETCHES to fill
+   the width. A grid leaves the leftovers at one-column width with a
+   hole beside them - six tiles in a four-column grid read as broken
+   rather than as a wrap. */
+/* ⚠ Two things a plain flex row gets wrong here:
+   - a LONE leftover tile stretches the full width and reads as a
+     banner rather than a stat, so cap how far one can grow;
+   - with no bottom margin the block butts straight against the next
+     card and the two look like one broken panel. */
+.stats{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:14px}
+.stats>.stat{flex:1 1 190px;max-width:420px}
 .row{display:flex;align-items:center;gap:10px}
 .row.wrap{flex-wrap:wrap}
 .grow{flex:1}

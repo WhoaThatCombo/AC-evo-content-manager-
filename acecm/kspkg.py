@@ -20,6 +20,8 @@ skipped here. See memory acevo-texturemips-not-encrypted.
 import os
 import struct
 
+from . import logs
+
 KEY = bytes.fromhex("c135117da921979f")
 BUCKET = 256
 TABLE = 64 * 1024 * 1024
@@ -52,9 +54,20 @@ def _plain(path):
 
 
 def iter_entries(kspkg_path):
-    """Yield (path, size, offset) for every named entry in the archive."""
+    """Yield (path, size, offset) for every named entry in the archive.
+
+    ⚠ Yields nothing for a file too small to BE an archive. The table is the
+    last 64 MiB, so a partial download or a mis-named file gives a negative
+    table offset and seek() raises - which used to abort the caller's whole
+    scan. One junk file in a mods folder then read as "you have no cars at
+    all", sending people hunting for a missing mod that was never the problem.
+    """
     total = os.path.getsize(kspkg_path)
     table_start = total - TABLE
+    if table_start < 0:
+        logs.LOG.warning("%s is %d bytes - too small to be a kspkg, skipping",
+                         os.path.basename(kspkg_path), total)
+        return
     # Most buckets are empty and hold one repeating pattern; skipping them
     # before decrypting is what keeps a 64 MiB table to a few seconds.
     fillers = {_keystream(BUCKET, ph) for ph in range(8)}

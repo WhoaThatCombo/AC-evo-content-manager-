@@ -157,7 +157,8 @@ def _save_runtime(r):
 
 
 def _alive(pid):
-    return pid in _server_pids()
+    from . import winproc
+    return winproc.alive(pid)
 
 
 def bind_pid(pid_map):
@@ -167,21 +168,12 @@ def bind_pid(pid_map):
 
 
 def _server_pids():
-    """Running dedicated-server processes -> {pid: commandline}."""
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name like "
-          "'AssettoCorsaEVOServer%'\" | ForEach-Object "
-          "{ $_.ProcessId.ToString() + '|' + $_.CommandLine }")
-    try:
-        out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=20).stdout
-    except Exception:
-        return {}
+    """Running dedicated-server processes -> {pid: exe name}."""
+    from . import winproc
     res = {}
-    for line in out.splitlines():
-        if "|" in line:
-            pid, _, cmd = line.partition("|")
-            if pid.strip().isdigit():
-                res[int(pid.strip())] = cmd
+    for pid in winproc.pids_named("AssettoCorsaEVOServer",
+                                  "AssettoCorsaEVOServer.stock"):
+        res[pid] = "AssettoCorsaEVOServer"
     return res
 
 
@@ -229,26 +221,15 @@ def _watch_memory(pid, limit_gb=None):
     and hanging the machine. The port check should prevent that specific cause;
     this is the backstop for every cause we have not thought of.
     """
+    from . import winproc
     limit = (limit_gb or MEM_LIMIT_GB) * (1 << 30)
-    ps = (f"$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; "
-          f"if ($p) {{ $p.WorkingSet64 }} else {{ 'gone' }}")
     while True:
         time.sleep(5.0)
-        try:
-            out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
-                                 capture_output=True, text=True,
-                                 timeout=20).stdout.strip()
-        except Exception:
+        ws = winproc.working_set(pid)
+        if ws is None:
             return
-        if not out or out == "gone":
-            return
-        if not out.isdigit():
-            continue
-        if int(out) > limit:
-            subprocess.run(["powershell.exe", "-NoProfile", "-Command",
-                            f"Stop-Process -Id {pid} -Force "
-                            f"-ErrorAction SilentlyContinue"],
-                           capture_output=True, timeout=20)
+        if ws > limit:
+            winproc.kill(pid)
             logs.LOG.critical(
                 "KILLED runaway server pid %s: %.1f GB exceeded the %.0f GB "
                 "limit. Usual cause: started on a port already in use, which "
@@ -405,6 +386,11 @@ def start(profile):
                   tcp=profile.get("tcp_port"), http=profile.get("http_port"),
                   track=profile.get("track_index"), ai=profile.get("ai"),
                   log=os.path.join(config.DATA, "last_start.log"))
+    try:
+        from . import lobby
+        lobby.write(profile)
+    except Exception as ex:
+        logs.LOG.warning("lobby advertisement not written: %s", ex)
 
     def _capture():
         # The launcher spawns the exe, so its own pid is not the server's.
@@ -430,14 +416,10 @@ def start(profile):
 
 
 def stop():
-    """Stop every dedicated server and the telemetry helper."""
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-          "Where-Object { $_.CommandLine -like '*server_telemetry*' } | "
-          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
-          "Get-Process -Name 'AssettoCorsaEVOServer*' -ErrorAction "
-          "SilentlyContinue | Stop-Process -Force")
-    subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
-                   capture_output=True, timeout=30)
+    """Stop every dedicated server."""
+    from . import winproc
+    for pid in list(_server_pids()):
+        winproc.kill(pid)
     return {"ok": True}
 
 

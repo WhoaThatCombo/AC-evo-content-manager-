@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller protobuf numpy pywebview cryptography websockets capstone
+          pip install pyinstaller protobuf numpy pywebview cryptography websockets capstone texture2ddecoder pillow
 
       - name: Check the version matches the tag
         # A build whose reported version does not match its tag makes the

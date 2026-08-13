@@ -106,13 +106,17 @@ def steam_app_dir(appid):
 
 
 # --------------------------------------------------------- known folders --
-def saved_games():
-    """The real "Saved Games" folder, which is not always under the profile."""
+def known_folder(guid, fallback=""):
+    """Ask Windows where a folder REALLY is.
+
+    ⚠ Not "%USERPROFILE%\\<name>". Saved Games can be moved, and Desktop and
+    Documents are commonly redirected into OneDrive - on this machine
+    ~\\Desktop does not exist at all, so guessing it produced a shortcut that
+    could not be written.
+    """
     try:
         import ctypes
         from ctypes import wintypes
-        # FOLDERID_SavedGames
-        guid = "{4C5C32FF-BB9D-43b0-B5B4-2D72E54EAAA4}"
 
         class GUID(ctypes.Structure):
             _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
@@ -129,7 +133,19 @@ def saved_games():
                     return p
     except Exception as ex:
         logs.LOG.debug("known-folder lookup failed: %s", ex)
-    return os.path.join(os.path.expanduser("~"), "Saved Games")
+    return fallback
+
+
+def saved_games():
+    """The real "Saved Games" folder, which is not always under the profile."""
+    return known_folder("{4C5C32FF-BB9D-43b0-B5B4-2D72E54EAAA4}",
+                        os.path.join(os.path.expanduser("~"), "Saved Games"))
+
+
+def desktop():
+    """The real Desktop, which is often redirected into OneDrive."""
+    return known_folder("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+                        os.path.join(os.path.expanduser("~"), "Desktop"))
 
 
 # ------------------------------------------------------------- detectors --

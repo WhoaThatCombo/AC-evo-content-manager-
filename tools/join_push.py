@@ -41,9 +41,29 @@ def _wrap(msg, name):
     return env.SerializeToString()
 
 
-def build(server_id, shape="bare"):
-    """Serialised BackendMessage that tells the client to join `server_id`."""
-    url = server_id if str(server_id).startswith("join:") else f"join:{server_id}"
+def join_url(target, tcp=None, udp=None, password=""):
+    """The client does NOT take join:<id>. After the 'join:' prefix it parses
+    a startup-server string:
+
+        <ip>:<tcpport>[|<password>][ :<udpport>]
+
+    A profile uuid here is why we connected to ':0'.
+    """
+    t = str(target or "").strip()
+    if t.startswith("join:"):
+        return t
+    if tcp:
+        pw = f"|{password}" if password else ""
+        u = udp if udp else tcp
+        return f"join:{t}:{int(tcp)}{pw} :{int(u)}"
+    if ":" in t and not t.startswith("srv"):
+        return f"join:{t}"
+    return f"join:{t}"
+
+
+def build(server_id, shape="bare", tcp=None, udp=None, password=""):
+    """Serialised BackendMessage that tells the client to join a host:port."""
+    url = join_url(server_id, tcp=tcp, udp=udp, password=password)
     inner = ap.new("MultiplayerResponseGoToServer")
     inner.url = url
     try:
@@ -59,14 +79,15 @@ def build(server_id, shape="bare"):
     return _wrap(cmds, "MultiplayerServerListCommands")
 
 
-async def push(ws, server_id, shape="bare"):
+async def push(ws, server_id, shape="bare", tcp=None, udp=None, password=""):
     """Send it to one connected client."""
-    raw = build(server_id, shape)
-    print(f"  PUSH go_to_server [{shape}] {len(raw)}B -> join:{server_id}",
+    raw = build(server_id, shape, tcp=tcp, udp=udp, password=password)
+    url = join_url(server_id, tcp=tcp, udp=udp, password=password)
+    print(f"  PUSH go_to_server [{shape}] {len(raw)}B -> {url}",
           flush=True)
     await ws.send(raw)
-    return {"sent": True, "server_id": server_id, "shape": shape,
-            "bytes": len(raw)}
+    return {"sent": True, "server_id": server_id, "url": url,
+            "shape": shape, "bytes": len(raw)}
 
 
 if __name__ == "__main__":

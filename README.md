@@ -30,7 +30,7 @@ on next restart. The previous build is kept as `ACECM.exe.old`.
 ## Build from source
 
 ```bash
-pip install pyinstaller protobuf numpy pywebview cryptography websockets capstone
+pip install pyinstaller protobuf numpy pywebview cryptography websockets capstone texture2ddecoder pillow
 python build.py            # -> dist/ACECM.exe
 python -m acecm            # or just run it from source
 ```

@@ -55,8 +55,87 @@ CARS_JSON = os.environ.get("CARS_JSON",
                            os.path.join(os.path.dirname(HERE), "cars.json"))
 PROTOCOL_VERSION = int(os.environ.get("PROTOCOL_VERSION", "8"))
 SERVER_VERSION = int(os.environ.get("SERVER_VERSION", "6"))
+LOBBY_JSON = os.environ.get("LOBBY_JSON", "")
+LAN_IP = os.environ.get("LAN_IP", "")
+OUR_IPS = {p.strip() for p in os.environ.get("OUR_IPS", "").split(",") if p.strip()}
+OUR_IPS.update({"127.0.0.1", "localhost", "::1"})
+if SERVER_IP:
+    OUR_IPS.add(SERVER_IP)
+if LAN_IP:
+    OUR_IPS.add(LAN_IP)
 
 TYPE_PREFIX = "type.googleapis.com/"
+# Echoed from the client's RegisterRequest so an update that bumps
+# protocol/server version does not silently drop our list entry.
+_versions = {"protocol": PROTOCOL_VERSION, "server": SERVER_VERSION}
+
+
+def _lobby():
+    path = LOBBY_JSON
+    if path and os.path.isfile(path):
+        try:
+            import json
+            return json.load(open(path, encoding="utf-8"))
+        except Exception as ex:
+            print(f"  (lobby.json unreadable: {ex})")
+    return {}
+
+
+def _lan_ip():
+    if LAN_IP:
+        return LAN_IP
+    lb = _lobby()
+    if lb.get("lan_ip"):
+        return lb["lan_ip"]
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("1.1.1.1", 80))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    return ""
+
+
+def _peer_host(peer):
+    if peer is None:
+        return ""
+    if isinstance(peer, (tuple, list)) and peer:
+        return str(peer[0] or "")
+    if isinstance(peer, str):
+        return peer
+    return ""
+
+
+def _advertise_ip(peer=None):
+    """Loopback for a local client, LAN address for everyone else."""
+    host = _peer_host(peer)
+    lan = _lan_ip()
+    if not host or host in ("127.0.0.1", "::1", "localhost") or host.startswith("127."):
+        return "127.0.0.1"
+    return lan or SERVER_IP or "127.0.0.1"
+
+
+def is_our_server(ip, tcp=None, udp=None):
+    """Should we answer RequestServerEntry for this address?"""
+    if not ip:
+        return False
+    ip = ip.strip()
+    lb = _lobby()
+    known = set(OUR_IPS)
+    if lb.get("lan_ip"):
+        known.add(lb["lan_ip"])
+    lan = _lan_ip()
+    if lan:
+        known.add(lan)
+    if SERVER_IP:
+        known.add(SERVER_IP)
+    return ip in known
 
 
 def unwrap(raw):
@@ -90,14 +169,23 @@ def live_player_count():
     try:
         import json
         import urllib.request
-        with urllib.request.urlopen(SERVER_HTTP, timeout=2) as r:
+        url = SERVER_HTTP
+        lb = _lobby()
+        if lb.get("http_port"):
+            url = f"http://127.0.0.1:{int(lb['http_port'])}/"
+        with urllib.request.urlopen(url, timeout=2) as r:
             return int(json.loads(r.read()).get("clients", 0))
     except Exception:
         return 0
 
 
-def fill_entry(entry):
-    """Populate a MultiplayerServerListEntry for our own server."""
+def fill_entry(entry, peer=None):
+    """Populate a MultiplayerServerListEntry for our own server.
+
+    Track, cars, name and ToD come from lobby.json (the running ACECM
+    profile). server_ip is peer-aware: 127.0.0.1 for a client on this
+    machine, the LAN IPv4 for everyone else.
+    """
     def setif(name, value):
         if name in [f.name for f in entry.DESCRIPTOR.fields]:
             try:
@@ -107,52 +195,47 @@ def fill_entry(entry):
                 pass
         return False
 
-    setif("server_id", SERVER_ID)
-    setif("server_ip", SERVER_IP)
-    setif("server_name", SERVER_NAME)
-    setif("server_tcp_port", SERVER_TCP)
-    setif("server_udp_port", SERVER_UDP)
-    setif("track", "nurburgring")
-    setif("layout", "layout_nordschleife_touristenfahrten")
-    setif("event_name", "Touristenfahrten")
-    # ⚠ These two are why an entry silently vanishes from the browser. The
-    # client logs "Igoring server with protocol version {} (mine: {}), server
-    # version {} ({})" and drops anything that doesn't match. Values come from
-    # the client's own RegisterRequest: procol_version 8, server_version 6.
-    setif("protocol_version", PROTOCOL_VERSION)
-    setif("server_version", SERVER_VERSION)
-    # GameModeType_PRACTICE. Without this the browser row reads
-    # "GameModeType_NONE" (the zero value) - the enum lives in ClientCommandsUtil.
-    setif("game_mode_type", 10)
-    # players/friends are STRINGS in this schema, not counts - setting an int
-    # fails silently and the row renders blank.
-    # players/friends are REPEATED strings - a list of names, not a count. The
-    # browser shows len(players), which is why a scalar assignment left it 0/90.
-    # We only know the count from the server's HTTP port, so synthesise that
-    # many rows; the AI cars are included in the count.
+    lb = _lobby()
+    setif("server_id", lb.get("server_id") or SERVER_ID)
+    setif("server_ip", _advertise_ip(peer))
+    setif("server_name", lb.get("server_name") or SERVER_NAME)
+    setif("server_tcp_port", int(lb.get("tcp_port") or SERVER_TCP))
+    setif("server_udp_port", int(lb.get("udp_port") or SERVER_UDP))
+    setif("track", lb.get("track") or os.environ.get("TRACK") or "")
+    setif("layout", lb.get("layout") or os.environ.get("LAYOUT") or "")
+    setif("event_name", lb.get("event_name") or "")
+    # Echo the versions the client just registered with. Hardcoding 8/6 is
+    # what makes an entry vanish after a game update.
+    setif("protocol_version", _versions["protocol"])
+    setif("server_version", _versions["server"])
+    setif("game_mode_type", int(lb.get("game_mode_type") or 10))
     try:
         del entry.players[:]
         for i in range(live_player_count()):
             entry.players.append(f"driver {i + 1}")
     except Exception as ex:
         print(f"  (could not fill players: {ex})")
-    setif("max_players", 90)
+    setif("max_players", int(lb.get("max_players") or 90))
     setif("current_session", "Practice")
-    setif("time_of_day", TIME_OF_DAY)
+    setif("time_of_day", lb.get("time_of_day") or TIME_OF_DAY)
     setif("is_car_eligible", True)
 
-    # The client only offers DRIVE for cars the entry says are allowed. With an
-    # empty list it joins as a spectator even though it asked to drive ("as
-    # spectator: false" appears in its own log). Mirror the dedicated server's
-    # list, filtered the same way - real Kunos presets only, no mods.
+    # Drive-button list: prefer the profile snapshot. Fall back to cars.json
+    # PLUS any leftover names (mods used to be stripped here).
+    names = [c for c in (lb.get("cars") or []) if c]
+    if not names:
+        try:
+            import json
+            import re
+            cars = json.load(open(CARS_JSON, encoding="utf-8"))["cars"]
+            names = [c["name"] for c in cars if re.fullmatch(r".+_mech_\d+", c["name"])]
+        except Exception as ex:
+            print(f"  (could not fill car list: {ex})")
+            names = []
     try:
-        import json
-        import re
-        cars = json.load(open(CARS_JSON))["cars"]
-        names = [c["name"] for c in cars
-                 if re.fullmatch(r".+_mech_\d+", c["name"])]
         fields = [f.name for f in entry.DESCRIPTOR.fields]
         if "allowed_cars_list_full" in fields:
+            del entry.allowed_cars_list_full[:]
             for n in names:
                 a = entry.allowed_cars_list_full.add()
                 a.car_name = n
@@ -160,7 +243,7 @@ def fill_entry(entry):
                 a.restrictor = 0
         setif("allowed_cars_list", ",".join(names))
     except Exception as ex:
-        print(f"  (could not fill car list: {ex})")
+        print(f"  (could not write car list: {ex})")
     return entry
 
 
@@ -217,11 +300,24 @@ async def handle(ws):
                     r.platform_type = msg.platform_type
                 except Exception:
                     pass
+                try:
+                    proto = getattr(msg, "procol_version", None)
+                    if proto is None:
+                        proto = getattr(msg, "protocol_version", None)
+                    if proto:
+                        _versions["protocol"] = int(proto)
+                    ver = getattr(msg, "server_version", None)
+                    if ver:
+                        _versions["server"] = int(ver)
+                    print(f"     (echo protocol={_versions['protocol']} "
+                          f"server={_versions['server']})")
+                except Exception as ex:
+                    print(f"     (version echo: {ex})")
                 reply = ("RegisterResponse", r)
 
             elif name == "MultiplayerServerListRequestServerList":
                 r = ap.new("MultiplayerServerListResponseServerList")
-                fill_entry(r.entry.add())
+                fill_entry(r.entry.add(), peer=peer)
                 try:
                     r.request_no = msg.request_no
                 except Exception:
@@ -230,7 +326,7 @@ async def handle(ws):
 
             elif name == "MultiplayerServerListRequestServerEntry":
                 r = ap.new("MultiplayerServerListResponseServerEntry")
-                fill_entry(r.entry)
+                fill_entry(r.entry, peer=peer)
                 reply = ("MultiplayerServerListResponseServerEntry", r)
 
             elif name == "MultiplayerServerListRequestConnectToServer":
@@ -271,10 +367,16 @@ async def main():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(os.path.join(HERE, "cert.pem"), os.path.join(HERE, "key.pem"))
     print(f"loaded {len(ap.loaded)} descriptors")
-    print(f"listening on wss://localhost:{PORT}/  (any path)")
-    print(f"advertising {SERVER_NAME} at {SERVER_IP}:{SERVER_TCP}")
+    lb = _lobby()
+    lan = _lan_ip()
+    print(f"listening on wss://0.0.0.0:{PORT}/  (any path)")
+    print(f"lobby.json: {LOBBY_JSON or '(none)'}")
+    print(f"advertising {lb.get('server_name') or SERVER_NAME}  "
+          f"track={lb.get('track') or '?'}  cars={len(lb.get('cars') or [])}")
+    print(f"loopback 127.0.0.1:{int(lb.get('tcp_port') or SERVER_TCP)}  "
+          f"lan {lan or '(none)'}")
     print("launch the game with:")
-    print(f"  -backend=wss://localhost:{PORT}/communicationNode/42\n")
+    print(f"  -backend=wss://127.0.0.1:{PORT}/communicationNode/dev\n")
     async with websockets.serve(handle, "0.0.0.0", PORT, ssl=ctx,
                                 max_size=None, ping_interval=None):
         await asyncio.Future()
