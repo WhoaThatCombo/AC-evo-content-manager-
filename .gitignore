@@ -33,5 +33,8 @@ __pycache__/
 *.tmp
 *.bak
 *.log
-tools/evoview.exe
+# ⚠ tools/evoview.exe is COMMITTED, like every other tool. It is built
+# separately with cargo from a checkout that is not in this repo, so a CI
+# runner cannot produce it - and build.py only warns when it is absent,
+# which would publish a release with the 3D viewer silently missing.
 verify_out/

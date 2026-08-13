@@ -24,39 +24,111 @@ function toast(msg, bad) {
 
 /* ------------------------------------------------------------ dashboard -- */
 async function dashboard() {
+  // ⚠ Fetch everything FIRST, then clear and build. Clearing early leaves the
+  // page blank for as long as the slowest request takes, and any await between
+  // the clear and the appends is a window for a second render to interleave.
   const s = await api('state');
   const profs = (await api('profiles')).profiles || [];
   const cars = await api('cars');
   const trk = await api('tracks');
+  const ov = await api('overview');
   const b = s.backend || {};
   const p = $('#page');
   p.innerHTML = '';
 
-  if (!s.server_exe_ok) {
-    // Say what WAS found - "not found" alone gives the user nothing to act on.
-    const found = s.server_exe_found || [];
-    p.append(el('div', 'err',
-      '<b>Dedicated server executable not found.</b><br>'
-      + (s.server_dir
-         ? 'Looked in <code>' + esc(s.server_dir) + '</code>'
-         : 'No dedicated-server folder was detected.')
-      + (found.length
-         ? '<br>Found there: ' + found.map(f => '<code>' + esc(f) + '</code>').join(', ')
-           + '<br>Set <b>server_exe</b> in Settings to the one to use.'
-         : '<br>Install the AC EVO Dedicated Server, or set <b>server_dir</b> '
-           + 'in Settings to where it lives.')));
-  }
+  // (the missing-executable warning now comes from /api/overview's attention
+  // list, together with every other problem, so it is not a special case)
 
-  const g = el('div', 'grid g3');
+  // ⚠ Lead with what is WRONG. Counting things that exist is true and useless;
+  // someone opens this page because something is not working, or to see
+  // whether their server is up. (`ov` is fetched above, before the clear.)
+  (ov.attention || []).forEach(a => {
+    const box = el('div', a.level === 'bad' ? 'err' : 'warn');
+    box.innerHTML = `<b>${esc(a.what)}</b><br>${esc(a.do)}`;
+    p.append(box);
+  });
+
+  // A new version, said once and plainly. Checked in the background so a slow
+  // or offline GitHub never delays the dashboard - the banner just appears
+  // when the answer arrives.
+  const upd = el('div', 'warn');
+  upd.style.display = 'none';
+  p.append(upd);
+  api('update/check').then(r => {
+    if (!r || !r.ok || !r.available) return;
+    upd.style.display = '';
+    upd.innerHTML = `<b>ACECM v${esc(r.latest)} is available</b> — you have `
+      + `v${esc(r.current)}.`;
+    const go = el('button', 'sm primary', 'Update now');
+    go.style.marginTop = '6px';
+    go.onclick = async () => {
+      go.disabled = true;
+      go.textContent = 'downloading…';
+      const a = await api('update/apply', {});
+      if (!a.ok) { toast(a.error || 'update failed', true);
+                   go.disabled = false; go.textContent = 'Update now'; return; }
+      go.textContent = 'Restart to finish';
+      go.disabled = false;
+      go.onclick = async () => {
+        const s = await api('app/restart', {});
+        if (!s.ok) toast(s.error || 'restart failed', true);
+      };
+    };
+    upd.append(el('div'), go);
+  }).catch(() => {});
+
+  const g = el('div', 'stats');
   const tiles = [
-    [profs.length, 'server profiles'],
+    [ov.running ?? 0, `server${ov.running === 1 ? '' : 's'} running`],
+    [ov.players ?? 0, 'players connected'],
+    [ov.tracks ?? trk.total ?? '—', 'tracks you can load'],
     [cars.total ?? '—', `cars (${cars.mods ?? 0} modded)`],
-    [trk.total ?? '—', 'track layouts'],
+    [ov.shared ?? 0, 'items shared for download'],
     [b.listening ? 'UP' : 'DOWN', `own backend :${b.port ?? '—'}`],
   ];
   tiles.forEach(([v, k]) => g.append(el('div', 'stat',
     `<b>${esc(v)}</b><span>${esc(k)}</span>`)));
   p.append(g);
+
+  // What is actually running, with a way to act on it
+  const live = el('div', 'card');
+  live.innerHTML = '<h2>Servers</h2>';
+  if (!(ov.servers || []).length) {
+    live.append(el('div', 'empty',
+      'No server profiles yet — create one on the Servers page'));
+  } else {
+    const t = el('table');
+    t.innerHTML = '<thead><tr><th>Profile</th><th>Track</th><th>Players</th>'
+      + '<th>Port</th><th></th></tr></thead>';
+    const tb = el('tbody');
+    ov.servers.forEach(sv => {
+      const tr = el('tr');
+      tr.innerHTML = `<td><span class="pill ${sv.running ? 'on' : 'off'}">`
+        + `<i class="dot"></i>${esc(sv.name)}</span>`
+        + (sv.pid ? `<div class="tiny dim">pid ${sv.pid}</div>` : '')
+        + `</td>`
+        + `<td>${esc(sv.track || '—')}<div class="tiny dim">`
+        + `${esc(String(sv.layout || '').replace(/^layout_/, ''))}</div></td>`
+        + `<td>${sv.running ? (sv.clients ?? '—') : '—'}</td>`
+        + `<td class="dim">${esc(sv.port)}</td>`;
+      const td = el('td');
+      const act = el('button', sv.running ? 'sm danger' : 'sm primary',
+                    sv.running ? 'Stop' : 'Start');
+      act.onclick = async () => {
+        const r = await api(sv.running ? 'server/stop' : 'server/start',
+                            { id: sv.id });
+        toast(r && r.error ? r.error : (sv.running ? 'Stopped' : 'Starting…'),
+              !!(r && r.error));
+        setTimeout(dashboard, sv.running ? 900 : 2000);
+      };
+      td.append(act);
+      tr.append(td);
+      tb.append(tr);
+    });
+    t.append(tb);
+    live.append(t);
+  }
+  p.append(live);
 
   const c = el('div', 'card');
   c.innerHTML = '<h2>Quick start</h2>';
@@ -76,7 +148,14 @@ async function dashboard() {
   // still there for when the push is understood.
   const bGame = el('button', null, 'Launch game');
   bGame.onclick = async () => { const r = await api('game/launch', {}); if (r.ok) toast('Launching game'); };
-  row.append(bStart, bStop, bGame);
+  const bAI = el('button', null, 'Launch real AI race');
+  bAI.title = 'One client. Instant Race with AiDriverEvo — not dedicated vAI ghosts.';
+  bAI.onclick = async () => {
+    const r = await api('game/launch_ai', { opponents: 16, min_strength: 70, max_strength: 95 });
+    toast(r.ok ? 'Client starting — Instant Race, then Start. Look for Creating AiDriverEvo.'
+               : (r.error || 'Launch failed'), !r.ok);
+  };
+  row.append(bStart, bStop, bGame, bAI);
   c.append(row);
   p.append(c);
 
@@ -98,8 +177,26 @@ let editing = null;
 async function serversPage() {
   const { profiles, template, options, telemetry: telState } = await api('profiles');
   const trk = (await api('tracks')).tracks || [];
+  const worker = await api('game/worker');
   const p = $('#page');
   p.innerHTML = '';
+  if (worker && worker.attached) {
+    const wc = el('div', 'card');
+    const sc = worker.scan || {};
+    wc.innerHTML = `<h2>AI worker</h2>
+      <div class="tiny dim">phase <b>${esc(worker.phase || '?')}</b>
+      &middot; profile ${esc(worker.profile_id || '')}
+      &middot; game ${worker.game_running ? 'running' : 'not running'}
+      &middot; AiDriverEvo lines: ${sc.ai_driver_evo_lines ?? 0}
+      &middot; joined: ${sc.joined ? 'yes' : 'not yet'}</div>`;
+    const hits = (sc.client_hits || []).slice(-8);
+    if (hits.length) {
+      const pre = el('pre', 'log', hits.map(esc).join('\n'));
+      pre.style.maxHeight = '10em';
+      wc.append(pre);
+    }
+    p.append(wc);
+  }
 
   const head = el('div', 'row');
   const add = el('button', 'primary', '+ New server');
@@ -110,7 +207,17 @@ async function serversPage() {
   head.append(stopAll);
   p.append(el('div', 'card').appendChild(head).parentElement);
 
-  if (editing) p.append(editor(editing, trk, options || {}));
+  if (editing) {
+    // Real choices for the two fields that used to be typed by hand: tracks
+    // this machine can actually load, and the car catalogue.
+    const cat = await api('cars');
+    const loc = await api('browser/local');
+    const imported = new Set(loc.tracks || []);
+    const modTracks = Object.entries(loc.track_map || {})
+      .filter(([, folder]) => imported.has(folder))
+      .sort((a, b) => a[0].localeCompare(b[0]));
+    p.append(editor(editing, trk, options || {}, { cat, modTracks }));
+  }
 
   if (!profiles.length && !editing) {
     p.append(el('div', 'card').appendChild(
@@ -196,7 +303,14 @@ async function serversPage() {
     const tView = el('button', 'sm primary', 'View map');
     tView.disabled = !ts.running;
     tView.onclick = () => { telProfile = prof.id; telTrack = null; go('telemetry'); };
-    row.append(start, edit, logs, del, tOn, tOff, tView, tpill);
+    const wAI = el('button', 'sm', 'Attach AI worker');
+    wAI.title = 'One client joins this server with -ai_player_car (AiDriverEvo), not vAI ghosts';
+    wAI.onclick = async () => {
+      const r = await api('game/attach_worker', { id: prof.id, ai_player: true });
+      toast(r.ok ? (r.hint || 'Worker launching') : (r.error || 'Failed'), !r.ok);
+      setTimeout(serversPage, 2000);
+    };
+    row.append(start, edit, logs, del, tOn, tOff, tView, wAI, tpill);
     card.append(row, pre);
     p.append(card);
 
@@ -211,7 +325,7 @@ async function serversPage() {
   }
 }
 
-function editor(prof, trk, opts) {
+function editor(prof, trk, opts, extra) {
   const c = el('div', 'card');
   c.innerHTML = `<h2>${prof.id ? 'Edit server' : 'New server'}</h2>`;
 
@@ -255,13 +369,59 @@ function editor(prof, trk, opts) {
     parent.append(l);
   };
 
-  const section = (title, hint) => {
-    c.append(el('div', 'tiny dim', `<b style="color:var(--fg)">${esc(title)}</b>`
+  // ⚠ Two tiers. Nearly every server needs six fields; the other forty are
+  // things you set once a year. Showing all of them flat, equally weighted, is
+  // what made this page hard to read - so the rare ones fold away and the page
+  // opens on what you actually came to change.
+  let advanced = null;
+  const section = (title, hint, rare) => {
+    let host = c;
+    if (rare) {
+      if (!advanced) {
+        advanced = el('details');
+        advanced.style.margin = '4px 0 12px';
+        advanced.append(el('summary', 'tiny dim',
+          'Everything else — AI, weather, penalties, ports, files'));
+        c.append(advanced);
+      }
+      host = advanced;
+    }
+    host.append(el('div', 'tiny dim', `<b style="color:var(--fg)">${esc(title)}</b>`
       + (hint ? ` — ${hint}` : '')));
     const g = el('div', 'grid g2');
     g.style.margin = '6px 0 12px';
-    c.append(g);
+    host.append(g);
     return g;
+  };
+
+  /* A dropdown instead of typing an id.
+
+     ⚠ `track_label` used to be free text, and it has to match a track the
+     server can actually resolve - a typo produces a server that starts and
+     then cannot load its own track. The options come from YOUR tracks.table,
+     so anything listed is real. */
+  const trackPicker = (parent, key, label, choices, blank) => {
+    const l = el('label', 'f', `<span>${label}</span>`);
+    const s = el('select');
+    const b = el('option', null, blank);
+    b.value = '';
+    s.append(b);
+    choices.forEach(([name, folder]) => {
+      const o = el('option', null, `${name}  (${folder})`);
+      o.value = name;
+      if (name === prof[key]) o.selected = true;
+      s.append(o);
+    });
+    // a value saved before this dropdown existed must not vanish silently
+    if (prof[key] && !choices.some(([n]) => n === prof[key])) {
+      const o = el('option', null, `${prof[key]}  (not installed here)`);
+      o.value = prof[key];
+      o.selected = true;
+      s.append(o);
+    }
+    s.onchange = () => { prof[key] = s.value; };
+    l.append(s);
+    parent.append(l);
   };
 
   let g = section('Identity');
@@ -276,12 +436,13 @@ function editor(prof, trk, opts) {
   mk(g, 'max_players', 'Player slots', 'number');
   mk(g, 'cycle', 'Cycle sessions', 'bool');
 
-  g = section('AI', 'skill min/max spread the field — equal skill makes them clump');
+  g = section('AI', 'skill min/max spread the field — equal skill makes them clump',
+              true);
   mk(g, 'ai', 'AI cars', 'number');
   mk(g, 'skill_min', 'Skill min', 'number');
   mk(g, 'skill_max', 'Skill max', 'number');
 
-  g = section('Time & weather', 'time multiplier 0 freezes the clock');
+  g = section('Time & weather', 'time multiplier 0 freezes the clock', true);
   mk(g, 'tod_hour', 'Time of day (hour)', 'number');
   mk(g, 'tod_minute', 'Minute', 'number');
   mk(g, 'time_mult', 'Time multiplier', 'number');
@@ -289,7 +450,7 @@ function editor(prof, trk, opts) {
   mk(g, 'weather_behaviour', 'Weather behaviour', 'select', opts.weather_behaviour);
   mk(g, 'grip', 'Initial grip', 'select', opts.grip);
 
-  g = section('Rules');
+  g = section('Rules', '', true);
   mk(g, 'tuning', 'Tuning', 'select', opts.tuning);
   mk(g, 'pi_min', 'PI min (0 = no limit)', 'number', { step: 0.1 });
   mk(g, 'pi_max', 'PI max (0 = no limit)', 'number', { step: 0.1 });
@@ -299,11 +460,11 @@ function editor(prof, trk, opts) {
   mk(g, 'spectator_password', 'Spectator password', 'password');
   mk(g, 'admin_password', 'Admin password', 'password');
 
-  g = section('Session pacing', 'both were hardcoded to 10 before');
+  g = section('Session pacing', 'both were hardcoded to 10 before', true);
   mk(g, 'overtime_wait', 'Overtime wait, next session (s)', 'number');
   mk(g, 'max_wait_to_box', 'Max wait to box (s)', 'number');
 
-  g = section('In-game date', 'the clock starts here; multiplier 0 freezes it');
+  g = section('In-game date', 'the clock starts here; multiplier 0 freezes it', true);
   mk(g, 'tod_year', 'Year', 'number');
   mk(g, 'tod_month', 'Month', 'number');
   mk(g, 'tod_day', 'Day', 'number');
@@ -314,24 +475,123 @@ function editor(prof, trk, opts) {
   mk(g, 'write_results', 'Write server results', 'bool');
   mk(g, 'export_json', 'Export season JSON', 'bool');
 
-  g = section('Handicaps', 'per car: name:ballast:restrictor, comma separated');
+  g = section('Handicaps', 'per car: name:ballast:restrictor, comma separated', true);
   mk(g, 'car_handicaps', 'Car handicaps', 'text');
 
   g = section('Custom track',
-    'A custom track borrows a stock track’s slots, so the event keeps the ' +
-    'host’s name. Name what is actually deployed there.');
-  mk(g, 'track_label', 'Deployed track name (blank = stock)', 'text');
+    'Pick what is actually deployed. Only needed when a custom track borrows ' +
+    'a stock track’s slots — a native install already reports its own name.');
+  trackPicker(g, 'track_label', 'Deployed track',
+              (extra && extra.modTracks) || [],
+              'Stock track — use the layout above');
+
+  // Which cars this server accepts. Modded cars are the ones worth picking
+  // deliberately: a mod nobody else has is the usual reason a join is refused.
+  g = section('Cars allowed',
+    'Empty means every Kunos car plus every installed mod.');
+  const cars = ((extra && extra.cat && extra.cat.cars) || []);
+  const chosen = new Set(prof.cars || []);
+  const box = el('div');
+  box.style.cssText = 'grid-column:1/-1';
+  const chips = el('div', 'row wrap');
+  const redraw = () => {
+    chips.innerHTML = '';
+    if (!chosen.size) {
+      chips.append(el('span', 'tiny dim', 'Every car is allowed'));
+    } else {
+      [...chosen].forEach(id => {
+        const meta = cars.find(x => x.id === id);
+        const b = el('button', 'sm',
+          `${esc(meta ? meta.label : id)} ✕`);
+        b.title = id;
+        b.onclick = () => { chosen.delete(id); prof.cars = [...chosen]; redraw(); };
+        chips.append(b);
+      });
+      const clr = el('button', 'sm danger', 'Allow every car');
+      clr.onclick = () => { chosen.clear(); prof.cars = []; redraw(); };
+      chips.append(clr);
+    }
+  };
+  /* Pick cars by looking at them.
+
+     ⚠ A <select> cannot show a picture, and an id like preset_695b_mech_1
+     tells you nothing about which car it is. These are the same Vulkan renders
+     the gallery uses, keyed by MODEL - the catalogue is keyed by preset, and
+     several presets share one model, so the thumbnail comes from x.model.
+
+     Modded and Kunos are deliberately separate lists: mods are the ones you
+     choose on purpose, and 11 of them were previously lost among 97. */
+  const panels = el('div');
+  panels.style.cssText = 'grid-column:1/-1';
+  const panel = (title, list, open) => {
+    if (!list.length) return;
+    const d = el('details');
+    if (open) d.open = true;
+    d.style.margin = '4px 0';
+    d.append(el('summary', 'tiny dim', `${title} — ${list.length}`));
+    const wrap = el('div');
+    wrap.style.cssText = 'display:grid;gap:6px;margin:8px 0 4px;'
+      + 'grid-template-columns:repeat(auto-fill,minmax(104px,1fr));'
+      + 'max-height:260px;overflow:auto';
+    list.forEach(x => {
+      const t = el('div');
+      const on = () => chosen.has(x.id);
+      const paint = () => {
+        t.style.cssText = 'cursor:pointer;border-radius:6px;overflow:hidden;'
+          + 'border:1px solid ' + (on() ? 'var(--accent)' : 'var(--line,#262b31)')
+          + ';background:var(--card,#16191d)';
+      };
+      const img = el('img');
+      img.loading = 'lazy';
+      img.alt = '';   // blank, not a broken-image glyph + caption
+      img.style.cssText = 'width:100%;display:block;aspect-ratio:3/2;'
+        + 'object-fit:cover;background:#0c0e11';
+      img.src = 'api/thumb/car?id=' + encodeURIComponent(x.model || x.id);
+      // a car with no render yet (server-only mods have no client package)
+      // shows a blank tile rather than a broken image
+      img.onerror = () => { img.style.visibility = 'hidden'; };
+      const cap = el('div', 'tiny');
+      cap.style.cssText = 'padding:4px 6px;line-height:1.25';
+      cap.textContent = x.label;
+      // ⚠ No model means no geometry on THIS machine - the car is named in
+      // cars.json but its package is not installed, so there is nothing to
+      // render. Say so, or the blank tile reads as a broken thumbnail.
+      if (!x.model) {
+        const w = el('div', 'tiny dim');
+        w.textContent = 'not installed here';
+        cap.append(w);
+      }
+      t.append(img, cap);
+      t.title = x.model ? x.id : x.id + ' — no content installed for this car';
+      t.onclick = () => {
+        if (on()) chosen.delete(x.id); else chosen.add(x.id);
+        prof.cars = [...chosen];
+        paint();
+        redraw();
+      };
+      paint();
+      wrap.append(t);
+    });
+    d.append(wrap);
+    panels.append(d);
+  };
+  panel('Modded cars', cars.filter(x => x.mod), true);
+  panel('Kunos cars', cars.filter(x => !x.mod), false);
+
+  box.append(chips, panels);
+  g.append(box);
+  redraw();
 
   g = section('Penalties',
     'Per server — carried in this server’s season blob, so no game files ' +
     'are modified. Accepted by the server, but enforcement is unverified: ' +
-    'test it by cutting a corner on track.');
+    'test it by cutting a corner on track.', true);
   mk(g, 'penalties', 'Enable custom penalties', 'bool');
   mk(g, 'car_cut_tyres_out', 'Wheels off track to count as a cut (1-4)', 'number');
   mk(g, 'warning_trigger_countdown', 'Warnings before the penalty', 'number');
   mk(g, 'time_penalty_ms', 'Time penalty (ms)', 'number');
 
-  g = section('Ports & files', 'internal ports default to the listener port');
+  g = section('Ports & files', 'internal ports default to the listener port', true);
   mk(g, 'tcp_port', 'TCP/UDP port', 'number');
   mk(g, 'http_port', 'HTTP status port', 'number');
   mk(g, 'tcp_internal_port', 'TCP internal (0 = same)', 'number');
@@ -350,9 +610,7 @@ function editor(prof, trk, opts) {
   };
   const cancel = el('button', null, 'Cancel');
   cancel.onclick = () => { editing = null; serversPage(); };
-  const hint = el('div', 'tiny dim grow',
-    'Cars: empty means every Kunos car plus any installed mod cars.');
-  row.append(save, cancel, hint);
+  row.append(save, cancel);
   c.append(row);
   return c;
 }
@@ -444,11 +702,226 @@ async function viewerCard(p) {
 }
 
 let carFilter = '';
+/* Every car as a real Vulkan render.
+
+   The pictures come from evoview rendering each car out of the archive, the
+   same path the full 74-car sweep used - so this is the actual car with its
+   own paint, rims and tyres, not a stock photo. Renders are cached on disk and
+   made once; a tile with no render yet simply stays blank rather than blocking
+   the page while ~2 s of GPU work happens per car. */
+async function carGallery(p) {
+  const cars = (await api('viewer/cars')).cars || [];
+  const st = await api('thumbs/status');
+  const have = new Set(st.have || []);
+  const cat = await api('cars');
+  const profs = (await api('profiles')).profiles || [];
+
+  // ⚠ Two different ids. The gallery is keyed by MODEL (ks_abarth_695_biposto)
+  // because that is what has a render; a server's allowed list is keyed by
+  // PRESET (preset_695b_mech_1), and one model usually has several. Allowing
+  // "a car" therefore means allowing every preset of that model - toggling one
+  // preset would leave the car half-allowed and the difference is invisible.
+  const byModel = {};
+  (cat.cars || []).forEach(x => {
+    (byModel[x.model] = byModel[x.model] || []).push(x);
+  });
+
+  let prof = profs.find(x => x.id === galProfile) || null;
+  const allowed = () => new Set(prof ? (prof.cars || []) : []);
+
+  const c = el('div', 'card');
+  c.innerHTML = `<h2>Car gallery &middot; ${cars.length} cars</h2>`;
+  const row = el('div', 'row wrap');
+  const search = el('input');
+  search.placeholder = 'Filter cars…';
+  search.value = galFilter;
+  search.oninput = () => { galFilter = search.value.toLowerCase(); draw(); };
+
+  // Which server profile are we editing the allowed list of?
+  const psel = el('select');
+  const none = el('option', null, 'Allowed cars: pick a profile…');
+  none.value = '';
+  psel.append(none);
+  profs.forEach(x => {
+    const o = el('option', null, x.name);
+    o.value = x.id;
+    if (x.id === galProfile) o.selected = true;
+    psel.append(o);
+  });
+  psel.onchange = () => {
+    galProfile = psel.value;
+    prof = profs.find(x => x.id === galProfile) || null;
+    draw();
+  };
+  row.append(psel);
+
+  async function saveAllowed(list) {
+    prof.cars = list;
+    const r = await api('profiles/save', prof);
+    if (r && r.error) { toast(r.error, true); return; }
+    toast(list.length ? `${list.length} preset(s) allowed`
+                      : 'Every car allowed');
+    draw();
+  }
+  const all = el('button', 'sm', 'Allow all');
+  all.onclick = () => prof && saveAllowed([]);
+  const onlyMods = el('button', 'sm', 'Only mods');
+  onlyMods.onclick = () => prof && saveAllowed(
+    (cat.cars || []).filter(x => x.mod).map(x => x.id));
+  row.append(all, onlyMods);
+  const build = el('button', 'sm primary',
+    `Render missing (${cars.length - have.size})`);
+  build.onclick = async () => {
+    const r = await api('thumbs/build', {});
+    if (!r.ok) { toast(r.error || 'busy', true); return; }
+    toast('Rendering cars — this runs in the background');
+    const poll = setInterval(async () => {
+      const j = await api('thumbs/status');
+      build.textContent = j.state === 'running'
+        ? `Rendering ${j.done}/${j.total} — ${j.current}` : 'Render missing';
+      if (j.state !== 'running') {
+        clearInterval(poll);
+        toast(`${j.made} car render(s) made`);
+        carsPage();
+      }
+    }, 1500);
+  };
+  row.append(search, build);
+  c.append(row);
+  const grid = el('div', 'grid g3');
+  grid.style.marginTop = '10px';
+  c.append(grid);
+  p.append(c);
+
+  function draw() {
+    grid.innerHTML = '';
+    cars.filter(x => !galFilter
+        || (x.label + ' ' + x.id).toLowerCase().includes(galFilter))
+      .forEach(x => {
+        const card = el('div', 'stat');
+        card.style.cssText = 'padding:0;overflow:hidden;text-align:left';
+        const img = el('img');
+        img.loading = 'lazy';
+        img.alt = '';   // blank, not a broken-image glyph + caption
+        img.style.cssText = 'width:100%;display:block;aspect-ratio:3/2;'
+          + 'object-fit:cover;background:#0c0e11';
+        img.src = 'api/thumb/car?id=' + encodeURIComponent(x.id);
+        // no render yet -> leave the tile blank rather than show a broken image
+        img.onerror = () => { img.style.visibility = 'hidden'; };
+        const cap = el('div');
+        cap.style.cssText = 'padding:8px 10px';
+        const presets = byModel[x.id] || [];
+        cap.innerHTML = `<b style="font-size:13px">${esc(x.label)}</b>`
+          + (x.mod ? ' <span class="pill">mod</span>' : '')
+          + `<div class="tiny dim">${esc(x.id)}`
+          + (presets.length > 1 ? ` · ${presets.length} presets` : '')
+          + '</div>';
+        const open = el('button', 'sm', 'View in 3D');
+        open.onclick = async () => {
+          await api('viewer/open', { id: x.id });
+          toast('Opening ' + x.label + ' in the viewer');
+        };
+        cap.append(open);
+
+        if (prof && presets.length) {
+          const cur = allowed();
+          const on = presets.every(q => cur.has(q.id));
+          const t = el('button', on ? 'sm primary' : 'sm',
+                       on ? 'Allowed' : 'Allow');
+          t.title = cur.size ? '' :
+            'This profile allows every car — allowing one starts a whitelist';
+          t.onclick = () => {
+            const set = allowed();
+            // an empty list means "everything"; the first explicit pick has to
+            // start from every car, or one click would silently ban the rest
+            if (!set.size) (cat.cars || []).forEach(q => set.add(q.id));
+            presets.forEach(q => on ? set.delete(q.id) : set.add(q.id));
+            saveAllowed([...set]);
+          };
+          cap.append(t);
+        }
+        card.append(img, cap);
+        grid.append(card);
+      });
+    if (!grid.children.length) grid.append(el('div', 'empty', 'No matches'));
+  }
+  draw();
+}
+
+let galFilter = '', galProfile = '';
+
+/* Installed car mods, and getting rid of one.
+
+   ⚠ A car mod has TWO homes: the client's folder so you can drive it, and the
+   dedicated server's so it can host it. A mod present on one side only loads
+   for one of you, which surfaces as a join rejection rather than anything
+   naming the mod - so both sides are shown per mod rather than a single tick. */
+async function modStrip(p) {
+  const [srv, cli] = [await api('mods?side=server'), await api('mods?side=client')];
+  const names = [...new Set([...(srv.mods || []), ...(cli.mods || [])]
+    .map(m => m.name))].sort();
+  const c = el('div', 'card');
+  c.innerHTML = `<h2>Car mods &middot; ${names.length}</h2>`;
+  const add = el('div', 'row wrap');
+  const path = el('input');
+  path.placeholder = 'Folder or .zip holding <mod>.kspkg + <mod>.json…';
+  path.style.minWidth = '340px';
+  const go = el('button', 'sm primary', 'Install');
+  go.onclick = async () => {
+    if (!path.value.trim()) { toast('Give a path first', true); return; }
+    toast('Installing…');
+    const r = await api('mods/install', { path: path.value.trim() });
+    toast(r.ok === false ? (r.error || 'Install failed')
+                         : 'Installed — check both sides below', r.ok === false);
+    carsPage();
+  };
+  add.append(path, go);
+  c.append(add);
+
+  if (!names.length) {
+    c.append(el('div', 'empty', 'No car mods installed'));
+  } else {
+    const t = el('table');
+    t.innerHTML = '<thead><tr><th>Mod</th><th>Client</th><th>Server</th>'
+      + '<th></th></tr></thead>';
+    const tb = el('tbody');
+    const has = (list, n) => (list || []).some(m => m.name === n);
+    names.forEach(n => {
+      const tr = el('tr');
+      const onC = has(cli.mods, n), onS = has(srv.mods, n);
+      tr.innerHTML = `<td>${esc(n)}</td>`
+        + `<td><span class="pill ${onC ? 'on' : 'off'}"><i class="dot"></i>`
+        + `${onC ? 'yes' : 'no'}</span></td>`
+        + `<td><span class="pill ${onS ? 'on' : 'off'}"><i class="dot"></i>`
+        + `${onS ? 'yes' : 'no'}</span></td>`;
+      const td = el('td');
+      const rm = el('button', 'sm danger', 'Remove');
+      rm.onclick = async () => {
+        if (!confirm(`Remove "${n}" from both sides?`)) return;
+        const r = await api('mods/remove', { name: n });
+        toast(r && r.error ? r.error : 'Removed', !!(r && r.error));
+        carsPage();
+      };
+      td.append(rm);
+      tr.append(td);
+      tb.append(tr);
+    });
+    t.append(tb);
+    c.append(t);
+  }
+  p.append(c);
+}
+
 async function carsPage() {
   const d = await api('cars');
   const p = $('#page');
   p.innerHTML = '';
-  viewerCard(p);
+  // ⚠ The old text-list viewer card used to live here. The gallery does the
+  // same job with a picture of each car and the same "View in 3D" button, so
+  // keeping both meant two lists of 74 cars and a screenful of duplication
+  // before you reached anything new. viewerCard() is still defined for reuse.
+  await carGallery(p);
+  await modStrip(p);
   const c = el('div', 'card');
   c.innerHTML = `<h2>Cars &middot; ${d.total ?? 0} total, `
     + `${d.kunos ?? 0} Kunos, ${d.mods ?? 0} modded</h2>`;
@@ -510,8 +983,72 @@ async function tracksPage() {
   const d = await api('tracks');
   const p = $('#page');
   p.innerHTML = '';
+
+  // Every track the game can load, with the cover art it ships. Only some
+  // tracks have one; the rest show a blank tile rather than a placeholder
+  // pretending to be a photo.
+  const loc = await api('browser/local');
+  const map = loc.track_map || {};
+  const gal = el('div', 'card');
+  const st = await api('thumbs/status');
+  const shipped = (st.covers || []).length;
+  const done = (st.covers_have || []).length;
+  gal.innerHTML = `<h2>Tracks &middot; ${Object.keys(map).length}</h2>`
+    + '<div class="tiny dim" style="margin-bottom:9px">From your own '
+    + 'tracks.table — imported tracks included. Cover art is whatever the game '
+    + 'ships: most of it is a compressed texture rather than an image file, so '
+    + 'it has to be decoded once. Imported tracks usually have none.</div>';
+
+  // ⚠ Decoding is ~2s per track and the tiles do it one at a time as they
+  // scroll into view, so the first visit trickles. One button up front turns
+  // that into a single wait.
+  const drow = el('div', 'row wrap');
+  const dec = el('button', 'sm primary',
+    done >= shipped ? 'Re-decode covers' : `Decode all covers (${shipped - done} left)`);
+  dec.onclick = async () => {
+    const r = await api('thumbs/covers', { force: done >= shipped });
+    if (!r.ok) { toast(r.error || 'busy', true); return; }
+    dec.disabled = true;
+    const poll = setInterval(async () => {
+      const j = (await api('thumbs/status')).cover_job || {};
+      dec.textContent = j.state === 'running'
+        ? `Decoding ${j.done}/${j.total} — ${j.current}` : 'Decode all covers';
+      if (j.state !== 'running') {
+        clearInterval(poll);
+        toast(`${j.made} cover(s) ready in ${j.seconds}s`);
+        tracksPage();
+      }
+    }, 1200);
+  };
+  drow.append(dec, el('span', 'tiny dim',
+    `${done}/${shipped} decoded`));
+  gal.append(drow);
+
+  const grid = el('div', 'grid g3');
+  grid.style.marginTop = '10px';
+  Object.entries(map).sort((a, b) => a[0].localeCompare(b[0]))
+    .forEach(([name, folder]) => {
+      const card = el('div', 'stat');
+      card.style.cssText = 'padding:0;overflow:hidden;text-align:left';
+      const img = el('img');
+      img.loading = 'lazy';
+      img.alt = '';   // blank, not a broken-image glyph + caption
+      img.style.cssText = 'width:100%;display:block;aspect-ratio:16/9;'
+        + 'object-fit:cover;background:#0c0e11';
+      img.src = 'api/thumb/track?folder=' + encodeURIComponent(folder);
+      img.onerror = () => { img.style.visibility = 'hidden'; };   // leave it blank
+      const cap = el('div');
+      cap.style.cssText = 'padding:8px 10px';
+      cap.innerHTML = `<b style="font-size:13px">${esc(name)}</b>`
+        + `<div class="tiny dim">${esc(folder)}</div>`;
+      card.append(img, cap);
+      grid.append(card);
+    });
+  gal.append(grid);
+  p.append(gal);
+
   const c = el('div', 'card');
-  c.innerHTML = `<h2>Tracks &middot; ${d.total ?? 0} layouts</h2>`;
+  c.innerHTML = `<h2>Hostable layouts &middot; ${d.total ?? 0}</h2>`;
   const tb = el('table');
   tb.innerHTML = '<thead><tr><th>#</th><th>Track</th><th>Layout</th>'
     + '<th>Length</th></tr></thead>';
@@ -553,8 +1090,65 @@ async function backendPage() {
   c.append(el('div', 'row wrap', `<span class="pill ${b.listening ? 'on' : 'off'}">`
     + `<i class="dot"></i>port ${b.port} ${b.listening ? 'listening' : 'closed'}</span>`
     + `<span class="pill ${b.have_cert ? 'on' : 'warn'}"><i class="dot"></i>`
-    + `${b.have_cert ? 'TLS keypair present' : 'no TLS keypair — run backend/gencert.sh'}</span>`));
+    + `${b.have_cert ? 'TLS keypair present' : 'no TLS keypair — run backend/gencert.sh'}</span>`
+    + `<span class="pill ${b.client_patched ? 'on' : 'off'}"><i class="dot"></i>`
+    + `${b.client_patched ? 'rdata → local backend' : 'rdata still Kunos'}</span>`));
+
+  const cu = b.client_url || {};
+  const red = el('div');
+  red.style.marginTop = '12px';
+  red.innerHTML = '<div class="tiny dim" style="margin-bottom:8px">'
+    + 'Launch already passes <code>-backend=</code>. The rdata write is the '
+    + 'fallback when Steam ate the flag. Close the game first. '
+    + `Intended: <code>${esc(b.launch_backend || cu.intended || '')}</code>`
+    + (cu.slot ? ` &middot; slot ${esc(cu.slot)}` : '')
+    + '</div>';
+  const rrow = el('div', 'row wrap');
+  const ap = el('button', b.client_patched ? '' : 'primary', 'Point client at us');
+  ap.onclick = async () => {
+    const r = await api('backend/redirect', { action: 'apply' });
+    toast(r.ok ? (r.already ? 'Already pointed at us' : 'Client URL patched')
+               : (r.error || 'Patch failed'), !r.ok);
+    backendPage();
+  };
+  const rs = el('button', null, 'Restore Kunos URL');
+  rs.onclick = async () => {
+    if (!confirm('Put the official lobby URL back in the client?')) return;
+    const r = await api('backend/redirect', { action: 'restore' });
+    toast(r.ok ? (r.already ? 'Already on Kunos' : 'Restored official URL')
+               : (r.error || 'Restore failed'), !r.ok);
+    backendPage();
+  };
+  rrow.append(ap, rs);
+  red.append(rrow);
+  c.append(red);
   p.append(c);
+
+  const ai = el('div', 'card');
+  ai.innerHTML = '<h2>Real AI (client Instant Race)</h2>'
+    + '<div class="tiny dim" style="margin-bottom:10px">'
+    + 'Dedicated-server <code>-virtual_ai_cars</code> is a replay along a '
+    + 'reference lap (<code>sendCarPhysicsUpdate</code> is not implemented). '
+    + 'The real driver, <code>AiDriverEvo</code>, lives in the <b>client</b>. '
+    + 'This starts <em>one</em> game process with '
+    + '<code>-ai_enable_evo_next</code> and <code>-opponent_count</code>, '
+    + 'and points Instant Race at that grid. Not a bot farm.</div>';
+  const arow = el('div', 'row wrap');
+  const nIn = el('input');
+  nIn.type = 'number'; nIn.min = 1; nIn.max = 40; nIn.value = 16;
+  nIn.style.width = '4.5em';
+  nIn.title = 'Opponent count';
+  const go = el('button', 'primary', 'Launch real AI race');
+  go.onclick = async () => {
+    const r = await api('game/launch_ai', {
+      opponents: parseInt(nIn.value, 10) || 16,
+      min_strength: 70, max_strength: 95,
+    });
+    toast(r.ok ? (r.hint || 'Launched') : (r.error || 'Launch failed'), !r.ok);
+  };
+  arow.append(nIn, go);
+  ai.append(arow);
+  p.append(ai);
 
   const l = el('div', 'card');
   l.innerHTML = '<h2>Backend log</h2>';
@@ -571,6 +1165,54 @@ async function settingsPage() {
   const cfg = await api('config');
   const p = $('#page');
   p.innerHTML = '';
+
+  // Install to a permanent folder + Start Menu shortcut, so the exe never has
+  // to be hunted down again.
+  const ins = await api('install');
+  const ic = el('div', 'card');
+  ic.innerHTML = '<h2>Install</h2>';
+  if (!ins.frozen) {
+    ic.append(el('div', 'tiny dim', esc(ins.note || '')));
+  } else if (ins.running_installed) {
+    ic.append(el('div', 'tiny dim',
+      'Running the installed copy — <code>' + esc(ins.installed_exe)
+      + '</code>'));
+  } else {
+    ic.append(el('div', 'tiny dim',
+      'Running from <code>' + esc(ins.running_exe || '?') + '</code>. Install '
+      + 'puts a copy in <code>' + esc(ins.install_dir) + '</code> with a Start '
+      + 'Menu shortcut. Your profiles and settings are not touched.'));
+  }
+  const irow = el('div', 'row wrap');
+  if (ins.frozen) {
+    const go = el('button', 'primary sm',
+      ins.installed ? 'Reinstall / repair shortcuts' : 'Install + make shortcut');
+    go.onclick = async () => {
+      const r = await api('install/run', { desktop: true });
+      toast(r.ok ? ('Installed to ' + r.exe) : (r.error || 'Install failed'),
+            !r.ok);
+      settingsPage();
+    };
+    irow.append(go);
+    if (ins.installed) {
+      const rm = el('button', 'sm danger', 'Remove shortcuts');
+      rm.onclick = async () => {
+        if (!confirm('Remove the Start Menu and Desktop shortcuts?\n\n'
+                     + 'Your profiles and settings are kept.')) return;
+        const r = await api('install/remove', {});
+        toast(r.ok ? 'Shortcuts removed' : (r.error || 'Failed'), !r.ok);
+        settingsPage();
+      };
+      irow.append(rm);
+    }
+  }
+  irow.append(el('span', 'pill ' + (ins.start_menu ? 'on' : 'off'),
+    '<i class="dot"></i>Start Menu'));
+  irow.append(el('span', 'pill ' + (ins.desktop ? 'on' : 'off'),
+    '<i class="dot"></i>Desktop'));
+  ic.append(irow);
+  p.append(ic);
+
   const c = el('div', 'card');
   c.innerHTML = '<h2>Paths &amp; ports</h2>';
   const g = el('div', 'grid g2');
@@ -667,8 +1309,24 @@ async function settingsPage() {
     unote.textContent = 'downloading…';
     const r = await api('update/apply', {});
     unote.textContent = r.ok ? (r.note || 'downloaded') : (r.error || 'failed');
-    if (r.ok) toast('Update ready — close ACECM to finish', false);
+    if (r.ok) {
+      toast('Update downloaded — restart to finish', false);
+      rst.style.display = '';
+    }
   };
+  // ⚠ The swap happens when this process EXITS - the downloaded exe cannot
+  // replace a running one. Without a restart button the update just sits
+  // there looking finished, and people report that it did not apply.
+  const rst = el('button', 'primary', 'Restart ACECM to finish');
+  rst.style.display = 'none';
+  rst.onclick = async () => {
+    const r = await api('app/restart', {});
+    if (!r.ok) { toast(r.error || 'restart failed', true); return; }
+    unote.textContent = 'restarting…';
+    // the window this page lives in is about to go away
+    setTimeout(() => { document.body.style.opacity = '0.4'; }, 400);
+  };
+  urow.append(rst);
   c.append(save);
   p.append(c);
 }
@@ -676,10 +1334,170 @@ async function settingsPage() {
 
 /* -------------------------------------------------------------- content -- */
 let scanned = null;
+/* Tracks this machine can hand to a joining player.
+
+   ⚠ There was no way to DO this from the UI. Publishing only ever happened as
+   a side effect of deploying a track, yet the dashboard tells you to "publish
+   from Content" - so the one instruction the app gives had no matching button.
+   Sharing is also the thing that makes a modded server joinable at all, which
+   makes it too important to be a side effect. */
+async function shareCard(p) {
+  const loc = await api('browser/local');
+  const reg = await api('registry');
+  const shared = {};
+  (reg.servers || []).forEach(e => (e.required_tracks || []).forEach(
+    t => { shared[t] = e; }));
+
+  const imported = new Set(loc.tracks || []);
+  const rows = Object.entries(loc.track_map || {})
+    .filter(([, folder]) => imported.has(folder))
+    .sort((a, b) => a[0].localeCompare(b[0]));
+
+  const c = el('div', 'card');
+  c.innerHTML = '<h2>Shared for download</h2>'
+    + '<div class="tiny dim" style="margin-bottom:10px">A player who does not '
+    + 'have your track cannot join, and the game will not send it to them. '
+    + 'Share it here and their ACECM can download it from you. Only tracks you '
+    + 'imported are listed — stock tracks everyone already has.</div>';
+  if (!rows.length) {
+    c.append(el('div', 'empty', 'No imported tracks to share'));
+  } else {
+    rows.forEach(([name, folder]) => {
+      const row = el('div', 'chk');
+      const on = !!shared[folder];
+      row.innerHTML = `<span class="name"><b>${esc(name)}</b>`
+        + `<div class="tiny dim">${esc(folder)}</div></span>`
+        + `<span class="pill ${on ? 'on' : 'off'}"><i class="dot"></i>`
+        + `${on ? 'shared' : 'not shared'}</span>`;
+      const b = el('button', on ? 'sm danger' : 'sm primary',
+                   on ? 'Stop sharing' : 'Share');
+      b.onclick = async () => {
+        if (on) {
+          await api('registry/delete', { id: shared[folder].id });
+          toast('No longer shared');
+        } else {
+          const r = await api('registry/save', {
+            name: `${name} (hosted here)`,
+            description: `Content for ${name}`,
+            required_tracks: [folder], public: true,
+          });
+          toast(r && r.error ? r.error : `${name} is now downloadable`,
+                !!(r && r.error));
+        }
+        contentPage();
+      };
+      row.append(b);
+      c.append(row);
+    });
+  }
+  p.append(c);
+}
+
 async function contentPage() {
   const p = $('#page');
   p.innerHTML = '';
   const mods = await api('mods');
+
+  // ⚠ Order matters. Hosting a custom track is why most people open this
+  // page, and the dashboard sends them here to publish one - so that comes
+  // first. Car mods and the read-only track inventory follow.
+  await shareCard(p);
+  // --- custom track deploy -------------------------------------------------
+  const td = await api('trackdeploy');
+  const dc = el('div', 'card');
+  dc.innerHTML = '<h2>Deploy a custom track</h2>'
+    + '<div class="tiny dim" style="margin-bottom:10px">'
+    // ⚠ This used to say a new path "cannot be found at all". That turned out
+    // to be a malformed record header plus a table that must stay sorted, not
+    // a limit of the engine - native installs are proven, so the old wording
+    // now argues against what the button above it does.
+    + 'The track\'s logic files go into the server\'s '
+    + '<code>content.kspkg</code>; the art stays with each player. '
+    + '<b>Native</b> installs it under its own name, so stock tracks are '
+    + 'untouched and anyone who imported the track can join with no extra '
+    + 'setup. <b>Borrow a slot</b> is the old way: it overwrites a stock '
+    + 'track and every joiner must patch their own game.</div>'
+    + `<div class="row wrap" style="margin-bottom:10px">`
+    + `<span class="pill ${td.server_running ? 'bad' : 'on'}"><i class="dot"></i>`
+    + `server ${td.server_running ? 'RUNNING — stop it first' : 'stopped'}</span>`
+    + `<span class="pill ${td.backup ? 'on' : 'off'}"><i class="dot"></i>`
+    + `${td.backup ? 'pre-deploy backup exists' : 'no backup yet'}</span>`
+    + `<span class="pill off"><i class="dot"></i>${td.size_mb} MB archive</span>`
+    + `</div>`
+    + `<div class="tiny dim" style="margin-bottom:10px">Target: `
+    + `<code>${esc(td.kspkg)}</code><br>${esc(td.note)}</div>`;
+
+  (td.packages || []).forEach(pk => {
+    const row = el('div', 'chk');
+    // `a || b ? x : y` binds as `(a||b) ? x : y`, so a package WITH a note was
+    // showing the missing-files text instead. Prefer the note.
+    const why = pk.note ? pk.note
+      : ((pk.missing || []).length ? `missing ${pk.missing.join(', ')}` : '');
+    row.innerHTML = `<span class="name"><b>${esc(pk.display_name || '(unnamed)')}</b>`
+      + `<div class="tiny dim">${esc(pk.folder || '')}`
+      + (pk.files ? ` &middot; ${pk.files} files` : '')
+      + (pk.host_slots && pk.host_slots.length
+          ? ` &middot; borrows ${esc(pk.host_slots[0].split(/[\\/]/).pop())}` : '')
+      + `<br>${esc(pk.path)}</div></span>`
+      + `<span class="pill ${pk.ok ? 'on' : 'warn'}"><i class="dot"></i>`
+      + `${pk.ok ? 'ready' : esc(why || 'incomplete')}</span>`;
+    // Native install: the track keeps its own paths, so no stock track is
+    // overwritten and joiners need nothing beyond their EvoForge import.
+    const nat = el('button', 'sm primary', 'Deploy (native)');
+    nat.disabled = !pk.ok || td.server_running;
+    nat.title = 'Install at the track\'s own paths. Stock tracks stay intact '
+      + 'and clients that already imported this track need no extra install.';
+    nat.onclick = async () => {
+      if (!confirm('Install "' + (pk.display_name || pk.path)
+          + '" at its own paths?\n\nNo stock track is overwritten. Clients '
+          + 'need this track imported in EvoForge, under the same folder name '
+          + '(' + (pk.folder || '?') + ').\n\nThe archive is backed up first.'))
+        return;
+      toast('Installing — this rewrites a 300 MB archive, please wait…');
+      const r = await api('trackdeploy/deploy', { path: pk.path, native: 1 });
+      toast(r.ok ? ('Installed at content\\tracks\\' + r.folder
+                    + ' — ' + r.modes + ' game modes')
+                 : (r.error || 'Install failed'), !r.ok);
+      contentPage();
+    };
+    row.append(nat);
+
+    const go = el('button', 'sm', 'Deploy (borrow slot)');
+    go.disabled = !pk.ok || td.server_running;
+    go.title = 'Legacy: overwrites Road Atlanta\'s slots. Every client also '
+      + 'needs install_track.py. Kept as a fallback.';
+    go.onclick = async () => {
+      if (!confirm('Deploy "' + (pk.display_name || pk.path)
+          + '" by BORROWING a stock track\'s slots?\n\nRoad Atlanta will show '
+          + 'this track until you restore, and every joining client must run '
+          + 'install_track.py.\n\nPrefer "Deploy (native)".')) return;
+      toast('Deploying — this rewrites a 300 MB archive, please wait…');
+      const r = await api('trackdeploy/deploy', { path: pk.path });
+      toast(r.ok ? 'Track deployed' : (r.error || 'Deploy failed'), !r.ok);
+      contentPage();
+    };
+    row.append(go);
+    dc.append(row);
+    if (pk.note) dc.append(el('div', 'tiny dim',
+      '⚠ ' + esc(pk.note)));
+  });
+  if (!(td.packages || []).length)
+    dc.append(el('div', 'empty',
+      'No track packages found. Build one with build_track_package.py.'));
+
+  const rrow = el('div', 'row');
+  rrow.style.marginTop = '10px';
+  const rest = el('button', 'sm danger', 'Restore archive');
+  rest.disabled = !td.backup;
+  rest.onclick = async () => {
+    if (!confirm('Restore content.kspkg from the pre-deploy backup?')) return;
+    const r = await api('trackdeploy/restore', {});
+    toast(r.ok ? 'Archive restored' : (r.error || 'Restore failed'), !r.ok);
+    contentPage();
+  };
+  rrow.append(rest);
+  dc.append(rrow);
+  p.append(dc);
 
   // --- installed car mods --------------------------------------------------
   const c = el('div', 'card');
@@ -723,7 +1541,40 @@ async function contentPage() {
     + `${au.problems ? au.problems + ' problem(s)' : 'all matched'}</h2>`
     + `<div class="tiny dim" style="margin-bottom:10px">`
     + `server <code>${esc(au.server_dir || '')}</code><br>`
-    + `client <code>${esc(au.client_dir || '')}</code></div>`;
+    + `client <code>${esc(au.client_dir || '')}</code><br>`
+    + `A join needs the same <code>.kspkg</code> + <code>.json</code> on both `
+    + `sides. Sync copies the pair; it will not overwrite a different-sized `
+    + `file unless you force it. Stop the dedicated server first if a `
+    + `.kspkg is locked.</div>`;
+  const syncRow = el('div', 'row wrap');
+  syncRow.style.marginBottom = '10px';
+  const sSrv = el('button', 'primary', 'Sync to server');
+  sSrv.title = 'Copy client mods onto the dedicated server';
+  sSrv.onclick = async () => {
+    const r = await api('mods/sync', { direction: 'to_server' });
+    toast(r.ok
+      ? `Copied ${(r.copied || []).length} file(s), ${r.problems_after} problem(s) left`
+      : (r.error || (r.errors || []).join('; ') || 'Sync failed'), !r.ok);
+    contentPage();
+  };
+  const sCli = el('button', null, 'Sync to client');
+  sCli.onclick = async () => {
+    const r = await api('mods/sync', { direction: 'to_client' });
+    toast(r.ok
+      ? `Copied ${(r.copied || []).length} file(s), ${r.problems_after} problem(s) left`
+      : (r.error || (r.errors || []).join('; ') || 'Sync failed'), !r.ok);
+    contentPage();
+  };
+  const sBoth = el('button', null, 'Fill gaps both ways');
+  sBoth.onclick = async () => {
+    const r = await api('mods/sync', { direction: 'both' });
+    toast(r.ok
+      ? `Copied ${(r.copied || []).length} file(s), ${r.problems_after} problem(s) left`
+      : (r.error || (r.errors || []).join('; ') || 'Sync failed'), !r.ok);
+    contentPage();
+  };
+  syncRow.append(sSrv, sCli, sBoth);
+  ac.append(syncRow);
   (au.mods || []).forEach(m => {
     const row = el('div', 'chk');
     row.innerHTML = `<span class="name"><b>${esc(m.name)}</b>`
@@ -805,72 +1656,6 @@ async function contentPage() {
   if (!(t.tracks || []).length) tc.append(el('div', 'empty', 'No tracks found'));
   p.append(tc);
 
-  // --- custom track deploy -------------------------------------------------
-  const td = await api('trackdeploy');
-  const dc = el('div', 'card');
-  dc.innerHTML = '<h2>Deploy a custom track</h2>'
-    + '<div class="tiny dim" style="margin-bottom:10px">'
-    + 'A custom track cannot be dropped in as loose files: the dedicated server '
-    + 'has no loose path for track logic, and the engine resolves content by '
-    + 'hash against the archive index, so a new path cannot be found at all. '
-    + 'A package installs by <b>borrowing an existing track’s slots</b> '
-    + 'inside <code>content.kspkg</code>.</div>'
-    + `<div class="row wrap" style="margin-bottom:10px">`
-    + `<span class="pill ${td.server_running ? 'bad' : 'on'}"><i class="dot"></i>`
-    + `server ${td.server_running ? 'RUNNING — stop it first' : 'stopped'}</span>`
-    + `<span class="pill ${td.backup ? 'on' : 'off'}"><i class="dot"></i>`
-    + `${td.backup ? 'pre-deploy backup exists' : 'no backup yet'}</span>`
-    + `<span class="pill off"><i class="dot"></i>${td.size_mb} MB archive</span>`
-    + `</div>`
-    + `<div class="tiny dim" style="margin-bottom:10px">Target: `
-    + `<code>${esc(td.kspkg)}</code><br>${esc(td.note)}</div>`;
-
-  (td.packages || []).forEach(pk => {
-    const row = el('div', 'chk');
-    // `a || b ? x : y` binds as `(a||b) ? x : y`, so a package WITH a note was
-    // showing the missing-files text instead. Prefer the note.
-    const why = pk.note ? pk.note
-      : ((pk.missing || []).length ? `missing ${pk.missing.join(', ')}` : '');
-    row.innerHTML = `<span class="name"><b>${esc(pk.display_name || '(unnamed)')}</b>`
-      + `<div class="tiny dim">${esc(pk.folder || '')}`
-      + (pk.files ? ` &middot; ${pk.files} files` : '')
-      + (pk.host_slots && pk.host_slots.length
-          ? ` &middot; borrows ${esc(pk.host_slots[0].split(/[\\/]/).pop())}` : '')
-      + `<br>${esc(pk.path)}</div></span>`
-      + `<span class="pill ${pk.ok ? 'on' : 'warn'}"><i class="dot"></i>`
-      + `${pk.ok ? 'ready' : esc(why || 'incomplete')}</span>`;
-    const go = el('button', 'sm primary', 'Deploy');
-    go.disabled = !pk.ok || td.server_running;
-    go.onclick = async () => {
-      if (!confirm('Deploy "' + (pk.display_name || pk.path)
-          + '" into the server archive?\n\nThe archive is backed up first.')) return;
-      toast('Deploying — this rewrites a 300 MB archive, please wait…');
-      const r = await api('trackdeploy/deploy', { path: pk.path });
-      toast(r.ok ? 'Track deployed' : (r.error || 'Deploy failed'), !r.ok);
-      contentPage();
-    };
-    row.append(go);
-    dc.append(row);
-    if (pk.note) dc.append(el('div', 'tiny dim',
-      '⚠ ' + esc(pk.note)));
-  });
-  if (!(td.packages || []).length)
-    dc.append(el('div', 'empty',
-      'No track packages found. Build one with build_track_package.py.'));
-
-  const rrow = el('div', 'row');
-  rrow.style.marginTop = '10px';
-  const rest = el('button', 'sm danger', 'Restore archive');
-  rest.disabled = !td.backup;
-  rest.onclick = async () => {
-    if (!confirm('Restore content.kspkg from the pre-deploy backup?')) return;
-    const r = await api('trackdeploy/restore', {});
-    toast(r.ok ? 'Archive restored' : (r.error || 'Restore failed'), !r.ok);
-    contentPage();
-  };
-  rrow.append(rest);
-  dc.append(rrow);
-  p.append(dc);
 }
 
 
@@ -1177,10 +1962,65 @@ async function gameSettingsPage() {
 
 /* -------------------------------------------------------------- browser -- */
 let brFilter = '', brSort = 'players';
+/* What this machine already has, so a row can say "you are missing this"
+   without a round trip per server. */
+let brLocal = { tracks: [], cars: [] };
+
+/* Ask the host beside a game server for whatever we lack.
+
+   ⚠ Only an ACECM can answer. The dedicated server's archive holds a track's
+   LOGIC - seven scene files - while a playable track is the ~1 GB of art in
+   the player's own folder. Those bytes exist only on the host's game install,
+   so a stock Kunos server has nothing to give and we say so. */
+async function contentFrom(s) {
+  toast('Looking for ACECM on ' + s.server_ip + '…');
+  const d = await api(`browser/discover?host=${encodeURIComponent(s.server_ip)}`);
+  if (!d.ok) { toast(d.error || 'host is not sharing content', true); return; }
+  if (!(d.servers || []).length) {
+    toast('That host runs ACECM but publishes no content', true); return;
+  }
+  // Prefer the entry that actually carries the track this server is running.
+  // ⚠ Match on the FOLDER, never the display name - the lobby says "Highlands
+  // Drift" and the content is highlands_kp, and a host may publish several
+  // tracks. Port is only a fallback for hosts predating this.
+  const wantFolder = (brLocal.track_map || {})[String(s.track || '').trim()];
+  const entry = (wantFolder && d.servers.find(x =>
+                   (x.required_tracks || []).includes(wantFolder)))
+    || d.servers.find(x => String(x.port) === String(s.server_tcp_port))
+    || d.servers[0];
+  toast('Checking what you need…');
+  const plan = await api(`browser/plan?base=${encodeURIComponent(d.base)}`
+    + `&id=${encodeURIComponent(entry.id)}`);
+  if (!plan.ok) { toast(plan.error || 'could not read the manifest', true); return; }
+  if (!plan.need.length) {
+    toast('You already have everything this server needs'); return;
+  }
+  const mb = (plan.bytes / 1e6).toFixed(0);
+  if (!confirm(`${entry.name}\n\nMissing ${plan.need.length} file(s), ${mb} MB.`
+      + `\n\nDownload from ${d.base} and install?`)) return;
+  const r = await api('browser/install', { base: d.base, id: entry.id });
+  if (!r.ok) { toast(r.error || 'install failed', true); return; }
+  const bar = $('#brprog');
+  const poll = setInterval(async () => {
+    const st = await api('browser/status');
+    if (bar) bar.textContent = st.total
+      ? `${st.detail} — ${(st.done / 1e6).toFixed(0)}/${(st.total / 1e6).toFixed(0)} MB`
+      : st.detail;
+    if (st.state === 'done' || st.state === 'error') {
+      clearInterval(poll);
+      toast(st.state === 'done' ? 'Content installed — you can join now'
+                                : st.detail, st.state === 'error');
+      brLocal = await api('browser/local');
+      browserPage();
+    }
+  }, 1000);
+}
+
 async function browserPage() {
   const p = $('#page');
   p.innerHTML = '';
   const d = await api('browser');
+  brLocal = await api('browser/local');
 
   if (!d.ok) {
     p.append(el('div', 'card', '<h2>Server browser</h2>'
@@ -1210,6 +2050,10 @@ async function browserPage() {
   row.append(search, sort);
   head.append(row);
   p.append(head);
+
+  const prog = el('div', 'tiny dim');
+  prog.id = 'brprog';
+  head.append(prog);
 
   const tblCard = el('div', 'card');
   p.append(tblCard);
@@ -1243,6 +2087,22 @@ async function browserPage() {
         <td>${num(s.players)}/${num(s.max_players)}</td>
         <td class="dim">${num(s.ping) || '—'}</td>
         <td class="tiny dim">${esc(String(s.current_session||''))}</td>`;
+      // Do we have this track? Answered against the client's OWN tracks.table
+      // (display name -> folder), which is exactly what the game consults, so
+      // there is no name guessing and nothing for the user to configure. A
+      // track absent from that table cannot be loaded, full stop.
+      const want = String(s.track || '').trim();
+      const map = brLocal.track_map || {};
+      const folder = map[want];
+      if (want && !folder) {
+        const warn = el('div', 'tiny');
+        warn.textContent = '⚠ you do not have this track';
+        warn.style.color = 'var(--bad, #e5a13c)';
+        tr.children[1].append(warn);
+      } else if (folder) {
+        tr.children[1].append(el('div', 'tiny dim', esc(folder)));
+      }
+
       const td = el('td');
       const b = el('button', 'sm', 'Copy join');
       b.onclick = async () => {
@@ -1251,6 +2111,12 @@ async function browserPage() {
         toast('Copied ' + link + ' — use the clipboard button in-game');
       };
       td.append(b);
+      // Content can only come from an ACECM running beside that server: the
+      // dedicated server holds a track's logic, never its art.
+      const get = el('button', 'sm', 'Get content');
+      get.title = 'Ask this host\'s ACECM for anything you are missing';
+      get.onclick = () => contentFrom(s);
+      td.append(get);
       tr.append(td);
       body.append(tr);
     });
@@ -1669,6 +2535,57 @@ const PAGES = {
   logs: ['Logs', 'What ACECM did, and every error in full', logsPage],
   settings: ['Settings', 'Paths and ports', settingsPage],
 };
+/* ---- keep the view where the user left it -------------------------------
+   Every page rebuilds itself wholesale (`p.innerHTML = ''`) and most actions
+   finish by calling their page function again. That threw the scroll back to
+   the top mid-task, and blanking to "Loading…" first made it flick as well -
+   which is the jumping around: the list you were reading is briefly gone, then
+   back at the top.
+
+   So: remember the scroll position per page, restore it after a rebuild, and
+   only show the placeholder when actually NAVIGATING somewhere new. A page
+   refreshing itself now keeps its old content on screen until the new content
+   is ready.                                                                */
+const scroller = () => document.scrollingElement || document.documentElement;
+const _scrollPos = {};
+let _page = '';
+addEventListener('scroll', () => {
+  if (_page) _scrollPos[_page] = scroller().scrollTop;
+}, { passive: true });
+
+// ⚠ One render at a time, per page. Every page function clears #page and then
+// awaits its data, so two overlapping calls both clear an empty page and then
+// both append - and the whole dashboard appears TWICE. It only became visible
+// when a page grew an extra await, but the race was always there.
+const _rendering = {};
+
+function keepPlace(name, fn) {
+  return async function (...args) {
+    if (_rendering[name]) return;          // a render is already in flight
+    _rendering[name] = true;
+    // a self-refresh should come back to where the user was, a fresh
+    // navigation should start at the top
+    const want = _page === name ? (_scrollPos[name] || 0) : 0;
+    try {
+      return await fn.apply(this, args);
+    } finally {
+      _rendering[name] = false;
+      _page = name;
+      requestAnimationFrame(() => {
+        if (want) scroller().scrollTop = want;
+      });
+    }
+  };
+}
+Object.entries(PAGES).forEach(([name, spec]) => {
+  const orig = spec[2];
+  const wrapped = keepPlace(name, orig);
+  spec[2] = wrapped;
+  // pages call themselves by name after an action, so rebind the global too -
+  // otherwise only navigation would be covered and the common case would not
+  if (orig.name) window[orig.name] = wrapped;
+});
+
 function go(name) {
   if (typeof telTimer !== 'undefined' && telTimer) { clearInterval(telTimer); telTimer = null; }
   if (typeof telRaf !== 'undefined' && telRaf) { cancelAnimationFrame(telRaf); telRaf = null; }
@@ -1677,7 +2594,9 @@ function go(name) {
   $('#sub').textContent = sub;
   document.querySelectorAll('nav a').forEach(a =>
     a.classList.toggle('on', a.dataset.page === name));
-  $('#page').innerHTML = '<div class="empty">Loading…</div>';
+  // ⚠ Only blank when the page is actually changing. Blanking on a refresh is
+  // what makes the content flick away and come back.
+  if (name !== _page) $('#page').innerHTML = '<div class="empty">Loading…</div>';
   fn().catch(e => { $('#page').innerHTML = ''; toast(String(e), true); });
   location.hash = name;
 }

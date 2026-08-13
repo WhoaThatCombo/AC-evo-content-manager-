@@ -132,7 +132,24 @@ def index(refresh=False):
         return {"error": "game install not found - set the game folder in "
                          "Settings", "cars": []}
     cache = os.path.join(_root(), "index.json")
-    stamp = "|".join(f"{os.path.basename(p)}:{_stamp(p)}" for _m, p in pkgs)
+    # ⚠ The mod FOLDERS are part of the stamp, not just the packages we found
+    # in them. Otherwise a mod added or deleted while ACECM is open keeps the
+    # old list - the car is on disk and ACECM still says it is missing, which
+    # looks like a bug in the mod rather than a stale cache.
+    dirs = []
+    for which in ("client", "server"):
+        try:
+            d = install.client_mods_dir() if which == "client" else install.mods_dir()
+        except Exception:
+            continue
+        if d and os.path.isdir(d):
+            try:
+                dirs.append(f"{d}:{int(os.stat(d).st_mtime)}:"
+                            f"{len(os.listdir(d))}")
+            except OSError:
+                pass
+    stamp = "|".join([f"{os.path.basename(p)}:{_stamp(p)}" for _m, p in pkgs]
+                     + dirs)
 
     def _mark(cars):
         # ⚠ Recompute "already extracted" on every read. It changes whenever a
@@ -152,18 +169,27 @@ def index(refresh=False):
             pass
 
     found = {}                      # car id -> (mod name, package path)
+    bad = []
     for mod, pkg in pkgs:
-        for path, size, _off in kspkg.iter_entries(pkg):
-            if not size:
-                continue
-            low = path.lower()
-            if not low.startswith("content\\cars\\") or "\\meshes\\" not in low:
-                continue
-            if not low.endswith(".mesh"):
-                continue
-            parts = path.split("\\")
-            if len(parts) > 2 and not parts[2].lower().startswith("common"):
-                found.setdefault(parts[2], (mod, pkg))
+        # ⚠ Never let one unreadable package empty the whole list. A partial
+        # download or a file that is not really a kspkg is a problem with THAT
+        # mod; the other cars are fine and must still be listed.
+        try:
+            for path, size, _off in kspkg.iter_entries(pkg):
+                if not size:
+                    continue
+                low = path.lower()
+                if not low.startswith("content\\cars\\") \
+                        or "\\meshes\\" not in low:
+                    continue
+                if not low.endswith(".mesh"):
+                    continue
+                parts = path.split("\\")
+                if len(parts) > 2 and not parts[2].lower().startswith("common"):
+                    found.setdefault(parts[2], (mod, pkg))
+        except Exception as ex:
+            bad.append(os.path.basename(pkg))
+            logs.LOG.warning("skipping unreadable package %s: %s", pkg, ex)
 
     # ⚠ A mod's real name is declared against its PRESET id
     # (preset_apex_ind_h_mech_1), not the folder id we list cars by, so
@@ -192,7 +218,10 @@ def index(refresh=False):
         json.dump({"stamp": stamp, "cars": cars}, open(cache, "w", encoding="utf-8"))
     except Exception as ex:
         logs.LOG.warning("could not cache viewer index: %s", ex)
-    return {"cars": _mark(cars), "cached": False}
+    # name the bad packages so a mod that cannot be read is visible, rather
+    # than just quietly absent from the list
+    return {"cars": _mark(cars), "cached": False,
+            "unreadable": bad}
 
 
 # --------------------------------------------------------------- extraction --

@@ -8,16 +8,60 @@ package; no framework, so it runs anywhere Python does.
 import json
 import mimetypes
 import os
+import shutil
 import socketserver
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-from . import (backend, config, content, detect, hooking, install, logs,
-               patching, version,
+from . import (backend, config, content, contentsync, detect, hooking, install,
+               installer,
+               logs, lobby, netutil, overview, patching, realai, version,
                registry, servers, settings as gamesettings,
-               telemetry, tracks as trackdeploy, viewer)
+               telemetry, thumbs, tracks as trackdeploy, viewer)
+
+
+_INSTALL = {"state": "idle", "detail": "", "done": 0, "total": 0, "files": []}
+
+
+def _install_content(body):
+    """Download everything a server needs that this machine lacks.
+
+    Runs in a thread and reports through /api/browser/status: a track is a
+    thousand files and roughly a gigabyte, so the request must not be the thing
+    holding the progress.
+    """
+    if _INSTALL["state"] == "running":
+        return {"ok": False, "error": "an install is already running"}
+    base, sid = body.get("base") or "", body.get("id") or ""
+    p = contentsync.plan(base, sid)
+    if not p.get("ok"):
+        return p
+    need = p["need"]
+    _INSTALL.update({"state": "running", "detail": "starting", "done": 0,
+                     "total": p["bytes"], "files": []})
+
+    def run():
+        moved = 0
+        try:
+            for i, entry in enumerate(need, 1):
+                _INSTALL["detail"] = f"{i}/{len(need)} {entry['path']}"
+
+                def tick(done, _size, base=moved):
+                    _INSTALL["done"] = base + done
+                contentsync.fetch(entry, tick)
+                moved += entry.get("size", 0)
+                _INSTALL["done"] = moved
+                _INSTALL["files"].append(entry["path"])
+            _INSTALL.update({"state": "done",
+                             "detail": f"{len(need)} file(s) installed"})
+        except Exception as ex:
+            logs.LOG.exception("content install failed")
+            _INSTALL.update({"state": "error", "detail": str(ex)})
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True, "files": len(need), "bytes": p["bytes"]}
 
 
 def _json(handler, obj, code=200):
@@ -43,10 +87,57 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/state":
                 return _json(self, self._state())
+            if path == "/api/install":
+                return _json(self, installer.status())
+            if path == "/api/overview":
+                return _json(self, overview.overview())
             if path == "/api/cars":
                 return _json(self, content.cars())
+            if path == "/api/cars/map":
+                from . import carsmap
+                tab = carsmap.table((q.get("refresh") or [""])[0] == "1")
+                return _json(self, {
+                    "presets": tab.get("presets"),
+                    "models": tab.get("models"),
+                    "count": len(tab.get("presets") or {}),
+                    "error": tab.get("error"),
+                })
+            if path == "/api/lobby":
+                return _json(self, {"path": lobby.PATH, "lobby": lobby.read(),
+                                    "lan_ip": netutil.lan_ipv4()})
+            if path == "/api/game/worker":
+                return _json(self, realai.worker_status())
             # 3D viewer: which cars can be shown, and how a pending
             # extraction is getting on
+            # --- joining someone else's server ---------------------------
+            # Delivery lives in registry.py; these answer the questions that
+            # come first - what do I already have, and what would this server
+            # cost me?
+            if path == "/api/browser/status":
+                return _json(self, dict(_INSTALL))
+            if path == "/api/browser/local":
+                return _json(self, contentsync.local(
+                    (q.get("refresh") or [""])[0] == "1"))
+            if path == "/api/browser/discover":
+                return _json(self, contentsync.discover(
+                    (q.get("host") or [""])[0],
+                    (q.get("port") or [None])[0]))
+            if path == "/api/browser/plan":
+                return _json(self, contentsync.plan(
+                    (q.get("base") or [""])[0], (q.get("id") or [""])[0]))
+            # --- pictures for the car and track lists --------------------
+            if path == "/api/thumb/car":
+                return self._send_png(thumbs.render_car(
+                    (q.get("id") or [""])[0]))
+            if path == "/api/thumb/track":
+                return self._send_png(thumbs.track_cover(
+                    (q.get("folder") or [""])[0]))
+            if path == "/api/thumbs/status":
+                return _json(self, {**thumbs.job(),
+                                    "have": sorted(thumbs.have()),
+                                    "covers": thumbs.covers_available(),
+                                    "covers_have": sorted(thumbs.covers_have()),
+                                    "cover_job": thumbs.cover_job()})
             if path == "/api/viewer/cars":
                 return _json(self, viewer.index(
                     (q.get("refresh") or [""])[0] == "1"))
@@ -187,7 +278,33 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, install.apply_fix(body.get("name")))
             if path == "/api/mods/remove":
                 return _json(self, install.remove(body.get("name")))
+            if path == "/api/mods/sync":
+                return _json(self, install.sync(
+                    body.get("direction") or "to_server",
+                    bool(body.get("force")),
+                    body.get("names")))
+            if path == "/api/app/restart":
+                return _json(self, installer.restart())
+            if path == "/api/install/run":
+                return _json(self, installer.install(
+                    desktop=body.get("desktop", True)))
+            if path == "/api/install/remove":
+                return _json(self, installer.uninstall(
+                    remove_exe=bool(body.get("purge"))))
+            if path == "/api/thumbs/covers":
+                return _json(self, thumbs.build_covers(
+                    bool(body.get("force"))))
+            if path == "/api/thumbs/build":
+                return _json(self, thumbs.build_all(
+                    bool(body.get("force"))))
+            if path == "/api/browser/install":
+                return _json(self, _install_content(body))
             if path == "/api/trackdeploy/deploy":
+                # native = install at the track's own paths, leaving every
+                # stock track intact; the old path borrows Road Atlanta's slots
+                if body.get("native"):
+                    return _json(self, trackdeploy.deploy_native(
+                        body.get("path"), dry_run=bool(body.get("dry_run"))))
                 return _json(self, trackdeploy.deploy(body.get("path")))
             if path == "/api/trackdeploy/restore":
                 return _json(self, trackdeploy.restore())
@@ -262,11 +379,26 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, backend.start(body.get("mode", "proxy")))
             if path == "/api/backend/stop":
                 return _json(self, backend.stop())
+            if path == "/api/backend/redirect":
+                action = (body.get("action") or "apply").lower()
+                if action == "restore":
+                    return _json(self, backend.restore_redirect())
+                return _json(self, backend.apply_redirect())
             if path == "/api/join":
                 return _json(self, backend.join(body.get("id"),
                                                 body.get("shape", "bare")))
             if path == "/api/game/launch":
                 return _json(self, backend.launch_game())
+            if path == "/api/game/launch_ai":
+                return _json(self, realai.launch(
+                    int(body.get("opponents") or 16),
+                    int(body.get("min_strength") or 70),
+                    int(body.get("max_strength") or 95),
+                    bool(body.get("small_window"))))
+            if path == "/api/game/attach_worker":
+                return _json(self, realai.attach_worker(
+                    body.get("id") or "",
+                    body.get("ai_player", True)))
             if path == "/api/config":
                 return _json(self, config.save(body))
             return _json(self, {"error": "unknown endpoint"}, 404)
@@ -289,6 +421,20 @@ class Handler(BaseHTTPRequestHandler):
             "server_exe_found": detect.server_candidates(),
             "tools_ok": os.path.isdir(config.tools_dir()),
         }
+
+    def _send_png(self, path):
+        """A cached image, or 404 so the UI can leave the tile blank."""
+        if not path or not os.path.isfile(path):
+            return _json(self, {"error": "no image"}, 404)
+        data = open(path, "rb").read()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        # cheap to regenerate, and a stale car render is confusing after a
+        # repaint - keep it short rather than forever
+        self.send_header("Cache-Control", "max-age=300")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _base(self):
         host = self.headers.get("Host") or f"127.0.0.1:{config.CFG['ui_port']}"
@@ -345,6 +491,34 @@ class App(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
 
 
+def _rescan_content():
+    """Forget what content we THINK exists, and look again.
+
+    ⚠ Content is cached against the archives it came from, which does not cover
+    everything: a mod folder emptied by hand, a track deleted, a package
+    restored from a backup with its old timestamps. The symptom is ACECM
+    insisting content is missing when it is sitting right there, and the only
+    reliable cure a user finds is deleting the data folder.
+
+    A restart is the natural moment to look again - it costs a couple of
+    seconds and it is exactly what someone restarting the app is asking for.
+    Expensive caches are left alone: file hashes are keyed per file on
+    size+mtime, and car renders are keyed on the car itself.
+    """
+    stale = [os.path.join(config.DATA, "track_map.json"),
+             os.path.join(config.DATA, "viewer", "index.json")]
+    gone = 0
+    for f in stale:
+        try:
+            if os.path.isfile(f):
+                os.remove(f)
+                gone += 1
+        except OSError as ex:
+            logs.LOG.warning("could not clear %s: %s", f, ex)
+    if gone:
+        logs.LOG.info("content caches cleared (%d) - rescanning on demand", gone)
+
+
 def serve():
     """Bind and start the HTTP server on a background thread; return its URL.
 
@@ -352,6 +526,7 @@ def serve():
     toolkits require that - while the API keeps serving behind it.
     """
     logs.setup()
+    _rescan_content()
     port = config.CFG["ui_port"]
     try:
         srv = App(("127.0.0.1", port), Handler)

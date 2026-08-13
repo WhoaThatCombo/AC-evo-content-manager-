@@ -38,7 +38,7 @@ import websockets
 
 import acevo_proto as ap
 from acevo_backend import (PROTOCOL_VERSION, SERVER_VERSION, TIME_OF_DAY,
-                           fill_entry, unwrap, wrap)
+                           fill_entry, is_our_server, unwrap, wrap)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("PORT", "448"))
@@ -127,11 +127,14 @@ class _Control(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             body = {}
-        sid = body.get("id") or body.get("server_id")
+        sid = body.get("id") or body.get("server_id") or body.get("host")
         shape = body.get("shape", "bare")
+        tcp = body.get("tcp") or body.get("tcp_port")
+        udp = body.get("udp") or body.get("udp_port") or tcp
+        password = body.get("password") or ""
         ws, loop = CLIENT["ws"], CLIENT["loop"]
         if not sid:
-            return self._send({"ok": False, "error": "no server id"}, 400)
+            return self._send({"ok": False, "error": "no server id/host"}, 400)
         if not ws or not loop:
             return self._send({"ok": False,
                                "error": "no client connected to the backend - "
@@ -139,7 +142,8 @@ class _Control(BaseHTTPRequestHandler):
         import join_push
         try:
             fut = asyncio.run_coroutine_threadsafe(
-                join_push.push(ws, sid, shape), loop)
+                join_push.push(ws, sid, shape, tcp=tcp, udp=udp,
+                               password=password), loop)
             self._send({"ok": True, **fut.result(timeout=5)})
         except Exception as ex:
             self._send({"ok": False, "error": f"{type(ex).__name__}: {ex}"}, 500)
@@ -151,7 +155,7 @@ def start_control():
     print(f"control: http://127.0.0.1:{CONTROL_PORT}/  (POST /join {{\"id\":...}})")
 
 
-def add_local_entry(raw):
+def add_local_entry(raw, peer=None):
     """Append our server to a ResponseServerList travelling downstream."""
     try:
         name, msg = unwrap(raw)
@@ -164,7 +168,7 @@ def add_local_entry(raw):
     except Exception as ex:
         print(f"  (server-list capture failed: {ex})")
     try:
-        fill_entry(msg.entry.add())
+        fill_entry(msg.entry.add(), peer=peer)
         stats["injected"] += 1
         return wrap(msg, name), name
     except Exception as ex:
@@ -187,14 +191,16 @@ async def pump_up(client, upstream):
             await upstream.send(raw)
             continue
 
-        if (name == "MultiplayerServerListRequestServerEntry"
-                and getattr(msg, "server_ip", "") == SERVER_IP):
-            # Kunos has never heard of a server on 127.0.0.1
+        req_ip = getattr(msg, "server_ip", "") or ""
+        req_tcp = getattr(msg, "server_tcp_port", 0) or 0
+        if name == "MultiplayerServerListRequestServerEntry" and is_our_server(
+                req_ip, req_tcp):
+            # Kunos has never heard of a server on 127.0.0.1 / our LAN IP
             r = ap.new("MultiplayerServerListResponseServerEntry")
-            fill_entry(r.entry)
+            fill_entry(r.entry, peer=getattr(client, "remote_address", None))
             await client.send(wrap(r, "MultiplayerServerListResponseServerEntry"))
             stats["answered"] += 1
-            print(f"  ANS  {name} for {SERVER_IP} (locally)")
+            print(f"  ANS  {name} for {req_ip}:{req_tcp} (locally)")
             continue
 
         print(f"  UP   {name}")
@@ -208,7 +214,8 @@ async def pump_down(client, upstream):
         if isinstance(raw, str):
             await client.send(raw)
             continue
-        out, name = add_local_entry(raw)
+        out, name = add_local_entry(
+            raw, peer=getattr(client, "remote_address", None))
         if name == "MultiplayerServerListResponseServerList":
             print(f"  DOWN {name}  (+1 local entry)")
         await client.send(out)

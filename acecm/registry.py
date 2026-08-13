@@ -43,19 +43,37 @@ TEMPLATE = {
 
 
 # ------------------------------------------------------------------ hashes --
+# ⚠ Held in memory and flushed once. Re-reading and rewriting the whole cache
+# file per digest is fine for a handful of car mods but quadratic for a track
+# folder - 3600 files meant 3600 full rewrites of a growing JSON, which is what
+# made the first manifest of a 1 GB track take long enough to time out.
+_CACHE = None
+_DIRTY = False
+
+
 def _cache():
-    try:
-        return json.load(open(HASHCACHE, encoding="utf-8"))
-    except Exception:
-        return {}
+    global _CACHE
+    if _CACHE is None:
+        try:
+            _CACHE = json.load(open(HASHCACHE, encoding="utf-8"))
+        except Exception:
+            _CACHE = {}
+    return _CACHE
 
 
-def _save_cache(c):
-    json.dump(c, open(HASHCACHE, "w", encoding="utf-8"))
+def flush_cache():
+    global _DIRTY
+    if _DIRTY and _CACHE is not None:
+        try:
+            json.dump(_CACHE, open(HASHCACHE, "w", encoding="utf-8"))
+        except OSError:
+            pass
+        _DIRTY = False
 
 
 def file_digest(path):
-    """SHA-256, cached on (size, mtime) so big mods are hashed once."""
+    """SHA-256, cached on (size, mtime) so big content is hashed once."""
+    global _DIRTY
     try:
         st = os.stat(path)
     except OSError:
@@ -71,7 +89,7 @@ def file_digest(path):
             h.update(chunk)
     digest = h.hexdigest()
     c[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "sha256": digest}
-    _save_cache(c)
+    _DIRTY = True
     return digest
 
 
@@ -120,8 +138,20 @@ def _mod_files(name):
 
 
 def _track_files(folder):
-    """Everything in a track package folder, relative paths preserved."""
-    roots = [os.path.join(config.DATA, "track_packages", folder),
+    """Everything in a track folder, relative paths preserved.
+
+    ⚠ The IMPORTED folder comes first, and it is what a joining player actually
+    needs. A deploy package holds a track's logic - the handful of scene files
+    that go into the server archive - while a playable track is the ~1 GB of art
+    the client keeps in Saved Games. Serving the package would hand someone
+    eight files and leave the game unable to load the track.
+
+    Paths are `tracks/<folder>/<rel>`, which installs straight to the client's
+    tracks folder - see contentsync.destination.
+    """
+    roots = [os.path.join(os.path.expanduser("~"), "Saved Games", "ACE",
+                          "mods", "content", "tracks", folder),
+             os.path.join(config.DATA, "track_packages", folder),
              os.path.join(config.server_dir(), "track_packages", folder),
              os.path.join(os.path.expanduser("~"), "Downloads", folder)]
     out = []
@@ -137,29 +167,34 @@ def _track_files(folder):
     return out
 
 
-def manifest(sid, base_url=""):
+def manifest(sid, base_url="", digests=True):
+    """Every file a server requires.
+
+    ⚠ `digests=False` for anything that just needs the size. A track folder is
+    thousands of files and about a gigabyte, so hashing it is seconds at best
+    and minutes cold - long enough that a caller listing several servers times
+    out and the connection is dropped mid-response.
+    """
     entry = next((e for e in load() if e["id"] == sid), None)
     if not entry:
         return {"ok": False, "error": "no such server"}
     files, missing = [], []
-    for mod in entry.get("required_mods", []):
-        got = _mod_files(mod)
-        if not got:
-            missing.append(f"mod {mod}")
-        for rel, path in got:
-            files.append({"path": rel, "size": os.path.getsize(path),
-                          "sha256": file_digest(path), "kind": "mod",
-                          "url": f"{base_url}/api/registry/file?id={sid}"
-                                 f"&path={rel}"})
-    for trk in entry.get("required_tracks", []):
-        got = _track_files(trk)
-        if not got:
-            missing.append(f"track {trk}")
-        for rel, path in got:
-            files.append({"path": rel, "size": os.path.getsize(path),
-                          "sha256": file_digest(path), "kind": "track",
-                          "url": f"{base_url}/api/registry/file?id={sid}"
-                                 f"&path={rel}"})
+    for kind, names, finder in (("mod", entry.get("required_mods", []),
+                                 _mod_files),
+                                ("track", entry.get("required_tracks", []),
+                                 _track_files)):
+        for name in names:
+            got = finder(name)
+            if not got:
+                missing.append(f"{kind} {name}")
+            for rel, path in got:
+                files.append({"path": rel, "size": os.path.getsize(path),
+                              "sha256": file_digest(path) if digests else "",
+                              "kind": kind,
+                              "url": f"{base_url}/api/registry/file?id={sid}"
+                                     f"&path={rel}"})
+    if digests:
+        flush_cache()
     return {"ok": True, "server": {k: entry[k] for k in
                                    ("id", "name", "description", "ip", "port")},
             "files": files,
@@ -189,7 +224,8 @@ def public_list(base_url=""):
     for e in load():
         if not e.get("public", True):
             continue
-        m = manifest(e["id"], base_url)
+        # size only - hashing every server's content to draw a list is minutes
+        m = manifest(e["id"], base_url, digests=False)
         out.append({
             "id": e["id"], "name": e["name"], "description": e.get("description", ""),
             "ip": e.get("ip", ""), "port": e.get("port", 9700),

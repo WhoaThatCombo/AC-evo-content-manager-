@@ -200,10 +200,8 @@ def stop(profile_id=None):
         rec = t.get(key)
         if not rec:
             continue
-        subprocess.run(["powershell.exe", "-NoProfile", "-Command",
-                        f"Stop-Process -Id {rec['pid']} -Force "
-                        f"-ErrorAction SilentlyContinue"],
-                       capture_output=True, timeout=20)
+        from . import winproc
+        winproc.kill(rec["pid"])
         stopped.append(key)
         t.pop(key, None)
     _save(t)
