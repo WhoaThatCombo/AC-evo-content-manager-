@@ -149,6 +149,11 @@ def start(profile_id, baseline_ai=False):
         return {"ok": False, "error": f"not found: {script}"}
 
     env = dict(os.environ)
+    # ⚠ Tell the tool WHERE the server is. A frozen build unpacks these
+    # scripts into a temp folder, so a tool that resolves the server dir
+    # from its own __file__ finds nothing there - no exe, no events
+    # json, nowhere to write a log - and the launch fails silently.
+    env["SERVER_DIR"] = config.server_dir()
     env["TELEM_PORT"] = str(port)              # one endpoint per server
     # The coordinate filter must match THIS server's track, not a baked-in one.
     bb = None

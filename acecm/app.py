@@ -272,6 +272,8 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, telemetry.track((q.get("id") or [None])[0]))
             if path == "/api/telemetry/status":
                 return _json(self, telemetry.status_all())
+            if path == "/api/browser/why":
+                return _json(self, backend.browser_chain())
             if path == "/api/browser":
                 return _json(self, backend.server_list())
             if path == "/api/join/state":

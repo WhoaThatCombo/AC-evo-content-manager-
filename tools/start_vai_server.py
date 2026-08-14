@@ -22,7 +22,14 @@ import subprocess
 import sys
 import zlib
 
-SRV = os.path.dirname(os.path.abspath(__file__))
+# ⚠ The server folder comes from the ENVIRONMENT first, and only then from
+# where this script happens to sit. In a frozen ACECM the script is unpacked
+# into %TEMP%\_MEIxxxx\tools and run from there, so __file__ points at a temp
+# folder that holds no exe, no events_*.json and no serverConfig - the launch
+# silently does nothing and no log ever appears. It works from a source
+# checkout purely because the script lives next to the server there.
+SRV = (os.environ.get("SERVER_DIR")
+       or os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(SRV, os.environ.get("SERVER_EXE", "AssettoCorsaEVOServer.exe"))
 LOG = os.path.join(SRV, "serverConfig",
                    os.environ.get("LOG_FILE", "vai_server.log"))

@@ -121,6 +121,14 @@ def build(clean=False):
             "pythonnet", "cryptography", "websockets",
             "texture2ddecoder", "PIL", "PIL.Image"):
         args += ["--hidden-import", mod]
+    # ⚠ protobuf's well-known types (any_pb2, timestamp_pb2, ...) are GENERATED
+    # modules imported at runtime, so PyInstaller's scanner never sees them and
+    # naming the package alone does not bring them. Without this the frozen
+    # backend dies instantly with
+    #   ImportError: cannot import name 'any_pb2' from 'google.protobuf'
+    # which never showed up in development because the proxy runs from source
+    # there - so the shipped build was broken for everyone but the author.
+    args += ["--collect-submodules", "google.protobuf"]
     if clean:
         args.append("--clean")
     print("running PyInstaller ...")
