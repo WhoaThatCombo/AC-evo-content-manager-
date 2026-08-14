@@ -98,6 +98,41 @@ def packages(extra=None):
     return {"packages": out, "roots": roots}
 
 
+def importable():
+    """Tracks already imported on this machine, ready to deploy as-is.
+
+    ⚠ These are the obvious thing to host and were not offered anywhere. The
+    deploy list only ever showed slot-borrow PACKAGES built by
+    build_track_package.py, so a track imported in EvoForge - the normal way
+    anyone gets one - could not be deployed from the UI at all, while the
+    error for a missing track said "deploy it from Content".
+
+    A native install needs nothing more than this folder: root .scene, .track
+    and containers\\ are all here.
+    """
+    out = []
+    try:
+        from . import contentsync
+        root = contentsync.tracks_dir()
+        known = {f: n for n, f in (contentsync.track_map() or {}).items()}
+        for folder in contentsync.installed_tracks():
+            src = os.path.join(root, folder)
+            item = {"path": src, "folder": folder, "source": "imported",
+                    "display_name": known.get(folder) or folder}
+            try:
+                info = read_track_folder(src)
+                item["layout"] = info["layout"]
+                item["files"] = len(info["files"])
+                item["ok"] = True
+            except Exception as ex:
+                item["ok"] = False
+                item["error"] = str(ex)
+            out.append(item)
+    except Exception as ex:
+        logs.LOG.warning("importable tracks: %s", ex)
+    return out
+
+
 def _backup(kspkg):
     bak = kspkg + ".bak_pretrack"
     if os.path.exists(bak):
@@ -356,8 +391,13 @@ def deploy_native(pkg_dir, dry_run=False, folder=None, display_name=None):
             return {"ok": False, "error": str(ex)}
         own_folder = src["own_folder"]
         layout = src["layout"]
-        display = display_name or own_folder.rsplit("_", 1)[0].replace(
-            "_", " ").title()
+        # ⚠ Default to the name CLIENTS already use for this folder, from their
+        # own tracks.table. The lobby advertises whatever name the server was
+        # given, and joiners match on it - so deploying "Highlands" when every
+        # client calls it "Highlands Drift" tells them they are missing a track
+        # they have. Guessing a name from the folder has the same failure.
+        display = display_name or _client_name(own_folder) \
+            or own_folder.rsplit("_", 1)[0].replace("_", " ").title()
     # ⚠ The server broadcasts PATHS, so its folder name must be the one clients
     # already hold. A package built as drift_0y3j31 cannot serve a client that
     # imported drift_2hwp80 - same track, different folder, no join.
@@ -441,6 +481,18 @@ def deploy_native(pkg_dir, dry_run=False, folder=None, display_name=None):
 
     return {**plan, "seconds": round(time.time() - t0, 1),
             "written": res, "verified": check, "published": published, **bak}
+
+
+def _client_name(folder):
+    """What the local client's tracks.table calls this folder, if anything."""
+    try:
+        from . import contentsync
+        for name, f in contentsync.track_map().items():
+            if f == folder:
+                return name
+    except Exception as ex:
+        logs.LOG.info("client track name for %s: %s", folder, ex)
+    return ""
 
 
 def _publish(display, folder):

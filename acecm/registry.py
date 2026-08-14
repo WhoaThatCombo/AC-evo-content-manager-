@@ -127,13 +127,28 @@ def remove(sid):
 # ---------------------------------------------------------------- manifest --
 def _mod_files(name):
     """Both halves of a car mod. A .kspkg without its .json installs fine and
-    then never appears in the car list, so the manifest always carries both."""
-    d = install.mods_dir()
+    then never appears in the car list, so the manifest always carries both.
+
+    ⚠ Look on BOTH sides. This checked only the dedicated server's mod folder,
+    but a mod is just as likely to be installed client-side only - on this
+    machine six mods are client-side and one is on the server - so sharing
+    those found no files and published an empty manifest.
+    """
+    dirs = []
+    for fn in (install.mods_dir, install.client_mods_dir):
+        try:
+            d = fn()
+            if d and os.path.isdir(d) and d not in dirs:
+                dirs.append(d)
+        except Exception:
+            continue
     out = []
     for ext in (".kspkg", ".json"):
-        p = os.path.join(d, name + ext)
-        if os.path.isfile(p):
-            out.append(("mods/" + name + ext, p))
+        for d in dirs:
+            p = os.path.join(d, name + ext)
+            if os.path.isfile(p):
+                out.append(("mods/" + name + ext, p))
+                break            # one copy is enough; they are the same file
     return out
 
 

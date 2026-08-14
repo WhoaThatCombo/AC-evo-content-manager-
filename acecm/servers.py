@@ -76,6 +76,10 @@ TEMPLATE = {
     # event still reports the HOST's name ("Road Atlanta"). Set this to what is
     # actually in the slot so maps and labels don't lie.
     "track_label": "",
+    # Which DEPLOYED track to host, by the name clients know it as. Empty means
+    # host the stock event at track_index. Kept separate from track_label so a
+    # cosmetic fix can never change what the server actually runs.
+    "custom_track": "",
     "penalties": False,
     "car_cut_tyres_out": 4,          # wheels off track before it counts (1-4)
     "warning_trigger_countdown": 3,  # warnings before the penalty lands
@@ -177,6 +181,70 @@ def _server_pids():
     return res
 
 
+def _custom_event(profile):
+    """The event JSON for a deployed track, or "" to use the stock index.
+
+    ⚠ Driven by `custom_track`, NOT by `track_label`. They read alike and mean
+    different things: track_label is cosmetic - what is really sitting in a
+    borrowed slot, so maps and labels do not lie - and it is consumed by the
+    lobby ad, the dashboard and telemetry. Letting it also SELECT the track
+    would change what an existing profile hosts the moment someone corrected a
+    label, with no warning. One field per meaning.
+
+    The layout is read from the installed track's own `layout_<name>.scene`
+    container, because the server matches layout names CASE-SENSITIVELY - a
+    guess like "Layout" resolves no containers at all and the track loads bare.
+    """
+    name = (profile.get("custom_track") or "").strip()
+    if not name:
+        return ""
+    ev = {"track": name}
+    try:
+        from . import contentsync, tracks
+        folder = (contentsync.track_map() or {}).get(name, "")
+        if folder:
+            src = os.path.join(contentsync.tracks_dir(), folder)
+            ev["layout"] = tracks.read_track_folder(src)["layout"]
+    except Exception as ex:
+        logs.LOG.warning("no layout for custom track %r: %s", name, ex)
+    if not ev.get("layout"):
+        # ⚠ Refuse rather than guess. A wrong layout starts a server that
+        # resolves no containers - it looks up, and the track is unusable.
+        logs.LOG.error("custom track %r has no resolvable layout - "
+                       "hosting the stock event instead", name)
+        return ""
+    ev["event_name"] = f"{ev['layout']} Race"
+    return json.dumps(ev)
+
+
+def _port_shared(profile):
+    """Does another profile use this one's HTTP port?
+
+    If so, that port cannot identify anything: the two servers are only
+    distinguishable by the pid we recorded at launch.
+    """
+    mine = profile.get("http_port", 8080)
+    return any(o.get("id") != profile.get("id")
+               and o.get("http_port", 8080) == mine
+               for o in load())
+
+
+def port_clashes():
+    """Profiles that share a game or HTTP port, as {port: [names]}."""
+    out = {}
+    for key in ("tcp_port", "http_port"):
+        seen = {}
+        for p in load():
+            seen.setdefault(p.get(key), []).append(p.get("name") or "?")
+        for port, names in seen.items():
+            if port and len(names) > 1:
+                out.setdefault(port, [])
+                for n in names:
+                    if n not in out[port]:
+                        out[port].append(n)
+    return out
+
+
 def status(profile):
     """Live state for one profile, tied to ITS process where possible."""
     st = {"running": False, "pid": None, "clients": None, "log_age": None}
@@ -184,15 +252,20 @@ def status(profile):
     pid = rec.get("pid")
     if pid and _alive(pid):
         st["running"], st["pid"] = True, pid
-    else:
-        # Fall back to the HTTP port, which IS unique per profile - better than
-        # claiming whichever server happens to be running is this one.
+    elif not _port_shared(profile):
+        # Fall back to the HTTP port - but ONLY when this profile alone uses
+        # it. ⚠ The comment here used to claim the port "IS unique per
+        # profile"; nothing enforces that, and two profiles sharing 8080 both
+        # reported running whenever either was up. Worse, per-server Stop
+        # resolves by the same port, so it could kill the other one's process.
         try:
             url = f"http://127.0.0.1:{profile.get('http_port', 8080)}/"
             with urllib.request.urlopen(url, timeout=1.0):
                 st["running"] = True
         except Exception:
             pass
+    else:
+        st["ambiguous"] = True
     if st["running"]:
         try:
             url = f"http://127.0.0.1:{profile.get('http_port', 8080)}/"
@@ -253,6 +326,53 @@ def port_busy(port):
         return s.connect_ex(("127.0.0.1", int(port))) == 0
 
 
+def server_track_names():
+    """Track names the SERVER's own archive can resolve, from its tracks.table."""
+    import re
+    try:
+        from . import config, kspkg_write
+        pkg = os.path.join(config.server_dir(), "content.kspkg")
+        # ⚠ raw string: "system\tracks.table" is a TAB followed by "racks",
+        # which matches no entry and silently reports the server as having no
+        # tracks at all - which then let every start through unchecked.
+        blob = kspkg_write.read_entry(pkg, r"system\tracks.table")
+        if not blob:
+            return []
+        from .tracktables import walk
+        top = list(walk(blob))
+        if not top:
+            return []
+        out = []
+        for _f, _w, row in walk(top[0][2]):
+            for g, gw, gv in walk(row):
+                if g != 2 or gw != 2:
+                    continue
+                for h, hw, hv in walk(gv):
+                    if h == 1 and hw == 2:
+                        out.append(hv.decode("utf-8", "replace"))
+        return out
+    except Exception as ex:
+        logs.LOG.info("could not read the server's track names: %s", ex)
+        return []
+
+
+def _custom_track_problem(profile):
+    """Why this profile's custom track would fail, or "" if it is fine."""
+    name = (profile.get("custom_track") or "").strip()
+    if not name:
+        return ""
+    known = server_track_names()
+    if not known:
+        return ""                      # cannot check - do not block the start
+    if name in known:
+        return ""
+    close = [k for k in known if name.split()[0].lower() in k.lower()]
+    return (f"the server does not have a track called {name!r} - it would "
+            f"start and then die loading an empty path. Deploy it from "
+            f"Content first"
+            + (f" (its archive calls it {close[0]!r})" if close else ""))
+
+
 def start(profile):
     """Launch the dedicated server for a profile.
 
@@ -264,6 +384,14 @@ def start(profile):
     exhausted the pagefile and hung the whole machine (288 MB of log in eight
     minutes). One cheap check is worth more than any amount of cleanup.
     """
+    # ⚠ A custom track the SERVER cannot resolve is a crash, not an error. The
+    # name is looked up in the server's own tracks.table; a miss yields empty
+    # paths and the exe dies with "Trying to load a message with an empty
+    # path", which names nothing useful. Check first and say what is wrong.
+    bad = _custom_track_problem(profile)
+    if bad:
+        return {"ok": False, "error": bad}
+
     tcp = profile.get("tcp_port", 9700)
     http = profile.get("http_port", 8080)
 
@@ -316,6 +444,12 @@ def start(profile):
         "N_AI": str(profile.get("ai", 0)),
         "MAX_PLAYERS": str(profile.get("max_players", 90)),
         "EVENT_IDX": str(profile.get("track_index", 0)),
+        # ⚠ A deployed custom track has to be NAMED, not indexed - events_*.json
+        # lists stock events only. Without this, picking a deployed track set a
+        # label and nothing else, and the server hosted whichever stock event
+        # the index still held: a profile called "Highland drift" ran
+        # Nurburgring, and the name made it look like it had worked.
+        "CUSTOM_EVENT": _custom_event(profile),
         "PORT": str(profile.get("tcp_port", 9700)),
         "HTTP_PORT": str(profile.get("http_port", 8080)),
         "TOD_HOUR": str(profile.get("tod_hour", 13)),
@@ -415,12 +549,60 @@ def start(profile):
     return {"ok": True}
 
 
-def stop():
-    """Stop every dedicated server."""
+def stop(profile_id=None):
+    """Stop ONE profile's server, or every server when no id is given.
+
+    ⚠ Identify the process before killing anything. This used to kill every
+    dedicated server unconditionally, so a per-server Stop button took down the
+    other servers too - and with several running that is somebody else's
+    session ending for no visible reason.
+    """
     from . import winproc
-    for pid in list(_server_pids()):
-        winproc.kill(pid)
-    return {"ok": True}
+    if not profile_id:
+        pids = list(_server_pids())
+        for pid in pids:
+            winproc.kill(pid)
+        return {"ok": True, "stopped": pids, "scope": "all"}
+
+    prof = next((p for p in load() if p.get("id") == profile_id), None)
+    if not prof:
+        return {"ok": False, "error": "no such profile"}
+
+    # the pid recorded when WE launched it is the most reliable link
+    rec = runtime().get(profile_id) or {}
+    pid = rec.get("pid")
+    if not (pid and _alive(pid)):
+        # otherwise fall back to whoever holds this profile's HTTP port, which
+        # is unique per profile - never "whichever server is running"
+        pid = _pid_on_port(prof.get("http_port", 8080))
+    if not pid:
+        return {"ok": False,
+                "error": "could not tell which process is this server - it may "
+                         "have been started outside ACECM. Use Stop all, or "
+                         "close it from Task Manager"}
+    winproc.kill(pid)
+    r = runtime()
+    r.pop(profile_id, None)
+    _save_runtime(r)
+    return {"ok": True, "stopped": [pid], "scope": prof.get("name")}
+
+
+def _pid_on_port(port):
+    """Which process is listening on a local port, or None."""
+    try:
+        ps = (f"(Get-NetTCPConnection -State Listen -LocalPort {int(port)} "
+              f"-ErrorAction SilentlyContinue).OwningProcess")
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                            "-Command", ps], capture_output=True, text=True,
+                           timeout=8)
+        for line in (r.stdout or "").split():
+            if line.strip().isdigit():
+                pid = int(line.strip())
+                if pid in _server_pids():
+                    return pid
+    except Exception as ex:
+        logs.LOG.info("port lookup for %s: %s", port, ex)
+    return None
 
 
 def log_tail(profile, lines=120):

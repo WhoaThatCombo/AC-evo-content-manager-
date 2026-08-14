@@ -70,8 +70,25 @@ TYPE_PREFIX = "type.googleapis.com/"
 _versions = {"protocol": PROTOCOL_VERSION, "server": SERVER_VERSION}
 
 
+def _default_lobby_json():
+    """Where ACECM keeps lobby.json, frozen build or source checkout."""
+    for base in (os.path.join(os.environ.get("LOCALAPPDATA", ""), "ACECM",
+                              "data"),
+                 os.path.join(os.path.expanduser("~"), "Downloads", "acecm",
+                              "data")):
+        p = os.path.join(base, "lobby.json")
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
 def _lobby():
-    path = LOBBY_JSON
+    # ⚠ Fall back to ACECM's own data folder. LOBBY_JSON is set when ACECM
+    # launches the backend, but a backend started by hand had no default at
+    # all - so _lobby() returned {} and the advertised entry silently used the
+    # placeholder name and no track, which looks like the lobby is broken
+    # rather than simply unconfigured.
+    path = LOBBY_JSON or _default_lobby_json()
     if path and os.path.isfile(path):
         try:
             import json
@@ -179,6 +196,24 @@ def live_player_count():
         return 0
 
 
+LOCAL_TAG = os.environ.get("LOCAL_TAG", "[LOCAL]")
+
+
+def _tagged(name):
+    """Prefix the injected entry so it is obvious which row is ours.
+
+    ⚠ A PREFIX, not a suffix: the browser truncates long names, and the whole
+    point is lost if the marker is the part that gets cut. Never doubled, so a
+    server already called "... [LOCAL]" is left alone.
+    """
+    name = (name or "").strip()
+    if not LOCAL_TAG:
+        return name
+    if LOCAL_TAG.lower() in name.lower():
+        return name
+    return f"{LOCAL_TAG} {name}".strip()
+
+
 def fill_entry(entry, peer=None):
     """Populate a MultiplayerServerListEntry for our own server.
 
@@ -198,7 +233,12 @@ def fill_entry(entry, peer=None):
     lb = _lobby()
     setif("server_id", lb.get("server_id") or SERVER_ID)
     setif("server_ip", _advertise_ip(peer))
-    setif("server_name", lb.get("server_name") or SERVER_NAME)
+    # ⚠ Mark it. This row is INJECTED by the proxy and reached over loopback or
+    # the LAN, while the very same server also registers with Kunos and appears
+    # again with its public address - two rows, same name, different routes.
+    # The tag says which one is ours, for the host and for anyone else running
+    # ACECM. Set LOCAL_TAG="" to advertise a bare name.
+    setif("server_name", _tagged(lb.get("server_name") or SERVER_NAME))
     setif("server_tcp_port", int(lb.get("tcp_port") or SERVER_TCP))
     setif("server_udp_port", int(lb.get("udp_port") or SERVER_UDP))
     setif("track", lb.get("track") or os.environ.get("TRACK") or "")

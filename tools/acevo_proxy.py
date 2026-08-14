@@ -81,8 +81,19 @@ def _capture_list(msg):
                 except Exception:
                     repeated = False
             if repeated:
+                # ⚠ The CAR lists are kept in full. Everything else repeated
+                # (players, friends, entry_list) is only interesting as a
+                # count, but which cars a server allows is what decides
+                # whether you can join it at all - and a count cannot answer
+                # "do I have these?", so the browser could flag a missing
+                # track and never a missing car.
                 try:
-                    d[f.name] = len(v)          # counts, not the whole list
+                    if f.name == "allowed_cars_list":
+                        d[f.name] = [str(x) for x in v]
+                    elif f.name == "allowed_cars_list_full":
+                        d[f.name] = [getattr(x, "car_name", "") for x in v]
+                    else:
+                        d[f.name] = len(v)      # counts, not the whole list
                     continue
                 except TypeError:
                     pass

@@ -60,10 +60,11 @@ def _servers():
             st = servers.status(p)
         except Exception:
             st = {"running": False, "pid": None, "clients": None}
-        # ⚠ A profile stores an INDEX into events_*.json, not a track name -
-        # and `track_label` overrides it when a slot has been borrowed, which
-        # is the only truthful name in that case.
-        track = (p.get("track_label") or "").strip()
+        # ⚠ A profile stores an INDEX into events_*.json, not a track name.
+        # Precedence, most specific first: a deployed custom track is what the
+        # server will actually host; track_label is the truthful name when a
+        # stock slot has been borrowed; otherwise the stock event.
+        track = (p.get("custom_track") or p.get("track_label") or "").strip()
         layout = ""
         if not track:
             try:
@@ -107,6 +108,23 @@ def attention(srv, be):
         items.append({"level": "warn", "what": "No TLS certificate",
                       "do": "The client will not connect to our own lobby "
                             "without one - generate it on the Backend page"})
+
+    # ⚠ Two profiles on one port cannot be told apart. Whichever is running
+    # makes BOTH read as running, and stopping one by port could kill the
+    # other - so this is an identity problem, not just a "they can't run
+    # together" problem.
+    try:
+        for port, names in servers.port_clashes().items():
+            items.append({
+                "level": "warn",
+                "what": f"{len(names)} profiles share port {port}: "
+                        f"{', '.join(names)}",
+                "do": "Give each its own port - while they share one, ACECM "
+                      "cannot tell which is running, and stopping one may "
+                      "stop the other",
+            })
+    except Exception:
+        pass
 
     # a port conflict for a server that is NOT ours to claim
     for s in srv:

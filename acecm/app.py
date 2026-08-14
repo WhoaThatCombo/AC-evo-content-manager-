@@ -34,11 +34,28 @@ def _install_content(body):
     """
     if _INSTALL["state"] == "running":
         return {"ok": False, "error": "an install is already running"}
-    base, sid = body.get("base") or "", body.get("id") or ""
-    p = contentsync.plan(base, sid)
-    if not p.get("ok"):
-        return p
-    need = p["need"]
+    base = body.get("base") or ""
+    # ⚠ A host publishes one entry PER THING - four tracks and a car mod here -
+    # so fetching a single id took the track and silently ignored the car. Take
+    # every id offered, and de-duplicate: separate entries can require the same
+    # file, and downloading it twice is just slower.
+    ids = body.get("ids") or ([body["id"]] if body.get("id") else [])
+    need, seen, errors = [], set(), []
+    for sid in ids:
+        p = contentsync.plan(base, sid)
+        if not p.get("ok"):
+            errors.append(f"{sid}: {p.get('error')}")
+            continue
+        for e in p["need"]:
+            if e["path"] not in seen:
+                seen.add(e["path"])
+                need.append(e)
+    if not need:
+        return {"ok": False,
+                "error": ("; ".join(errors) if errors
+                          else "you already have everything this host offers")}
+    p = {"ok": True, "need": need,
+         "bytes": sum(e.get("size", 0) for e in need)}
     _INSTALL.update({"state": "running", "detail": "starting", "done": 0,
                      "total": p["bytes"], "files": []})
 
@@ -119,9 +136,24 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, contentsync.local(
                     (q.get("refresh") or [""])[0] == "1"))
             if path == "/api/browser/discover":
+                # ⚠ Two ports, briefly. Seven ports at 4s each is 28 seconds of
+                # a blocked request before we can say "that host is not running
+                # ACECM" - long enough that the webview reports the app as not
+                # responding, which reads as a crash rather than an answer.
                 return _json(self, contentsync.discover(
                     (q.get("host") or [""])[0],
-                    (q.get("port") or [None])[0]))
+                    (q.get("port") or [None])[0],
+                    ports=(8092, 8093), timeout=2.0))
+            if path == "/api/browser/needs":
+                # servers running something this machine cannot load, from the
+                # remembered list - answerable with the game closed
+                lst = backend.server_list()
+                miss = contentsync.needs(lst.get("servers") or [])
+                return _json(self, {"ok": lst.get("ok"),
+                                    "cached": lst.get("cached", False),
+                                    "captured_at": lst.get("captured_at"),
+                                    "total": len(lst.get("servers") or []),
+                                    "missing": miss})
             if path == "/api/browser/plan":
                 return _json(self, contentsync.plan(
                     (q.get("base") or [""])[0], (q.get("id") or [""])[0]))
@@ -160,7 +192,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/trackdeploy":
                 return _json(self, {**trackdeploy.state(),
                                     **trackdeploy.packages(
-                                        (q.get("dir") or [None])[0])})
+                                        (q.get("dir") or [None])[0]),
+                                    # tracks already imported here, which is
+                                    # how anyone actually gets one
+                                    "imported": trackdeploy.importable()})
             if path == "/api/tracks/installed":
                 return _json(self, install.tracks_installed())
             if path == "/api/tracks":
@@ -297,6 +332,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/thumbs/build":
                 return _json(self, thumbs.build_all(
                     bool(body.get("force"))))
+            if path == "/api/browser/scan":
+                lst = backend.server_list()
+                pool = (contentsync.needs(lst.get("servers") or [])
+                        if body.get("only_missing", True)
+                        else (lst.get("servers") or []))
+                return _json(self, contentsync.scan(pool))
             if path == "/api/browser/install":
                 return _json(self, _install_content(body))
             if path == "/api/trackdeploy/deploy":
@@ -364,7 +405,9 @@ class Handler(BaseHTTPRequestHandler):
                     return _json(self, {"ok": False, "error": "no profile"}, 404)
                 return _json(self, servers.start(prof))
             if path == "/api/server/stop":
-                return _json(self, servers.stop())
+                # ⚠ honour the id. Ignoring it made every "stop this server"
+                # stop all of them.
+                return _json(self, servers.stop(body.get("id")))
             if path == "/api/update/apply":
                 return _json(self, version.apply(body.get("url"),
                                                  body.get("sha256")))
@@ -491,6 +534,35 @@ class App(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
 
 
+def _watch_lobby():
+    """Keep lobby.json describing the server that is actually running.
+
+    ⚠ The backend re-reads that file to build the entry players see, and it is
+    written from a PROFILE at launch - so it goes stale the moment the two
+    disagree (a server started outside ACECM, a profile edited afterwards).
+    Correcting it only when ACECM reads it fixes ACECM's own display and leaves
+    the game advertising the old track.
+
+    Only does the expensive read when the set of server processes CHANGES, so
+    an idle machine costs nothing.
+    """
+    seen = None
+
+    def run():
+        nonlocal seen
+        while True:
+            try:
+                now = tuple(sorted(servers._server_pids()))
+                if now != seen:
+                    seen = now
+                    lobby.refresh()
+            except Exception as ex:
+                logs.LOG.debug("lobby watch: %s", ex)
+            time.sleep(5)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _rescan_content():
     """Forget what content we THINK exists, and look again.
 
@@ -527,6 +599,7 @@ def serve():
     """
     logs.setup()
     _rescan_content()
+    _watch_lobby()
     port = config.CFG["ui_port"]
     try:
         srv = App(("127.0.0.1", port), Handler)

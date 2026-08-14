@@ -411,13 +411,35 @@ def server_list():
     than possess.
     """
     import urllib.request
+    cache = os.path.join(config.DATA, "server_list.json")
     try:
         with urllib.request.urlopen(CONTROL + "/servers", timeout=4) as r:
-            return {"ok": True, **json.loads(r.read())}
+            got = {"ok": True, **json.loads(r.read())}
+        # ⚠ Keep it. The list only passes through while the game is open, and
+        # everything you would DO with it - see which servers need content you
+        # lack, and download it - is work you want to do with the game CLOSED,
+        # so the mods are in place before it next starts.
+        try:
+            json.dump(got, open(cache, "w", encoding="utf-8"))
+        except OSError as ex:
+            logs.LOG.warning("could not cache the server list: %s", ex)
+        return got
+    except Exception:
+        pass
+    try:
+        got = json.load(open(cache, encoding="utf-8"))
+        st = os.stat(cache)
+        got.update({"ok": True, "cached": True,
+                    "captured_at": got.get("captured_at") or int(st.st_mtime),
+                    "note": "from the last time the in-game browser was open - "
+                            "player counts and pings will be stale, but it is "
+                            "enough to see what content a server needs"})
+        return got
     except Exception as ex:
         return {"ok": False, "error": f"{type(ex).__name__}",
                 "hint": "start the proxy backend, then open Multiplayer "
-                        "in-game once so the list passes through"}
+                        "in-game once so the list passes through - after that "
+                        "it is remembered and usable with the game closed"}
 
 
 def join(server_id, shape="bare", tcp=None, udp=None, password=""):

@@ -122,6 +122,25 @@ def main():
         "events_race_weekend.json" if "RACE" in GAME_MODE.upper()
         else "events_practice.json")
     ev = json.load(open(os.path.join(SRV, events_file)))["events"][EVENT_IDX]
+    # ⚠ A custom track is not IN events_*.json - those list the stock events
+    # only, so an index can never name one. CUSTOM_EVENT carries the whole
+    # event as JSON instead:
+    #
+    #     CUSTOM_EVENT='{"track":"Highlands Drift","layout":"layout_drift"}'
+    #
+    # JSON rather than a delimited string because a track name is free text -
+    # any separator we pick is a name someone can legitimately use. The server
+    # resolves the name through its own system/tracks.table, so whatever is
+    # deployed under it is what loads.
+    custom = os.environ.get("CUSTOM_EVENT", "").strip()
+    if custom:
+        want = json.loads(custom)
+        if not want.get("track") or not want.get("layout"):
+            raise SystemExit("CUSTOM_EVENT needs at least track and layout")
+        ev = {**ev, **want}
+        ev.setdefault("event_name", f"{want['layout']} Race")
+        print(f"custom track: {ev['track']} / {ev['layout']} "
+              f"({ev['event_name']})")
     # cars.json was dumped from a client that has car MODS installed. Real
     # Kunos presets are always "<code>_mech_<n>"; the mods come through as
     # names truncated to 13 chars with no preset suffix (Tesla Model S Plaid,
