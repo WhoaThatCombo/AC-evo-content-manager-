@@ -245,7 +245,8 @@ def ensure_track_pack(folder):
     tar_path = os.path.join(d, folder + ".tar")
     sig_path = tar_path + ".sig"
     sha_path = tar_path + ".sha256"
-    want = _track_sig(files)
+    # v2: tar also carries acecm_track.json so the joiner can write tables.
+    want = "v2:" + _track_sig(files)
     have = ""
     try:
         have = open(sig_path, encoding="ascii").read().strip()
@@ -263,6 +264,17 @@ def ensure_track_pack(folder):
             if not arc or arc.startswith("/") or ".." in arc.split("/"):
                 continue
             tar.add(path, arcname=arc)
+        try:
+            from . import tracks as trackmod
+            meta = trackmod.pack_meta(folder)
+            blob = json.dumps(meta, indent=2).encode("utf-8")
+            info = tarfile.TarInfo(name="acecm_track.json")
+            info.size = len(blob)
+            import io
+            tar.addfile(info, io.BytesIO(blob))
+        except Exception as ex:
+            from . import logs
+            logs.LOG.warning("track pack meta %s: %s", folder, ex)
     os.replace(tmp, tar_path)
     digest = file_digest(tar_path)
     open(sig_path, "w", encoding="ascii").write(want + "\n")
