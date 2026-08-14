@@ -681,6 +681,8 @@ def serve():
     toolkits require that - while the API keeps serving behind it.
     """
     logs.setup()
+    from . import version
+    version.consume_rollback()
     _rescan_content()
     _watch_lobby()
     port = config.CFG["ui_port"]
@@ -710,9 +712,14 @@ def serve():
     return srv, url
 
 
-def main(mode="window"):
+def main(mode="window", okflag=None):
     """mode: window (native), browser (default browser), headless (serve only)."""
     srv, url = serve()
+    # HTTP is up — this binary is good enough to keep. Write the flag
+    # the swap script is waiting on BEFORE opening the window, so a
+    # later window close is not mistaken for a failed update.
+    from . import version
+    version.confirm_update(okflag)
     if mode == "window":
         from . import ui
         if not ui.available():

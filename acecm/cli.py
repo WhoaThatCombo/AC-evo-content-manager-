@@ -52,9 +52,27 @@ def _run_tool(name, argv):
     return 0
 
 
+def _take_opt(name):
+    """Pull `--name value` out of argv so the rest of startup never sees it."""
+    if name not in sys.argv:
+        return None
+    i = sys.argv.index(name)
+    val = None
+    if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
+        val = sys.argv[i + 1]
+        del sys.argv[i:i + 2]
+    else:
+        del sys.argv[i]
+    return val
+
+
 def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--tool":
         raise SystemExit(_run_tool(sys.argv[2], sys.argv[3:]))
+    # Written by the update swap script. The new exe must create this
+    # file once it is serving, or the previous build is restored.
+    _okflag = _take_opt("--okflag")
+    _take_opt("--updated")
 
     # Put a downloaded exe somewhere permanent, with a shortcut, so it never
     # has to be found again. Runs and exits - it is a setup step, not the app.
@@ -84,7 +102,7 @@ def main():
         mode = "headless"
     from .app import main as app_main
     try:
-        app_main(mode)
+        app_main(mode, okflag=_okflag)
     except SystemExit:
         raise
     except BaseException as ex:

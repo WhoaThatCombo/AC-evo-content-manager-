@@ -96,6 +96,13 @@ def attention(srv, be):
     someone hunting through Settings.
     """
     items = []
+    try:
+        from . import version
+        rb = version.last_rollback()
+        if rb:
+            items.append({"level": "warn", "what": rb["what"], "do": rb["do"]})
+    except Exception:
+        pass
     exe = config.server_exe()
     if not exe or not os.path.exists(exe):
         found = detect.server_candidates()
