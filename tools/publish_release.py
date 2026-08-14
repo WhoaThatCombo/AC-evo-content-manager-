@@ -57,9 +57,18 @@ def main():
     tag = f"v{VERSION}"
     exe = os.path.join(HERE, "dist", "ACECM.exe")
     sha = exe + ".sha256"
-    for f in (exe, sha):
-        if not os.path.isfile(f):
-            raise SystemExit(f"missing {f} - run build.py first")
+    if not os.path.isfile(exe):
+        raise SystemExit(f"missing {exe} - run build.py first")
+    # ⚠ ALWAYS recompute from the exe we are about to upload. Reading a
+    # checksum file left on disk publishes the hash of whatever was built
+    # LAST TIME: the exe is then correct, the checksum is not, and the in-app
+    # updater rejects every download of this release as corrupt. Shipped
+    # exactly that once - the release looked complete and the update failed.
+    import hashlib
+    digest = hashlib.sha256(open(exe, "rb").read()).hexdigest()
+    with open(sha, "w", encoding="utf-8") as f:
+        f.write(f"{digest}  {os.path.basename(exe)}\n")
+    print(f"sha256 {digest}")
 
     notes = ""
     if "--notes-file" in sys.argv:
