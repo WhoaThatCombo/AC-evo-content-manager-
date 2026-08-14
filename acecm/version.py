@@ -3,8 +3,9 @@
 Updating a running .exe on Windows is the awkward part: you cannot overwrite a
 file that is currently executing. The trick used here is the standard one -
 download beside the current exe, then hand off to a tiny batch script that
-waits for this process to exit, swaps the files, and relaunches. The old build
-is kept as .old so a bad update can be rolled back by hand.
+waits for this process to exit, swaps the files, and relaunches. The new exe
+must write an --okflag file once it is actually serving; if it does not, the
+script puts .old back. A dead update no longer leaves the Start Menu broken.
 
 The update source is a JSON manifest the user configures; nothing phones home
 by default, and `update_url` empty means the check is skipped entirely.
@@ -17,12 +18,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import uuid
 import urllib.error
 import urllib.request
 
 from . import config, logs
 
-VERSION = "0.6.18"
+VERSION = "0.6.19"
+_ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
 
@@ -113,47 +117,141 @@ def check():
                 "error": f"{type(ex).__name__}: {ex}"}
 
 
+def rollback_flag_path():
+    return os.path.join(config.DATA, "update-rollback.flag")
+
+
+def last_rollback():
+    """Set on this process if the previous swap had to put .old back."""
+    return _ROLLBACK
+
+
+def consume_rollback():
+    """If the last update was rolled back, remember it for the dashboard."""
+    global _ROLLBACK
+    path = rollback_flag_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    _ROLLBACK = {
+        "what": "The last update did not start, so the previous build was restored",
+        "do": "You can try updating again. The broken download was discarded.",
+    }
+    logs.LOG.warning("previous update was rolled back — restored the previous exe")
+    return _ROLLBACK
+
+
+def confirm_update(okflag):
+    """The new exe is serving. Tell the swap script it can keep us."""
+    if not okflag:
+        return
+    try:
+        parent = os.path.dirname(okflag)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(okflag, "w", encoding="utf-8") as f:
+            f.write("ok\n")
+        logs.LOG.info("update handshake: wrote %s", okflag)
+    except OSError as ex:
+        logs.LOG.warning("update handshake could not write %s: %s", okflag, ex)
+
+
 def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True,
-                       ver=None):
+                       ver=None, okflag=None):
     """The script that replaces a running exe once it exits.
 
     Split out so it can be tested without downloading anything - the swap is
     the one part of updating that cannot be exercised in normal use.
+
+    After the swap the new exe is launched with --okflag. If that file is
+    not created (the binary never got as far as serving), .old is copied
+    back and a rollback flag is left for the restored build to show.
     """
     bat = bat or os.path.join(config.DATA, "_update.bat")
     blog = blog or os.path.join(config.DATA, "_update.log")
+    inst = os.path.dirname(exe)
+    marker = os.path.join(inst, "version.txt")
+    prev_marker = marker + ".prev"
+    rolled = rollback_flag_path()
+    if relaunch and not okflag:
+        okflag = os.path.join(tempfile.gettempdir(),
+                              "acecm-upok-" + uuid.uuid4().hex + ".flag")
+    args = ""
+    if relaunch:
+        if ver:
+            args += f" --updated {ver}"
+        if okflag:
+            args += f' --okflag "{okflag}"'
+    lines = [
+        "@echo off\r\n",
+        # ⚠ Delayed expansion is required: %VAR% inside a parenthesised
+        # block is expanded when the block is PARSED, so a retry counter
+        # written that way never changes and the loop never ends.
+        "setlocal enabledelayedexpansion\r\n",
+        f'set LOG="{blog}"\r\n',
+        f'echo [%date% %time%] waiting for pid {pid} > %LOG%\r\n',
+        "rem Wait for ACECM to exit - Windows will not let a running exe be\r\n",
+        "rem replaced. ⚠ Use ping, not timeout: timeout needs a console and\r\n",
+        "rem fails outright in a windowless process.\r\n",
+        ":wait\r\n",
+        f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n',
+        "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)\r\n",
+        "rem the file can stay locked for a moment after the process goes\r\n",
+        "ping -n 3 127.0.0.1 >nul\r\n",
+        "set TRIES=0\r\n",
+        ":swap\r\n",
+        f'move /y "{exe}" "{exe}.old" >>%LOG% 2>&1\r\n',
+        "if errorlevel 1 (\r\n",
+        "  set /a TRIES+=1\r\n",
+        "  if !TRIES! lss 10 (ping -n 2 127.0.0.1 >nul & goto swap)\r\n",
+        "  echo could not replace the exe - it is still locked >>%LOG%\r\n",
+        "  goto giveup\r\n",
+        ")\r\n",
+        f'move /y "{new}" "{exe}" >>%LOG% 2>&1\r\n',
+        "if errorlevel 1 (\r\n",
+        "  echo could not move the new exe into place - restoring >>%LOG%\r\n",
+        f'  copy /y "{exe}.old" "{exe}" >>%LOG% 2>&1\r\n',
+        "  goto giveup\r\n",
+        ")\r\n",
+        "echo swapped ok >>%LOG%\r\n",
+        f'if exist "{marker}" copy /y "{marker}" "{prev_marker}" >>%LOG% 2>&1\r\n',
+    ]
+    if ver:
+        lines.append(f'echo {ver}> "{marker}"\r\n')
+    if relaunch:
+        lines.extend([
+            f'start "" /d "{inst}" "{exe}"{args}\r\n',
+            "set W=0\r\n",
+            ":waitok\r\n",
+            "ping -n 3 127.0.0.1 >nul\r\n",
+            (f'if exist "{okflag}" goto upok\r\n' if okflag
+             else "goto upok\r\n"),
+            "set /a W+=1\r\n",
+            "if !W! lss 12 goto waitok\r\n",
+            "echo new exe did not start - rolling back >>%LOG%\r\n",
+            ":rollback\r\n",
+            f'copy /y "{exe}.old" "{exe}" >>%LOG% 2>&1\r\n',
+            f'if exist "{prev_marker}" copy /y "{prev_marker}" "{marker}" >>%LOG% 2>&1\r\n',
+            f'echo rollback> "{rolled}"\r\n',
+            f'start "" /d "{inst}" "{exe}"\r\n',
+            "goto done\r\n",
+            ":upok\r\n",
+            (f'del "{okflag}" >nul 2>&1\r\n' if okflag else ""),
+            "echo handshake ok >>%LOG%\r\n",
+            "goto done\r\n",
+        ])
+    lines.extend([
+        ":giveup\r\n",
+        f'echo giveup >>%LOG%\r\n',
+        (f'start "" /d "{inst}" "{exe}"\r\n' if relaunch else ""),
+        ":done\r\n",
+        'del "%~f0"\r\n',
+    ])
     with open(bat, "w", encoding="utf-8") as f:
-        f.write(
-            "@echo off\r\n"
-            # ⚠ Delayed expansion is required: %VAR% inside a parenthesised
-            # block is expanded when the block is PARSED, so a retry counter
-            # written that way never changes and the loop never ends.
-            "setlocal enabledelayedexpansion\r\n"
-            f'set LOG="{blog}"\r\n'
-            f'echo [%date% %time%] waiting for pid {pid} > %LOG%\r\n'
-            "rem Wait for ACECM to exit - Windows will not let a running exe be\r\n"
-            "rem replaced. ⚠ Use ping, not timeout: timeout needs a console and\r\n"
-            "rem fails outright in a windowless process.\r\n"
-            ":wait\r\n"
-            f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n'
-            "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)\r\n"
-            "rem the file can stay locked for a moment after the process goes\r\n"
-            "ping -n 3 127.0.0.1 >nul\r\n"
-            "set TRIES=0\r\n"
-            ":swap\r\n"
-            f'move /y "{exe}" "{exe}.old" >>%LOG% 2>&1\r\n'
-            "if errorlevel 1 (\r\n"
-            "  set /a TRIES+=1\r\n"
-            "  if !TRIES! lss 10 (ping -n 2 127.0.0.1 >nul & goto swap)\r\n"
-            "  echo could not replace the exe - it is still locked >>%LOG%\r\n"
-            "  exit /b 1\r\n"
-            ")\r\n"
-            f'move /y "{new}" "{exe}" >>%LOG% 2>&1\r\n'
-            'echo swapped ok >>%LOG%\r\n'
-            + (f'echo {ver}> "{os.path.join(os.path.dirname(exe), "version.txt")}"\r\n'
-               if ver else "")
-            + (f'start "" "{exe}"\r\n' if relaunch else "")
-            + 'del "%~f0"\r\n')
+        f.writelines(lines)
     return bat, blog
 
 
@@ -212,4 +310,5 @@ def apply(url=None, sha256=None):
                   info.get("latest"), blog)
     return {"ok": True, "version": info.get("latest"), "log": blog,
             "note": "downloaded and verified; close ACECM to finish the update "
-                    "- it will relaunch itself"}
+                    "- it will relaunch itself. If the new build does not "
+                    "start, the previous one is put back."}
