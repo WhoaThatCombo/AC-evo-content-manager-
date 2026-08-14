@@ -129,6 +129,15 @@ def build(clean=False):
     # which never showed up in development because the proxy runs from source
     # there - so the shipped build was broken for everyone but the author.
     args += ["--collect-submodules", "google.protobuf"]
+    # ⚠ pywebview's packer hook scans EVERY GUI backend. PyQt5 happens to
+    # be installed on the build machine, so 0.6.7 shipped ~84 MB of Qt
+    # DLLs the Windows app never loads (it uses Edge WebView2). That is
+    # why the exe jumped from 40 MB to 73 MB. Exclude the unused
+    # backends; do not uninstall PyQt5 from the machine.
+    for mod in ("PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy",
+                "PyQt5.QtCore", "PyQt5.QtGui", "PyQt5.QtWidgets",
+                "PyQt5.QtNetwork"):
+        args += ["--exclude-module", mod]
     if clean:
         args.append("--clean")
     print("running PyInstaller ...")
