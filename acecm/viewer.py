@@ -379,6 +379,56 @@ def open_car(car_id, paint=""):
     return {"ok": True, "package": pkg}
 
 
+def open_track(folder):
+    """Launch the viewer on a track, free-look, no studio floor.
+
+    Loose imported folders (EvoForge / ACECM) win: they are already on disk.
+    Stock circuits are read out of the client content.kspkg in place.
+    """
+    folder = (folder or "").strip()
+    if not folder:
+        raise RuntimeError("no track folder")
+    exe = viewer_exe()
+    if not exe:
+        raise RuntimeError(
+            "evoview.exe not found. Put it in the tools folder next to ACECM, "
+            "or set viewer_exe in Settings.")
+    loose = ""
+    try:
+        from . import contentsync
+        cand = os.path.join(contentsync.tracks_dir(), folder)
+        if os.path.isdir(cand):
+            loose = cand
+    except Exception:
+        pass
+    if loose:
+        cmd = [exe, loose, "--track"]
+        src = loose
+    else:
+        pkg = package()
+        if not pkg:
+            raise RuntimeError("game install not found")
+        cmd = [exe, pkg, "--track", folder]
+        src = pkg
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    subprocess.Popen(cmd, cwd=os.path.dirname(exe), creationflags=flags)
+    _set("track:" + folder, "open", "")
+    logs.LOG.info("viewer track %s from %s", folder, src)
+    return {"ok": True, "folder": folder, "source": src}
+
+
+def start_open_track(folder):
+    def run():
+        try:
+            open_track(folder)
+        except Exception as ex:
+            _set("track:" + (folder or ""), "error", str(ex))
+            logs.LOG.exception("viewer open failed for track %s", folder)
+    _set("track:" + (folder or ""), "starting", "")
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True}
+
+
 def start_open(car_id, paint=""):
     """Kick the whole thing off in the background; poll job() for progress."""
     def run():

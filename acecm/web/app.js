@@ -1143,6 +1143,18 @@ async function tracksPage() {
       cap.style.cssText = 'padding:8px 10px';
       cap.innerHTML = `<b style="font-size:13px">${esc(name)}</b>`
         + `<div class="tiny dim">${esc(folder)}</div>`;
+      const view = el('button', 'sm', 'View 3D');
+      view.style.marginTop = '6px';
+      view.onclick = async (ev) => {
+        ev.stopPropagation();
+        view.disabled = true;
+        const r = await api('viewer/open_track', { folder });
+        view.disabled = false;
+        toast(r && r.ok ? ('Opening ' + name + ' in the viewer')
+                        : (r && r.error || 'could not open the viewer'),
+              !(r && r.ok));
+      };
+      cap.append(view);
       card.append(img, cap);
       grid.append(card);
     });
