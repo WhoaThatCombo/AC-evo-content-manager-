@@ -433,6 +433,17 @@ def start(profile):
                            profile.get("name"), msg)
             return {"ok": False, "error": msg}
 
+    resolved_exe = config.server_exe()
+    if not resolved_exe:
+        return {"ok": False,
+                "error": "dedicated server executable not found - set "
+                         "server_dir in Settings to the folder that holds "
+                         "AssettoCorsaEVOServer.exe"}
+
+    launcher = config.tool_script("start_vai_server.py")
+    if not os.path.exists(launcher):
+        return {"ok": False, "error": f"launcher not found: {launcher}"}
+
     # Claim the ports BEFORE launching, so a second click within the startup
     # window is refused even though nothing is listening yet.
     _LAUNCHING[tcp] = _LAUNCHING[http] = now
@@ -443,7 +454,10 @@ def start(profile):
     # json, nowhere to write a log - and the launch fails silently.
     env["SERVER_DIR"] = config.server_dir()
     env.update({
-        "SERVER_EXE": config.CFG["server_exe"],
+        # Full path. An empty CFG['server_exe'] used to be forwarded as
+        # SERVER_EXE='', which join(dir, '') treats as the directory, and
+        # Windows then raises Access Denied.
+        "SERVER_EXE": resolved_exe,
         "LOG_FILE": profile.get("log", "vai_server.log"),
         "SERVER_NAME": profile.get("name", "ACECM server"),
         "N_AI": str(profile.get("ai", 0)),
@@ -512,19 +526,40 @@ def start(profile):
             print(f"car list merge skipped: {ex}")
     if profile.get("telemetry"):
         env["TELEMETRY"] = "1"
-    launcher = config.tool_script("start_vai_server.py")
-    if not os.path.exists(launcher):
-        return {"ok": False, "error": f"launcher not found: {launcher}"}
     before = set(_server_pids())
-    out = open(os.path.join(config.DATA, "last_start.log"), "w",
-               encoding="utf-8", errors="replace")
+    log_path = os.path.join(config.DATA, "last_start.log")
+    out = open(log_path, "w", encoding="utf-8", errors="replace")
     cmd = config.tool_cmd("start_vai_server", [])
     proc = subprocess.Popen(cmd, env=env, cwd=config.server_dir(),
                             stdout=out, stderr=subprocess.STDOUT)
     logs.launched(f"server {profile.get('name')!r}", cmd, proc.pid,
                   tcp=profile.get("tcp_port"), http=profile.get("http_port"),
                   track=profile.get("track_index"), ai=profile.get("ai"),
-                  log=os.path.join(config.DATA, "last_start.log"))
+                  log=log_path, exe=resolved_exe)
+    # The launcher starts the exe and exits. A crash is also an exit, so
+    # wait just long enough to see a non-zero code. Success used to look
+    # identical to "Access Denied" in the UI, then the 45s grace lock
+    # refused every retry.
+    for _ in range(16):
+        rc = proc.poll()
+        if rc is not None:
+            break
+        time.sleep(0.25)
+    rc = proc.poll()
+    if rc not in (None, 0):
+        _LAUNCHING.pop(tcp, None)
+        _LAUNCHING.pop(http, None)
+        try:
+            out.flush()
+            detail = open(log_path, encoding="utf-8",
+                          errors="replace").read().strip()
+        except OSError:
+            detail = ""
+        logs.LOG.error("server launcher exited %s: %s", rc, detail[-400:])
+        return {"ok": False,
+                "error": "the server launcher died before the exe started "
+                         f"(exit {rc})",
+                "detail": detail[-800:]}
     try:
         from . import lobby
         lobby.write(profile)
