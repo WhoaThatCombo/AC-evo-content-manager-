@@ -61,17 +61,8 @@ def _install_content(body):
                      "total": p["bytes"], "files": []})
 
     def run():
-        moved = 0
         try:
-            for i, entry in enumerate(need, 1):
-                _INSTALL["detail"] = f"{i}/{len(need)} {entry['path']}"
-
-                def tick(done, _size, base=moved):
-                    _INSTALL["done"] = base + done
-                contentsync.fetch(entry, tick)
-                moved += entry.get("size", 0)
-                _INSTALL["done"] = moved
-                _INSTALL["files"].append(entry["path"])
+            contentsync.install_files(need, _INSTALL)
             _INSTALL.update({"state": "done",
                              "detail": f"{len(need)} file(s) installed"})
         except Exception as ex:
@@ -94,6 +85,9 @@ def _json(handler, obj, code=200):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "ACECM"
+    # Per-file track downloads used HTTP/1.0 (new TCP every file). 1.1
+    # lets a client reuse the socket; the real speed win is the pack.
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, *a):
         pass
@@ -235,6 +229,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/registry/file":
                 return self._serve_content((q.get("id") or [""])[0],
                                            (q.get("path") or [""])[0])
+            if path == "/api/registry/pack":
+                return self._serve_pack((q.get("id") or [""])[0],
+                                        (q.get("track") or [""])[0])
             if path == "/api/gamesettings":
                 return _json(self, {**gamesettings.state(),
                                     **gamesettings.discover()})
@@ -491,6 +488,39 @@ class Handler(BaseHTTPRequestHandler):
     def _base(self):
         host = self.headers.get("Host") or f"127.0.0.1:{config.CFG['ui_port']}"
         return f"http://{host}"
+
+    def _serve_pack(self, sid, folder):
+        """One tar for a whole shared track — see registry.ensure_track_pack."""
+        folder = (folder or "").strip()
+        entry = next((e for e in registry.load() if e["id"] == sid), None)
+        if not entry or folder not in (entry.get("required_tracks") or []):
+            return _json(self, {"error": "track is not shared on that entry"}, 404)
+        try:
+            packed = registry.ensure_track_pack(folder)
+        except Exception as ex:
+            logs.LOG.exception("track pack %s", folder)
+            return _json(self, {"error": f"pack failed: {ex}"}, 500)
+        if not packed or not os.path.isfile(packed):
+            return _json(self, {"error": "no files for that track"}, 404)
+        size = os.path.getsize(packed)
+        sha = registry.track_pack_sha(folder)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-tar")
+        self.send_header("Content-Length", str(size))
+        if sha:
+            self.send_header("X-ACECM-SHA256", sha)
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="{folder}.tar"')
+        self.end_headers()
+        with open(packed, "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
     def _serve_content(self, sid, rel):
         """Stream a declared content file.
