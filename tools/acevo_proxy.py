@@ -34,6 +34,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ⚠ Belt and braces with PYTHONUNBUFFERED from the launcher: when stdout is a
+# file (which it always is when ACECM starts us) Python block-buffers it, so a
+# proxy that is later killed writes a ZERO-BYTE log and every diagnostic print
+# below is lost. Line buffering costs nothing here and makes the log usable
+# while the proxy is still running, which is exactly when it is needed.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 import websockets
 
 import acevo_proto as ap

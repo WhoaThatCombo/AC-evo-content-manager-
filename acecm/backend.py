@@ -378,6 +378,13 @@ def start(mode="proxy"):
         env["LAN_IP"] = lan
     env["OUR_IPS"] = ",".join(sorted(netutil.our_ips(lan)))
     env["PORT"] = str(config.CFG["backend_port"])
+    # ⚠ Without this the log file is EMPTY on every user machine. Python
+    # block-buffers stdout when it is a file rather than a console, so ~8 KB
+    # of diagnostics sit in the buffer and are lost outright when the process
+    # is killed. Asked a user for this log to debug an empty server browser
+    # and got a zero-byte file - the one artefact that could explain the
+    # failure could never contain anything.
+    env["PYTHONUNBUFFERED"] = "1"
     cmd = config.tool_cmd(tool, [])
     p = subprocess.Popen(cmd, cwd=os.path.dirname(script), env=env,
                          stdout=log, stderr=subprocess.STDOUT)
@@ -612,6 +619,10 @@ def browser_chain():
             pass
 
     exe = _game_exe()
+    try:
+        live = join_state()
+    except Exception:
+        live = {}
     steps = [
         # ⚠ First, because without it "Launch game" quietly hands off to Steam,
         # which starts the game with no -backend= - so the client talks to
@@ -634,19 +645,39 @@ def browser_chain():
         # ACECM's own Launch game passes -backend=, which does the same job
         # with no patching and no admin rights. The rdata patch only matters
         # when the game is started from Steam, which drops the flag.
-        {"ok": bool(st.get("client_patched") or cu.get("rdata_patched")),
+        # ⚠ Ask the proxy whether a client is ACTUALLY on the socket. This used
+        # to report the rdata patch instead, which is only one of the two ways
+        # to satisfy it: launching with -backend= connects a client without
+        # ever touching rdata, so a perfectly working setup read "missing"
+        # here and sent people off patching a file they did not need. The
+        # patch state stays as a fallback for when the game is not running.
+        {"ok": bool(live.get("client_connected")
+                    or st.get("client_patched") or cu.get("rdata_patched")),
          "what": "game client talks to the local backend",
          "fix": "Easiest: start the game with ACECM's 'Launch game' button - "
                 "it passes -backend= and needs no patch. Starting from Steam "
                 "drops that flag, and only then do you need 'Point client at "
                 "us' on the Backend page (which needs ACECM running as "
                 "administrator if the game is in Program Files)",
-         "detail": cu.get("intended") or ""},
+         "detail": ("a client is connected to the proxy right now"
+                    if live.get("client_connected") else
+                    "rdata patched, so a Steam-started game reaches us"
+                    if (st.get("client_patched") or cu.get("rdata_patched"))
+                    else "no client on the proxy socket"
+                         + ("" if live.get("control") else
+                            " (and the proxy's control port is not answering, "
+                            "so it may have started only partly)"))},
         {"ok": captured > 0,
          "what": f"server list captured ({captured} servers)"
                  if captured else "server list captured",
-         "fix": "With the three above done, open Multiplayer in-game once. "
-                "After that it is remembered and works with the game closed"},
+         "fix": ("The client IS connected to us, so the link is fine - open "
+                 "Multiplayer in-game now and the list is captured as it "
+                 "loads. If it stays empty with the client connected, the "
+                 "proxy could not reach Kunos upstream: check the backend log "
+                 "on this page."
+                 if live.get("client_connected") else
+                 "With the three above done, open Multiplayer in-game once. "
+                 "After that it is remembered and works with the game closed")},
     ]
     first = next((s for s in steps if not s["ok"]), None)
     return {"ok": first is None, "steps": steps,
