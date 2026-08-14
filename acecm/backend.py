@@ -164,9 +164,13 @@ def state():
     probe = probe_client_url()
     lan = netutil.lan_ipv4()
     port = config.CFG["backend_port"]
+    # ⚠ Do NOT probe 448 with a plain TCP connect. That port is TLS, so a
+    # health-check socket sits in websockets' CONNECTING state forever and
+    # looks identical to "the game reached us and TLS hung". Ask the OS
+    # who is listening instead.
     return {
         "port": port,
-        "listening": port_open(port),
+        "listening": bool(_listener_pids(port)),
         "running": running,
         "have_cert": cert,
         "cert_covers_lan": _cert_covers(),
@@ -175,9 +179,11 @@ def state():
         "our_ips": sorted(netutil.our_ips(lan)),
         "launch_backend": netutil.backend_ws_url(port),
         # rdata probe — True only if the Kunos client URL slot is gone.
-        # Launch now always passes -backend=, so this is no longer required.
+        # Steam relaunches the exe with Arguments: 1, so -backend= does
+        # not reach the process. This slot is what actually steers it.
         "client_patched": probe.get("rdata_patched"),
         "client_url": probe,
+        "game_backend": game_backend_seen(),
     }
 
 
@@ -294,8 +300,8 @@ def apply_redirect():
         return {"ok": False, "error": "Kunos URL site is not intact — refusing"}
     # ⚠ The game usually lives under Program Files, where writing needs
     # elevation. Unelevated this raised a bare PermissionError that surfaced as
-    # "patch failed" with no cause - and the patch is OPTIONAL anyway, so say
-    # both things rather than leaving someone stuck on a step they do not need.
+    # "patch failed" with no cause. This rewrite is required (Steam drops
+    # -backend=), so say that rather than offering a skip that does not work.
     bak = exe + ".bak_prebackend"
     try:
         if not os.path.exists(bak):
@@ -307,9 +313,9 @@ def apply_redirect():
     except PermissionError:
         return {"ok": False, "needs_admin": True,
                 "error": f"no permission to modify {exe}. Run ACECM as "
-                         f"administrator, or skip this entirely and start the "
-                         f"game with ACECM's Launch game button - that passes "
-                         f"-backend= and needs no patch"}
+                         f"administrator once — Steam drops -backend=, so "
+                         f"this rewrite is what actually points the client "
+                         f"at us"}
     except OSError as ex:
         return {"ok": False, "error": f"could not write the client: {ex}"}
     _probe_cache.clear()
@@ -680,32 +686,31 @@ def browser_chain():
          "what": "TLS certificate present",
          "fix": "Generate it on the Backend page - the client will not "
                 "connect to the proxy without one"},
-        # ⚠ TWO ways to satisfy this, and the easy one was never mentioned.
-        # ACECM's own Launch game passes -backend=, which does the same job
-        # with no patching and no admin rights. The rdata patch only matters
-        # when the game is started from Steam, which drops the flag.
-        # ⚠ Ask the proxy whether a client is ACTUALLY on the socket. This used
-        # to report the rdata patch instead, which is only one of the two ways
-        # to satisfy it: launching with -backend= connects a client without
-        # ever touching rdata, so a perfectly working setup read "missing"
-        # here and sent people off patching a file they did not need. The
-        # patch state stays as a fallback for when the game is not running.
+        # ⚠ The only honest "the game will talk to us" signal is either a
+        # live socket or a rewritten rdata URL. -backend= is passed on
+        # Launch, but Steam relaunches the exe with Arguments: 1, so the
+        # flag never arrives. Claiming Launch was enough made a fresh
+        # (unpatched) install look configured while the client still
+        # dialled Kunos and the browser stayed empty.
         {"ok": bool(live.get("client_connected")
                     or st.get("client_patched") or cu.get("rdata_patched")),
          "what": "game client talks to the local backend",
-         "fix": "Easiest: start the game with ACECM's 'Launch game' button - "
-                "it passes -backend= and needs no patch. Starting from Steam "
-                "drops that flag, and only then do you need 'Point client at "
-                "us' on the Backend page (which needs ACECM running as "
-                "administrator if the game is in Program Files)",
+         "fix": "Close the game, then Launch from ACECM. Launch rewrites the "
+                "lobby URL in the exe first — that is required. Steam drops "
+                "-backend=, so an unpatched client never reaches this proxy. "
+                "If the rewrite says it needs administrator, run ACECM as "
+                "admin once (Program Files). Steam 'Verify integrity' undoes "
+                "the rewrite.",
          "detail": ("a client is connected to the proxy right now"
                     if live.get("client_connected") else
-                    "rdata patched, so a Steam-started game reaches us"
+                    "rdata rewritten, so the next game start reaches us"
                     if (st.get("client_patched") or cu.get("rdata_patched"))
-                    else "no client on the proxy socket"
+                    else "rdata still points at Kunos and no client is on "
+                         "the proxy"
                          + ("" if live.get("control") else
                             " (and the proxy's control port is not answering, "
-                            "so it may have started only partly)"))},
+                            "so it may have started only partly)")
+                         + (_backend_seen_note(st.get("game_backend") or {})))},
         {"ok": captured > 0,
          "what": f"server list captured ({captured} servers)"
                  if captured else "server list captured",
@@ -879,12 +884,73 @@ def poke_ai_player_flag(value=True):
     return {"ok": ok, "pokes": done}
 
 
+def _backend_seen_note(seen):
+    url = (seen or {}).get("url") or ""
+    if not url:
+        return ""
+    if "127.0.0.1" in url or "localhost" in url:
+        return f" (game log: {url})"
+    return (f" (game log still shows {url} — Steam dropped -backend= "
+            "and rdata was not rewritten)")
+
+
+_game_backend_cache = {}
+
+
+def game_backend_seen():
+    """Last 'Connecting to backend at …' line from the newest ACE log.
+
+    That line is the only proof of where the *running* client actually
+    dialled. ACECM can pass -backend= and still watch the game talk to
+    Kunos if Steam ate the flag.
+    """
+    from . import detect
+    ace = detect.find("ace_dir") or ""
+    folder = os.path.join(ace, "Logs") if ace else ""
+    if not folder or not os.path.isdir(folder):
+        return {"url": None, "log": None}
+    try:
+        names = [n for n in os.listdir(folder)
+                 if n.lower().startswith("log-") and n.lower().endswith(".txt")]
+    except OSError:
+        return {"url": None, "log": None}
+    if not names:
+        return {"url": None, "log": None}
+    names.sort(reverse=True)
+    path = os.path.join(folder, names[0])
+    try:
+        key = (path, os.path.getmtime(path), os.path.getsize(path))
+    except OSError:
+        return {"url": None, "log": path}
+    hit = _game_backend_cache.get(key)
+    if hit:
+        return hit
+    url = None
+    try:
+        # The connecting line is near the start; 2 MB is plenty.
+        text = open(path, encoding="utf-8", errors="replace").read(2_000_000)
+    except OSError:
+        return {"url": None, "log": path}
+    needle = "Connecting to backend at "
+    for line in text.splitlines():
+        i = line.find(needle)
+        if i >= 0:
+            url = line[i + len(needle):].strip()
+    info = {"url": url, "log": path}
+    _game_backend_cache.clear()
+    _game_backend_cache[key] = info
+    return info
+
+
 def launch_game(extra_args=None):
-    """Start the client with -backend= so the rdata patch is optional.
+    """Start the client, rewriting rdata first so Steam cannot skip us.
 
     Steam Launch Options never reach this process (the game logs
-    `Arguments: 1`). Starting the exe ourselves does. SteamAppId is set so
-    steam_api64.dll still finds the running Steam client.
+    `Arguments: 1`). Starting the exe ourselves still often ends the same
+    way: steam_api hands off to Steam, Steam starts a fresh process, and
+    -backend= is gone. The rewritten URL in the exe is what actually
+    steers a stock client. SteamAppId is set so steam_api64.dll still
+    finds the running Steam client.
     extra_args: more CLI flags (e.g. -ai_enable_evo_next).
     """
     exe = _game_exe()
@@ -899,18 +965,44 @@ def launch_game(extra_args=None):
             os.startfile(f"steam://rungameid/{appid}")   # noqa: S606
             return {"ok": False, "via": "steam", "started": True,
                     "error": "the game exe could not be found, so it was "
-                             "started through Steam WITHOUT -backend= - the "
-                             "server browser will not fill. Set game_exe in "
-                             "Settings to AssettoCorsaEVO.exe and launch "
-                             "again."}
+                             "started through Steam WITHOUT a rewritten "
+                             "lobby URL - the server browser will not fill. "
+                             "Set game_exe in Settings to AssettoCorsaEVO.exe "
+                             "and launch again."}
         return {"ok": False, "error": "set game_exe in Settings"}
+
+    # Rewrite the stock URL before we start anything. On a fresh install
+    # this is the whole difference between "Launch worked" and an empty
+    # browser. If the game is already running we cannot write the exe,
+    # and starting another copy will not fix an unpatched process.
+    patch = None
+    if not probe_client_url().get("rdata_patched"):
+        if _game_running(exe):
+            return {"ok": False,
+                    "error": "the game is already running and still points "
+                             "at the official lobby. Close it completely, "
+                             "then Launch again — ACECM will rewrite the "
+                             "URL first. -backend= is dropped by Steam and "
+                             "is not enough on its own."}
+        patch = apply_redirect()
+        if not patch.get("ok"):
+            extra = ""
+            if patch.get("needs_admin"):
+                extra = " Run ACECM as administrator once to allow the write."
+            return {"ok": False,
+                    "error": (patch.get("error") or "could not rewrite the "
+                              "client lobby URL") + extra,
+                    "needs_admin": patch.get("needs_admin"),
+                    "patch": patch}
+
     url = netutil.backend_ws_url(config.CFG["backend_port"])
     env = dict(os.environ)
     appid = str(config.CFG.get("steam_appid") or "3058630")
     env["SteamAppId"] = appid
     env["SteamGameId"] = appid
-    # gflags: extra argv is often dropped (log still says Arguments: 2).
-    # The binary documents env: export FLAGS_flag1=value
+    # Belt and braces: still pass the flag AND FLAGS_backend. They only
+    # help if Steam does not relaunch the process; rdata is the real fix.
+    env["FLAGS_backend"] = url
     extra_args = list(extra_args or [])
     if any("ai_player_car" in a for a in extra_args):
         env["FLAGS_ai_player_car"] = "true"
@@ -919,22 +1011,23 @@ def launch_game(extra_args=None):
     cwd = os.path.dirname(exe)
     flagfile = os.path.join(config.DATA, "evo.flags")
     try:
-        lines = []
+        lines = [f"--backend={url}"]
         if env.get("FLAGS_ai_player_car"):
             lines.append("--ai_player_car")
         if env.get("FLAGS_ai_enable_evo_next"):
             lines.append("--ai_enable_evo_next")
-        if lines:
-            open(flagfile, "w", encoding="ascii").write("\n".join(lines) + "\n")
-            extra_args.append(f"--flagfile={flagfile}")
-            extra_args.append(f"-flagfile={flagfile}")
+        open(flagfile, "w", encoding="ascii").write("\n".join(lines) + "\n")
+        extra_args.append(f"--flagfile={flagfile}")
+        extra_args.append(f"-flagfile={flagfile}")
     except OSError:
         pass
-    cmd = [exe, f"-backend={url}"]
+    cmd = [exe, f"-backend={url}", f"--backend={url}"]
     cmd.extend(extra_args)
     subprocess.Popen(cmd, cwd=cwd, env=env)
     logs.launched("game client", cmd, None, backend=url,
+                  rdata_patched=probe_client_url().get("rdata_patched"),
                   flags_env={k: env[k] for k in env if k.startswith("FLAGS_")})
     return {"ok": True, "via": "exe", "backend": url,
             "rdata_patched": probe_client_url().get("rdata_patched"),
+            "patch": patch,
             "flags_env": {k: env[k] for k in env if k.startswith("FLAGS_")}}

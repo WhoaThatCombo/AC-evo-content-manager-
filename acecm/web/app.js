@@ -147,7 +147,13 @@ async function dashboard() {
   // the proxy injects local servers into that list. The API endpoints are
   // still there for when the push is understood.
   const bGame = el('button', null, 'Launch game');
-  bGame.onclick = async () => { const r = await api('game/launch', {}); if (r.ok) toast('Launching game'); };
+  bGame.onclick = async () => {
+    const r = await api('game/launch', {});
+    if (r.ok) toast(r.patch && r.patch.ok && !r.patch.already
+      ? 'Rewrote lobby URL, launching game'
+      : 'Launching game');
+    else toast(r.error || 'Launch failed', true);
+  };
   const bAI = el('button', null, 'Launch real AI race');
   bAI.title = 'One client. Instant Race with AiDriverEvo — not dedicated vAI ghosts.';
   bAI.onclick = async () => {
@@ -1170,12 +1176,25 @@ async function backendPage() {
     + `<span class="pill ${b.client_patched ? 'on' : 'off'}"><i class="dot"></i>`
     + `${b.client_patched ? 'rdata → local backend' : 'rdata still Kunos'}</span>`));
 
+  const seen = (b.game_backend || {}).url;
+  if (seen) {
+    const local = /localhost|127\.0\.0\.1/.test(seen);
+    c.append(el('div', local ? 'tiny dim' : 'warn',
+      local
+        ? `Game log: talking to <code>${esc(seen)}</code>`
+        : `Game log: still talking to <code>${esc(seen)}</code> — `
+          + 'Steam dropped <code>-backend=</code>. Close the game and Launch '
+          + 'from ACECM so the lobby URL is rewritten.'));
+  }
+
   const cu = b.client_url || {};
   const red = el('div');
   red.style.marginTop = '12px';
   red.innerHTML = '<div class="tiny dim" style="margin-bottom:8px">'
-    + 'Launch already passes <code>-backend=</code>. The rdata write is the '
-    + 'fallback when Steam ate the flag. Close the game first. '
+    + '<b>Required on a fresh install:</b> rewrite the lobby URL in the exe. '
+    + 'Steam relaunches the game with no arguments (<code>Arguments: 1</code>), '
+    + 'so <code>-backend=</code> never arrives. Launch from ACECM does the '
+    + 'rewrite automatically if the game is closed. Close the game first. '
     + `Intended: <code>${esc(b.launch_backend || cu.intended || '')}</code>`
     + (cu.slot ? ` &middot; slot ${esc(cu.slot)}` : '')
     + '</div>';

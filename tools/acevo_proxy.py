@@ -289,13 +289,49 @@ async def main():
     _certs = os.environ.get("ACECM_CERTS") or HERE
     ctx.load_cert_chain(os.path.join(_certs, "cert.pem"),
                         os.path.join(_certs, "key.pem"))
+
+    # ⚠ "connection is CONNECTING" and then silence forever is the hardest
+    # state to act on: the socket is open and TLS never completes, and neither
+    # websockets nor asyncio says a word about why. These two hooks split that
+    # single symptom into causes you can actually do something about.
+    #   ClientHello logged  -> the client IS speaking TLS; a later failure is
+    #                          about the certificate or the cipher list
+    #   never logged        -> nothing TLS-shaped arrived: the client dialled
+    #                          plain ws://, or something in between (an
+    #                          antivirus doing HTTPS inspection, a proxy) is
+    #                          holding the connection open without passing it on
+    def _client_hello(sslobj, servername, sslctx):
+        print(f"    TLS ClientHello from client (sni={servername!r})")
+    try:
+        ctx.sni_callback = _client_hello
+    except Exception:
+        pass
+
+    def _on_error(loop, context):
+        exc = context.get("exception")
+        print(f"    ! {context.get('message')}"
+              + (f": {type(exc).__name__}: {exc}" if exc else ""))
+    asyncio.get_running_loop().set_exception_handler(_on_error)
     print(f"proxy listening on wss://localhost:{PORT}/")
     print(f"upstream: {UPSTREAM}")
     print(f"injecting local server {SERVER_IP}:{SERVER_TCP} into the server list")
     start_control()
     print()
-    async with websockets.serve(handle, "0.0.0.0", PORT, ssl=ctx,
-                                max_size=None, ping_interval=None):
+    # The real client asks for Sec-WebSocket-Protocol: wss. Echo it. A
+    # missing echo still worked on one machine, but WebSocket++ can sit
+    # in CONNECTING if the negotiated subprotocol never comes back.
+    serve_kw = dict(ssl=ctx, ssl_handshake_timeout=15,
+                    max_size=None, ping_interval=None,
+                    subprotocols=["wss"])
+    # ⚠ Without a handshake timeout a client that opens the socket and then
+    # never completes TLS hangs in CONNECTING FOREVER: no error, no timeout,
+    # nothing in the log but the connection appearing. asyncio only reports
+    # "SSL handshake failed" once it is allowed to give up, so with no bound
+    # set, the single most informative line never gets written.
+    # ACECM used to health-check this port with a raw TCP connect, which
+    # produced exactly that "CONNECTING forever" line and sent us chasing
+    # a TLS bug that was our own probe.
+    async with websockets.serve(handle, "0.0.0.0", PORT, **serve_kw):
         await asyncio.Future()
 
 
