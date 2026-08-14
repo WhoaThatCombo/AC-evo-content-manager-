@@ -405,7 +405,18 @@ async def handle(ws):
 
 async def main():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(os.path.join(HERE, "cert.pem"), os.path.join(HERE, "key.pem"))
+    # ⚠ HERE is the PyInstaller unpack folder in a frozen build, and keys are
+    # deliberately never shipped - so this looked next to the script for a
+    # cert.pem that cannot exist there and standalone died on FileNotFoundError
+    # every time from a built exe. ACECM_CERTS is where ACECM actually
+    # generates the keypair; the proxy already honoured it, this did not.
+    _certs = os.environ.get("ACECM_CERTS") or HERE
+    _crt, _key = os.path.join(_certs, "cert.pem"), os.path.join(_certs, "key.pem")
+    if not (os.path.exists(_crt) and os.path.exists(_key)):
+        raise SystemExit(
+            f"no TLS keypair in {_certs} - generate it on ACECM's Backend "
+            f"page, or set ACECM_CERTS to the folder holding cert.pem/key.pem")
+    ctx.load_cert_chain(_crt, _key)
     print(f"loaded {len(ap.loaded)} descriptors")
     lb = _lobby()
     lan = _lan_ip()
