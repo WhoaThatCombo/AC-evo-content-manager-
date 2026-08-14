@@ -715,17 +715,11 @@ def main(mode="window"):
     srv, url = serve()
     if mode == "window":
         from . import ui
-        if ui.available():
-            try:
-                ui.run(url)      # blocks until the window is closed
-                return
-            except Exception:
-                logs.LOG.exception("native window failed - opening in the browser")
-                print("  (native window failed - falling back to the browser)")
-                mode = "browser"
-        else:
-            print("  (no native webview available - falling back to the browser)")
-            mode = "browser"
+        if not ui.available():
+            raise SystemExit(
+                "no native window (WebView2 missing) - ACECM is a desktop app")
+        ui.run(url)              # blocks until the window is closed
+        return
     if mode == "browser":
         threading.Timer(0.6, lambda: os.startfile(url)).start()   # noqa: S606
     try:
