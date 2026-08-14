@@ -498,7 +498,11 @@ def _orphan_on_backend_port():
         except Exception as ex:
             logs.LOG.info("backend port owner lookup: %s", ex)
             continue
-        if "--tool" in cmd and any(t in cmd for t in tools):
+        # ⚠ Match the tool NAME only. Requiring "--tool" as well matched the
+        # frozen form ("ACECM.exe --tool acevo_proxy") but missed the source
+        # form ("python -u tools/acevo_proxy.py"), so running from a git
+        # checkout never reclaimed the port and start() just failed instead.
+        if any(t in cmd for t in tools):
             return pid
     return None
 

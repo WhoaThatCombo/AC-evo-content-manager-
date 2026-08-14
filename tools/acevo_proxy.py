@@ -45,7 +45,20 @@ try:
 except Exception:
     pass
 
+import logging
+
 import websockets
+
+# ⚠ Without this a REJECTED client is completely silent. "*** CLIENT CONNECTED"
+# below only prints after the TLS handshake and the WebSocket upgrade have both
+# succeeded; websockets reports handshake and certificate failures through
+# `logging`, which nothing here ever configured. So a client that dials us and
+# is turned away looks byte-for-byte identical to a client that never dialled -
+# an empty log either way, and no way to tell "the game ignored -backend=" from
+# "the game reached us and we refused it".
+logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                    format="%(levelname)s %(name)s: %(message)s")
+logging.getLogger("websockets.server").setLevel(logging.DEBUG)
 
 import acevo_proto as ap
 from acevo_backend import (PROTOCOL_VERSION, SERVER_VERSION, TIME_OF_DAY,
