@@ -314,6 +314,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/viewer/open":
                 return _json(self, viewer.start_open(
                     body.get("id") or "", body.get("paint") or ""))
+            if path == "/api/viewer/open_track":
+                return _json(self, viewer.start_open_track(
+                    body.get("folder") or body.get("id") or ""))
             if path == "/api/profiles/save":
                 return _json(self, servers.upsert(body))
             if path == "/api/profiles/delete":
