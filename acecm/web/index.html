@@ -41,6 +41,15 @@
 </main>
 
 <div id="toast"></div>
+<script>
+window.addEventListener('error', function (e) {
+  var p = document.getElementById('page');
+  if (p && !p.dataset.booted) {
+    p.innerHTML = '<div class="err"><b>UI script failed</b><br>'
+      + String(e.message || e) + '</div>';
+  }
+});
+</script>
 <script src="/app.js"></script>
 </body>
 </html>

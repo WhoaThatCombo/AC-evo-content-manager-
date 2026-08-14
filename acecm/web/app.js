@@ -2430,7 +2430,7 @@ async function browserPage() {
       const tag = acecmOf(s)
         ? ' <span class="pill acecm"><i class="dot"></i>ACECM</span>' : '';
       tr.innerHTML = `<td>${esc(s.server_name || '(unnamed)')}${locked}${tag}
-          <div class="tiny dim">${esc(s.server_ip||'')}:${s.server_tcp_port||''}</div></td>`
+          <div class="tiny dim">${esc(s.server_ip||'')}:${s.server_tcp_port||''}</div></td>
         <td>${esc(s.track||'')}<div class="tiny dim">${esc(String(s.layout||'').replace(/^layout_/,''))}</div></td>
         <td>${num(s.players)}/${num(s.max_players)}</td>
         <td class="dim">${num(s.ping) || '—'}</td>
@@ -2993,7 +2993,8 @@ function go(name) {
   // ⚠ Only blank when the page is actually changing. Blanking on a refresh is
   // what makes the content flick away and come back.
   if (name !== _page) $('#page').innerHTML = '<div class="empty">Loading…</div>';
-  fn().catch(e => { $('#page').innerHTML = ''; toast(String(e), true); });
+  fn().then(() => { const p = $('#page'); if (p) p.dataset.booted = '1'; })
+    .catch(e => { $('#page').innerHTML = ''; toast(String(e), true); });
   location.hash = name;
 }
 document.querySelectorAll('nav a').forEach(a =>
