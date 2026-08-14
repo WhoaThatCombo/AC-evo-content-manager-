@@ -437,6 +437,11 @@ def start(profile):
     # window is refused even though nothing is listening yet.
     _LAUNCHING[tcp] = _LAUNCHING[http] = now
     env = dict(os.environ)
+    # ⚠ Tell the tool WHERE the server is. A frozen build unpacks these
+    # scripts into a temp folder, so a tool that resolves the server dir
+    # from its own __file__ finds nothing there - no exe, no events
+    # json, nowhere to write a log - and the launch fails silently.
+    env["SERVER_DIR"] = config.server_dir()
     env.update({
         "SERVER_EXE": config.CFG["server_exe"],
         "LOG_FILE": profile.get("log", "vai_server.log"),

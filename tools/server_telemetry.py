@@ -47,7 +47,10 @@ PAGE_GUARD = 0x100
 PAGE_NOACCESS = 0x01
 READABLE = 0x02 | 0x04 | 0x20 | 0x40 | 0x80
 
-SRV = os.path.dirname(os.path.abspath(__file__))
+# ⚠ Same trap as start_vai_server: a frozen ACECM unpacks this into a temp
+# folder, so __file__ is not the server folder. Take it from the environment.
+SRV = (os.environ.get("SERVER_DIR")
+       or os.path.dirname(os.path.abspath(__file__)))
 LOGDIR = os.path.join(SRV, "serverConfig")
 PORT = int(os.environ.get("TELEM_PORT", "8091"))
 # how close a body must be to the logged spawn point to count as that car
@@ -78,90 +81,7 @@ LEAVE_RE = re.compile(r"Disconnected carId (\S+)")
 # Keying identity off the first-connect line therefore left rejoining players
 # permanently anonymous. This carries the Steam ID *and* the display name:
 #   connecting gamecar <carId> (<display name> | <steamid64>)
-# steamid64 OR VAI-nnnnnn — the old `(\d+)` dropped every bot line
-GAMECAR_RE = re.compile(r"connecting gamecar (\S+) \((.*?) \| ([^)]+)\)")
-
-
-def pguid_patterns(text):
-    """Byte patterns a PGUID may take in the process.
-
-    Logs print `aaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb` (two hex u64s). In memory
-    that is almost always little-endian `a,b`; we also try `b,a` and the
-    raw ASCII form the log uses.
-    """
-    try:
-        a, b = text.split("-", 1)
-        lo, hi = int(a, 16), int(b, 16)
-    except Exception:
-        return [text.encode("ascii")]
-    return [
-        struct.pack("<QQ", lo, hi),
-        struct.pack("<QQ", hi, lo),
-        text.encode("ascii"),
-    ]
-
-
-def scan_for_pguids(proc, pguids, window=0x180):
-    """One heap pass: pguid text -> [(hit_addr, nearby_pos or None)].
-
-    This is how a 90-car grid gets identified. The log already names every
-    car; the body is the object that *contains* that id. Movement is not
-    required, so parked cars bind too.
-    """
-    needles = {}
-    for g in pguids:
-        for pat in pguid_patterns(g):
-            needles.setdefault(pat, []).append(g)
-    hits = {g: [] for g in pguids}
-    if not needles:
-        return hits
-    longest = max(len(p) for p in needles)
-    for base, size in proc.regions():
-        raw = proc.read(base, size)
-        if not raw or len(raw) < longest:
-            continue
-        for pat, names in needles.items():
-            start = 0
-            while True:
-                j = raw.find(pat, start)
-                if j < 0:
-                    break
-                addr = base + j
-                # look around the id for a world-space triplet
-                lo = max(0, j - window)
-                hi = min(len(raw), j + len(pat) + window)
-                chunk = raw[lo:hi]
-                pos = _best_pos_in(chunk)
-                for g in names:
-                    hits[g].append((addr, pos, j - lo))
-                start = j + 1
-        time.sleep(0)
-    return hits
-
-
-def _best_pos_in(blob):
-    """Most car-like float triplet in a small window."""
-    best = None
-    n = (len(blob) // 4) * 4
-    if n < 12:
-        return None
-    a = struct.unpack("<%df" % (n // 4), blob[:n])
-    for i in range(0, len(a) - 2):
-        x, y, z = a[i], a[i + 1], a[i + 2]
-        if not (abs(x) < 20000 and -200 < y < 4000 and abs(z) < 20000):
-            continue
-        if abs(x) < 0.5 and abs(z) < 0.5:
-            continue
-        # prefer values that look like metres on a circuit, not 0/1 flags
-        score = abs(x) + abs(z)
-        if best is None or score > best[0]:
-            # reject obvious non-positions (huge y, NaN)
-            if y != y:
-                continue
-            best = (score, x, y, z, i * 4)
-    if not best:
-        return None
-    return best[1], best[2], best[3]
+GAMECAR_RE = re.compile(r"connecting gamecar (\S+) \((.*?) \| (\d+)\)")
 
 
 def car_identities(log_path):
@@ -178,11 +98,11 @@ def car_identities(log_path):
         out[cid] = {"name": name, "model": model, "display": None,
                     "ai": name.upper().startswith("VAI-")}
     # Fills in every reconnect the line above misses, and adds the display name.
-    for cid, disp, who in GAMECAR_RE.findall(txt):
-        rec = out.setdefault(cid, {"name": who.strip(), "model": None, "ai": False})
-        rec["name"] = who.strip()
+    for cid, disp, steam in GAMECAR_RE.findall(txt):
+        rec = out.setdefault(cid, {"name": steam, "model": None, "ai": False})
+        rec["name"] = steam
         rec["display"] = disp.strip() or None
-        rec["ai"] = who.strip().upper().startswith("VAI-")
+        rec["ai"] = False          # only real clients get a steamid64 here
     return out
 
 
@@ -421,11 +341,13 @@ class Tracker:
         self._last_out = []
         self.pending = {}
         self.lock = threading.Lock()
-        self._hot_regions = []     # (base, size) that last held a car
-        self._full_scan_at = 0.0
 
     def ident_for(self, pguid):
-        i = self.ident_for_all().get(pguid)
+        now = time.time()
+        if now - self._ident_t > 5.0:
+            self._ident = car_identities(self.log_path)
+            self._ident_t = now
+        i = self._ident.get(pguid)
         if not i:
             return {"name": None, "model": None, "display": None, "ai": None}
         return {"name": i["name"], "model": i.get("model"),
@@ -440,35 +362,19 @@ class Tracker:
         return self.baseline
 
     def refresh_tracked(self):
-        """Keep the field populated without a full-heap scan every tick.
+        """Keep the full set of car addresses fresh, identified or not.
 
-        On a 90-car server the old path (two 270k-slot bbox diffs every 4 s)
-        spent more time scanning than sampling. Once we have a live binding
-        per log identity we stop. Missing cars are filled by a PGUID hunt
-        (one pass, no movement required). The mover scan is the last resort.
+        Identity only arrives for cars that join while we are watching, but
+        EVERY car is visible as a mover - so the view can show the whole field
+        and simply label the ones we know. Without this the map would sit empty
+        until somebody happened to rejoin.
         """
-        expect = list(self.ident_for_all())
-        missing = [g for g in expect if g not in self.bound
-                   or not self.bound[g].get("addr")]
-        if missing:
-            self.bind_by_pguid(missing)
-            missing = [g for g in expect if g not in self.bound
-                       or not self.bound[g].get("addr")]
-        with self.lock:
-            nbound = sum(1 for r in self.bound.values() if r.get("addr"))
-        # Full mover scan is expensive. Skip it when the log and the bindings
-        # already agree, or we just rebound someone via PGUID.
-        if expect and nbound >= len(expect) and not missing:
-            return nbound
-        now = time.time()
-        if now - self._full_scan_at < 8.0 and nbound:
-            return nbound
-        self._full_scan_at = now
         mv = movers(self.proc)
         reps = cluster_movers(mv)
         with self.lock:
             for a in reps:
                 self.tracked.setdefault(a, 0)
+            # forget addresses that have stopped behaving like cars
             for a in list(self.tracked):
                 if a not in reps:
                     self.tracked[a] += 1
@@ -477,61 +383,6 @@ class Tracker:
                 else:
                     self.tracked[a] = 0
         return len(self.tracked)
-
-    def ident_for_all(self):
-        now = time.time()
-        if now - self._ident_t > 5.0:
-            self._ident = car_identities(self.log_path) if self.log_path else {}
-            self._ident_t = now
-        return self._ident
-
-    def bind_by_pguid(self, pguids):
-        """Bind each carId to a nearby world position in one heap pass."""
-        want = [g for g in pguids if g not in self.bound
-                or not (self.bound.get(g) or {}).get("addr")]
-        if not want:
-            return 0
-        print(f"  pguid hunt for {len(want)} car(s)...")
-        t0 = time.time()
-        found = scan_for_pguids(self.proc, want)
-        n = 0
-        for g, hits in found.items():
-            if not hits:
-                continue
-            # prefer a hit that actually produced a world position
-            ranked = sorted(hits, key=lambda h: (h[1] is None, ))
-            addr, pos, rel = ranked[0]
-            if pos is None:
-                continue
-            # store the ADDRESS OF THE POSITION, not the id — sample() reads
-            # 12 bytes there every tick
-            # We don't know the exact float offset; re-read around the id
-            pos_addr = self._pos_addr_near(addr, pos)
-            if pos_addr is None:
-                continue
-            with self.lock:
-                rec = self.bound.setdefault(g, {"addr": None, "hist": []})
-                rec["addr"] = pos_addr
-                rec["pguid_at"] = addr
-            n += 1
-            print(f"  bound {g[:16]}... via pguid -> 0x{pos_addr:012x} {pos}")
-        print(f"  pguid hunt bound {n}/{len(want)} in {time.time()-t0:.1f}s")
-        return n
-
-    def _pos_addr_near(self, id_addr, pos, span=0x180):
-        """Find the exact address of the (x,y,z) we decoded next to a PGUID."""
-        lo = max(0, id_addr - span)
-        blob = self.proc.read(lo, span * 2 + 16)
-        if not blob:
-            return None
-        n = (len(blob) // 4) * 4
-        a = struct.unpack("<%df" % (n // 4), blob[:n])
-        tx, ty, tz = pos
-        for i in range(0, len(a) - 2):
-            if (abs(a[i] - tx) < 0.05 and abs(a[i + 1] - ty) < 0.05
-                    and abs(a[i + 2] - tz) < 0.05):
-                return lo + i * 4
-        return None
 
     def bind_by_join(self, pguids):
         """pguids: {pguid: (x,y,z) spawn point or None}."""
@@ -865,21 +716,13 @@ def tail_spawns(tracker, path, from_start=False):
                 pending.pop(gone, None)
                 if tracker.unbind(gone):
                     print(f"  unbound {gone[:16]}... (disconnected)")
-        # PGUID hunt first: works on parked cars and on a full grid joining
-        # at once. Mover-diff is the fallback for cars whose id we cannot
-        # find in the heap (or whose nearby floats are not a position).
-        if pending and time.time() - last_seen > 1.0:
-            tracker.bind_by_pguid(list(pending))
-            still = {k: v for k, v in pending.items()
-                     if k not in tracker.bound or not tracker.bound[k].get("addr")}
-            if still and time.time() - last_seen > JOIN_SETTLE:
-                print(f"resolving {len(still)} leftover join(s) by mover diff...")
-                tracker.bind_by_join(still)
-                still = {k: v for k, v in still.items()
-                         if k not in tracker.bound or not tracker.bound[k].get("addr")}
-            pending = still
-            if not pending:
-                print(f"  {len(tracker.bound)} car(s) identified")
+        # Wait for the car to actually start driving - it is identified by
+        # becoming a new mover, which cannot happen while it sits in the pits.
+        if pending and time.time() - last_seen > JOIN_SETTLE:
+            print(f"resolving {len(pending)} join(s) by mover diff...")
+            tracker.bind_by_join(dict(pending))
+            print(f"  {len(tracker.bound)} car(s) identified")
+            pending.clear()
         time.sleep(0.15)
 
 
@@ -902,13 +745,8 @@ class Handler(BaseHTTPRequestHandler):
     tracker = None
 
     def do_GET(self):
-        ids = self.tracker.ident_for_all() if self.tracker.log_path else {}
-        data = json.dumps({
-            "cars": self.tracker.snapshot(),
-            "bound": sum(1 for r in self.tracker.bound.values() if r.get("addr")),
-            "expected": len(ids),
-            "identities": len(ids),
-        }).encode()
+        data = json.dumps({"cars": self.tracker.snapshot(),
+                           "bound": len(self.tracker.bound)}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")

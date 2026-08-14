@@ -2193,10 +2193,36 @@ async function browserPage() {
   const d = await api('browser');
   brLocal = await api('browser/local');
 
-  if (!d.ok) {
-    p.append(el('div', 'card', '<h2>Server browser</h2>'
-      + `<div class="empty">${esc(d.hint || d.error || 'unavailable')}</div>`));
-    return;
+  // ⚠ An empty browser is never self-explanatory. The list is CAPTURED from
+  // the game's own traffic, so it stays empty and silent whenever any link in
+  // the chain is missing - most often an unpatched client, which talks
+  // straight to Kunos and never passes anything through us. Show the chain.
+  if (!d.ok || !(d.servers || []).length) {
+    const why = await api('browser/why');
+    const c = el('div', 'card');
+    c.innerHTML = '<h2>Server browser</h2>'
+      + '<div class="tiny dim" style="margin-bottom:10px">The list is not '
+      + 'downloaded — it is captured from the game as it asks Kunos, which '
+      + 'only works if the client is talking through our backend.</div>';
+    (why.steps || []).forEach(s => {
+      const row = el('div', 'chk');
+      row.innerHTML = `<span class="name">${esc(s.what)}`
+        + (s.ok ? '' : `<div class="tiny dim">${esc(s.fix)}</div>`)
+        + (s.detail ? `<div class="tiny dim">${esc(s.detail)}</div>` : '')
+        + '</span>'
+        + `<span class="pill ${s.ok ? 'on' : 'bad'}"><i class="dot"></i>`
+        + `${s.ok ? 'ok' : 'missing'}</span>`;
+      c.append(row);
+    });
+    if (why.blocked_on) {
+      c.append(el('div', 'warn',
+        `<b>Stuck on:</b> ${esc(why.blocked_on)}`));
+    }
+    if (d.error || d.hint) {
+      c.append(el('div', 'tiny dim', esc(d.hint || d.error)));
+    }
+    p.append(c);
+    if (!(d.servers || []).length) return;
   }
 
   const age = d.captured_at ? Math.round(Date.now()/1000 - d.captured_at) : null;

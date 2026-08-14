@@ -442,6 +442,59 @@ def server_list():
                         "it is remembered and usable with the game closed"}
 
 
+def browser_chain():
+    """Why the server browser is empty, as a checklist.
+
+    ⚠ The list is not fetched - it is CAPTURED from the game's own lobby
+    traffic, which only passes through us if the client is patched to use our
+    backend. Every link can be missing silently: an unpatched client simply
+    talks to Kunos and the browser stays empty forever, with nothing failing
+    and nothing to see. "I followed the steps and it does not populate" is the
+    expected experience when one link is off, so name them.
+    """
+    import os
+
+    try:
+        st = state()
+    except Exception as ex:
+        st = {"error": str(ex)}
+    cu = st.get("client_url") or {}
+    cached = os.path.join(config.DATA, "server_list.json")
+    have_cache = os.path.isfile(cached)
+    captured = 0
+    if have_cache:
+        try:
+            captured = len(json.load(open(cached, encoding="utf-8"))
+                           .get("servers") or [])
+        except Exception:
+            pass
+
+    steps = [
+        {"ok": bool(st.get("listening")),
+         "what": f"backend proxy listening on :{st.get('port')}",
+         "fix": "Start it on the Backend page"},
+        {"ok": bool(st.get("have_cert")),
+         "what": "TLS certificate present",
+         "fix": "Generate it on the Backend page - the client will not "
+                "connect to the proxy without one"},
+        {"ok": bool(st.get("client_patched") or cu.get("rdata_patched")),
+         "what": "game client points at the local backend",
+         "fix": "Patch the client on the Backend page. UNPATCHED THE BROWSER "
+                "CAN NEVER FILL: the game talks straight to Kunos and the list "
+                "never passes through us",
+         "detail": cu.get("intended") or ""},
+        {"ok": captured > 0,
+         "what": f"server list captured ({captured} servers)"
+                 if captured else "server list captured",
+         "fix": "With the three above done, open Multiplayer in-game once. "
+                "After that it is remembered and works with the game closed"},
+    ]
+    first = next((s for s in steps if not s["ok"]), None)
+    return {"ok": first is None, "steps": steps,
+            "blocked_on": first["what"] if first else None,
+            "captured": captured}
+
+
 def join(server_id, shape="bare", tcp=None, udp=None, password=""):
     """Push the client into a dedicated server.
 
