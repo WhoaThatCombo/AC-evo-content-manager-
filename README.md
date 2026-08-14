@@ -159,9 +159,10 @@ names on cars. Mods are the exception: a mod's `.json` declares
 dedicated server rather than proving it is this profile's; with one server at a
 time that is fine, and it is the honest limit of matching on a base64 blob.
 
-**Client redirect is not automated yet.** Pointing the client at our lobby still
-means running `client/patch_backend_url.py` (and `--restore` to undo). The
-Backend page reports the state it can see but does not yet drive it.
+**Client redirect is required, and Launch now does it.** Steam relaunches the
+game with `Arguments: 1`, so `-backend=` never arrives. Launch from ACECM
+rewrites the lobby URL in `AssettoCorsaEVO.exe` first (same 58-byte slot
+`patch_backend_url.py` used). Steam "Verify integrity" undoes that rewrite.
 
 **Track deploy is built but not yet run end-to-end.** Validation is proven
 against four real packages on disk (one ready, three missing `containers.bin`),
