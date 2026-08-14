@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 
 from . import config, detect, logs, netutil
 
@@ -291,12 +292,26 @@ def apply_redirect():
                 "url": redirect_url()}
     if kind == "kunos" and data[off:off + slot] != KUNOS_CLIENT_URL:
         return {"ok": False, "error": "Kunos URL site is not intact — refusing"}
+    # ⚠ The game usually lives under Program Files, where writing needs
+    # elevation. Unelevated this raised a bare PermissionError that surfaced as
+    # "patch failed" with no cause - and the patch is OPTIONAL anyway, so say
+    # both things rather than leaving someone stuck on a step they do not need.
     bak = exe + ".bak_prebackend"
-    if not os.path.exists(bak):
-        shutil.copy2(exe, bak)
-        logs.LOG.info("backend URL backup: %s", bak)
-    data[off:off + slot] = want
-    open(exe, "wb").write(data)
+    try:
+        if not os.path.exists(bak):
+            shutil.copy2(exe, bak)
+            logs.LOG.info("backend URL backup: %s", bak)
+        data[off:off + slot] = want
+        with open(exe, "wb") as fh:
+            fh.write(data)
+    except PermissionError:
+        return {"ok": False, "needs_admin": True,
+                "error": f"no permission to modify {exe}. Run ACECM as "
+                         f"administrator, or skip this entirely and start the "
+                         f"game with ACECM's Launch game button - that passes "
+                         f"-backend= and needs no patch"}
+    except OSError as ex:
+        return {"ok": False, "error": f"could not write the client: {ex}"}
     _probe_cache.clear()
     logs.LOG.info("backend URL patched at %s -> %s", hex(off), redirect_url())
     return {"ok": True, "off": hex(off), "was": kind,
@@ -368,7 +383,117 @@ def start(mode="proxy"):
                          stdout=log, stderr=subprocess.STDOUT)
     logs.launched(f"backend ({mode})", cmd, p.pid, log=log.name)
     _procs[mode] = p
-    return {"ok": True, "pid": p.pid, "mode": mode}
+    # ⚠ Spawning is not starting. If the port is taken, or an import blows up
+    # (any_pb2 did exactly this in shipped builds), the child is dead within a
+    # second and we would still hand back ok:True with a pid. Wait for it to
+    # actually listen, and if it never does, say so with the reason.
+    # ⚠ "something answers on the port" is NOT the test - that is true even
+    # when our child died on bind and a stale backend owns the socket, which
+    # is precisely the case that made this look healthy while nothing worked.
+    # The listener must be OUR child.
+    deadline = time.time() + 8.0
+    port = config.CFG["backend_port"]
+    owner = []
+    while time.time() < deadline:
+        owner = _listener_pids(port)
+        if any(_is_descendant(o, p.pid) for o in owner):
+            return {"ok": True, "pid": p.pid, "mode": mode, "port": port}
+        if p.poll() is not None:
+            break
+        time.sleep(0.5)
+    tail = [ln for ln in log_tail_text(mode).splitlines() if ln.strip()][-6:]
+    if owner:
+        why = (f"port {port} is already held by another process (pid "
+               f"{owner[0]}), so this backend could not bind. Close the other "
+               f"ACECM or backend window and start it again.")
+    elif p.poll() is not None:
+        why = (f"the backend exited immediately without listening on port "
+               f"{port} - see the detail below")
+    else:
+        why = (f"the backend is running but never listened on port {port}")
+    return {"ok": False, "pid": p.pid, "mode": mode, "port": port,
+            "error": why, "detail": tail}
+
+
+def _listener_pids(port):
+    """Every pid listening on a local port (empty if none)."""
+    out = []
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                            "-Command",
+                            f"(Get-NetTCPConnection -State Listen -LocalPort "
+                            f"{int(port)} -ErrorAction SilentlyContinue)"
+                            f".OwningProcess"],
+                           capture_output=True, text=True, timeout=10)
+        for line in (r.stdout or "").split():
+            if line.strip().isdigit():
+                out.append(int(line))
+    except Exception as ex:
+        logs.LOG.info("listener lookup on %s: %s", port, ex)
+    return out
+
+
+def _is_descendant(pid, ancestor, depth=6):
+    """Is pid the ancestor process, or a child/grandchild of it?
+
+    ⚠ Needed because a onefile PyInstaller exe is TWO processes: the bootloader
+    we spawn, and the real Python child it unpacks and runs. The socket belongs
+    to the child, so testing the pid we launched says "not listening" for every
+    frozen build - which is the shipped configuration.
+    """
+    seen = pid
+    for _ in range(depth):
+        if seen == ancestor:
+            return True
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter "
+                 f"'ProcessId={int(seen)}').ParentProcessId"],
+                capture_output=True, text=True, timeout=10)
+            txt = (r.stdout or "").strip()
+        except Exception:
+            return False
+        if not txt.isdigit():
+            return False
+        seen = int(txt)
+        if seen in (0, 4):
+            return False
+    return False
+
+
+def _orphan_on_backend_port():
+    """An ACECM backend from a PREVIOUS ACECM session still holding the port.
+
+    ⚠ _procs only knows about children of THIS process. Close ACECM (or update
+    it) while the proxy is running and the proxy keeps living, keeps port 448,
+    and is invisible to us. Start the proxy again and the new one dies on bind
+    while ACECM cheerfully reports the pid it just spawned - so the UI says
+    "running", the log says "launched backend (proxy)", and the listener is
+    actually the stale build. Every symptom points at the client.
+
+    ⚠ Identify it by COMMAND LINE, not by exe name. Downloading the app twice
+    gives you "ACECM(3).exe" and "ACECM(4).exe", and a name test misses the
+    orphan in exactly the situation that creates one - updating.
+    """
+    port = config.CFG["backend_port"]
+    tools = tuple(os.path.splitext(v)[0] for v in MODES.values())
+    for pid in _listener_pids(port):
+        if pid == os.getpid():
+            continue
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter "
+                 f"'ProcessId={pid}').CommandLine"],
+                capture_output=True, text=True, timeout=10)
+            cmd = (r.stdout or "").strip()
+        except Exception as ex:
+            logs.LOG.info("backend port owner lookup: %s", ex)
+            continue
+        if "--tool" in cmd and any(t in cmd for t in tools):
+            return pid
+    return None
 
 
 def stop():
@@ -376,7 +501,24 @@ def stop():
         if p.poll() is None:
             p.terminate()
         _procs.pop(mode, None)
+    # Reclaim the port from a backend we no longer have a handle to, or the
+    # next start() silently loses the bind and everything downstream lies.
+    pid = _orphan_on_backend_port()
+    if pid:
+        logs.LOG.info("reclaiming backend port %s from orphaned ACECM pid %s "
+                      "(left over from a previous ACECM session)",
+                      config.CFG["backend_port"], pid)
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       capture_output=True)
     return {"ok": True}
+
+
+def log_tail_text(mode="proxy"):
+    path = os.path.join(config.DATA, f"backend_{mode}.log")
+    try:
+        return open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return ""
 
 
 def log(mode="proxy", lines=80):
@@ -469,7 +611,18 @@ def browser_chain():
         except Exception:
             pass
 
+    exe = _game_exe()
     steps = [
+        # ⚠ First, because without it "Launch game" quietly hands off to Steam,
+        # which starts the game with no -backend= - so the client talks to
+        # Kunos, nothing passes through the proxy, and every other link can be
+        # green while the browser stays empty forever.
+        {"ok": bool(exe),
+         "what": "game executable located",
+         "fix": "Set game_exe in Settings to AssettoCorsaEVO.exe. Without it "
+                "ACECM has to start the game through Steam, which drops the "
+                "-backend= flag and the list never reaches us",
+         "detail": exe or ""},
         {"ok": bool(st.get("listening")),
          "what": f"backend proxy listening on :{st.get('port')}",
          "fix": "Start it on the Backend page"},
@@ -477,11 +630,17 @@ def browser_chain():
          "what": "TLS certificate present",
          "fix": "Generate it on the Backend page - the client will not "
                 "connect to the proxy without one"},
+        # ⚠ TWO ways to satisfy this, and the easy one was never mentioned.
+        # ACECM's own Launch game passes -backend=, which does the same job
+        # with no patching and no admin rights. The rdata patch only matters
+        # when the game is started from Steam, which drops the flag.
         {"ok": bool(st.get("client_patched") or cu.get("rdata_patched")),
-         "what": "game client points at the local backend",
-         "fix": "Patch the client on the Backend page. UNPATCHED THE BROWSER "
-                "CAN NEVER FILL: the game talks straight to Kunos and the list "
-                "never passes through us",
+         "what": "game client talks to the local backend",
+         "fix": "Easiest: start the game with ACECM's 'Launch game' button - "
+                "it passes -backend= and needs no patch. Starting from Steam "
+                "drops that flag, and only then do you need 'Point client at "
+                "us' on the Backend page (which needs ACECM running as "
+                "administrator if the game is in Program Files)",
          "detail": cu.get("intended") or ""},
         {"ok": captured > 0,
          "what": f"server list captured ({captured} servers)"
@@ -660,13 +819,21 @@ def launch_game(extra_args=None):
     """
     exe = _game_exe()
     if not exe:
+        # ⚠ NOT ok. Steam launches the game without our -backend=, so the
+        # client talks to Kunos and nothing reaches the proxy - the browser
+        # stays empty. This used to return ok:True with a warning nobody saw,
+        # so "Launch game" looked like it had worked and the real problem
+        # (we cannot find the exe) never surfaced.
         appid = config.CFG.get("steam_appid")
         if appid:
             os.startfile(f"steam://rungameid/{appid}")   # noqa: S606
-            return {"ok": True, "via": "steam",
-                    "warning": "started via steam:// — -backend= was NOT "
-                               "passed. Use the exe path or the rdata patch."}
-        return {"ok": False, "error": "set game_exe in config.json"}
+            return {"ok": False, "via": "steam", "started": True,
+                    "error": "the game exe could not be found, so it was "
+                             "started through Steam WITHOUT -backend= - the "
+                             "server browser will not fill. Set game_exe in "
+                             "Settings to AssettoCorsaEVO.exe and launch "
+                             "again."}
+        return {"ok": False, "error": "set game_exe in Settings"}
     url = netutil.backend_ws_url(config.CFG["backend_port"])
     env = dict(os.environ)
     appid = str(config.CFG.get("steam_appid") or "3058630")
