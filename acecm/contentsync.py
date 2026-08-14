@@ -201,6 +201,66 @@ def parse_target(raw):
     return raw, None, ""
 
 
+def tag_hosts(ips, timeout=0.45):
+    """Which of these IPs have ACECM sharing content on the UI TCP port.
+
+    A 400 ms connect + /api/registry/list. Port closed = not ACECM. Port
+    open but no hosted tracks/mods = ACECM with nothing published. Only
+    `hosted` is what the browser tags.
+    """
+    import socket
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    port = int(config.CFG.get("ui_port") or 8092)
+    seen, targets = set(), []
+    for raw in ips or []:
+        host, p, _base = parse_target(str(raw or ""))
+        if not host or host in seen:
+            continue
+        seen.add(host)
+        targets.append((host, int(p) if p else port))
+        if len(targets) >= 24:
+            break
+
+    def one(item):
+        host, p = item
+        s = socket.socket()
+        try:
+            s.settimeout(timeout)
+            if s.connect_ex((host, p)) != 0:
+                return host, {"acecm": False, "hosted": False, "port": p}
+        except OSError:
+            return host, {"acecm": False, "hosted": False, "port": p}
+        finally:
+            try:
+                s.close()
+            except OSError:
+                pass
+        try:
+            got = _get(f"http://{host}:{p}/api/registry/list", timeout)
+        except Exception:
+            return host, {"acecm": False, "hosted": False, "port": p}
+        servers = got.get("servers") if isinstance(got, dict) else None
+        if servers is None:
+            return host, {"acecm": False, "hosted": False, "port": p}
+        hosted = any((e.get("required_tracks") or e.get("required_mods"))
+                     for e in servers)
+        return host, {"acecm": True, "hosted": bool(hosted), "port": p,
+                      "items": sum(len(e.get("required_tracks") or [])
+                                   + len(e.get("required_mods") or [])
+                                   for e in servers)}
+
+    out = {}
+    if not targets:
+        return {"ok": True, "port": port, "hosts": out}
+    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+        futs = [pool.submit(one, t) for t in targets]
+        for fut in as_completed(futs):
+            host, info = fut.result()
+            out[host] = info
+    return {"ok": True, "port": port, "hosts": out}
+
+
 def share_info():
     """What a host should send a joining player."""
     from . import netutil

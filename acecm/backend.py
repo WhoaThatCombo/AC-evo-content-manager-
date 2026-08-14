@@ -465,20 +465,12 @@ def start(mode="proxy"):
 
 def _listener_pids(port):
     """Every pid listening on a local port (empty if none)."""
-    out = []
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
-                            "-Command",
-                            f"(Get-NetTCPConnection -State Listen -LocalPort "
-                            f"{int(port)} -ErrorAction SilentlyContinue)"
-                            f".OwningProcess"],
-                           capture_output=True, text=True, timeout=10)
-        for line in (r.stdout or "").split():
-            if line.strip().isdigit():
-                out.append(int(line))
+        from . import winproc
+        return winproc.tcp_listen_pids(int(port))
     except Exception as ex:
         logs.LOG.info("listener lookup on %s: %s", port, ex)
-    return out
+        return []
 
 
 def _is_descendant(pid, ancestor, depth=6):

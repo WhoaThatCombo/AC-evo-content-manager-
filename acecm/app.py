@@ -147,6 +147,11 @@ class Handler(BaseHTTPRequestHandler):
                     ports=(8092, 8093), timeout=to))
             if path == "/api/share":
                 return _json(self, contentsync.share_info())
+            if path == "/api/browser/tag":
+                ips = q.get("ip") or []
+                if not ips and q.get("ips"):
+                    ips = (q.get("ips") or [""])[0].split(",")
+                return _json(self, contentsync.tag_hosts(ips))
             if path == "/api/browser/needs":
                 # servers running something this machine cannot load, from the
                 # remembered list - answerable with the game closed

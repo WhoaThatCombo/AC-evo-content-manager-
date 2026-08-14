@@ -101,6 +101,7 @@ label.f span{display:block;color:var(--dim);font-size:11.5px;margin-bottom:4px}
 .pill.off{color:var(--dim2)}
 .pill.warn{color:var(--gold);border-color:#3a3117;background:#1d1809}
 .pill.bad{color:var(--red);border-color:#3d1d26;background:#1e0f13}
+.pill.acecm{color:var(--accent);border-color:#164e45;background:#0c2421;margin-left:6px}
 .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
 
 .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px}

@@ -196,7 +196,7 @@ def live_player_count():
         return 0
 
 
-LOCAL_TAG = os.environ.get("LOCAL_TAG", "[LOCAL]")
+LOCAL_TAG = os.environ.get("LOCAL_TAG", "[ACECM]")
 
 
 def _tagged(name):

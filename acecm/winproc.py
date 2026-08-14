@@ -4,6 +4,7 @@ ACECM used to spawn powershell.exe for Get-Process / Get-CimInstance. Each
 call flashed a console and Windows toasted it. Toolhelp / psapi stay in-process.
 """
 import ctypes
+import struct
 from ctypes import wintypes
 
 CREATE_NO_WINDOW = 0x08000000
@@ -58,6 +59,48 @@ _psapi.GetProcessMemoryInfo.argtypes = [
 def _norm(name):
     n = (name or "").lower()
     return n if n.endswith(".exe") else n + ".exe"
+
+
+def tcp_listen_pids(port):
+    """PIDs with a TCP LISTEN socket on `port`. No powershell.
+
+    GetExtendedTcpTable is in-process. The old Get-NetTCPConnection spawn
+    was 200-800 ms and ran on every dashboard / backend / overview load.
+    """
+    iph = ctypes.WinDLL("iphlpapi", use_last_error=True)
+    AF_INET = 2
+    TCP_TABLE_OWNER_PID_ALL = 5
+    size = ctypes.c_ulong(0)
+    iph.GetExtendedTcpTable(None, ctypes.byref(size), False,
+                            AF_INET, TCP_TABLE_OWNER_PID_ALL, 0)
+    if size.value <= 0:
+        return []
+    buf = ctypes.create_string_buffer(size.value)
+    if iph.GetExtendedTcpTable(buf, ctypes.byref(size), False,
+                               AF_INET, TCP_TABLE_OWNER_PID_ALL, 0):
+        return []
+
+    class ROW(ctypes.Structure):
+        _fields_ = [("dwState", wintypes.DWORD),
+                    ("dwLocalAddr", wintypes.DWORD),
+                    ("dwLocalPort", wintypes.DWORD),
+                    ("dwRemoteAddr", wintypes.DWORD),
+                    ("dwRemotePort", wintypes.DWORD),
+                    ("dwOwningPid", wintypes.DWORD)]
+
+    n = struct.unpack_from("<I", buf.raw, 0)[0]
+    off = 4
+    out = []
+    want = int(port)
+    import socket
+    for _ in range(n):
+        row = ROW.from_buffer_copy(buf.raw, off)
+        off += ctypes.sizeof(ROW)
+        if int(row.dwState) != 2:          # MIB_TCP_STATE_LISTEN
+            continue
+        if socket.ntohs(row.dwLocalPort & 0xFFFF) == want:
+            out.append(int(row.dwOwningPid))
+    return out
 
 
 def pids_named(*names):
