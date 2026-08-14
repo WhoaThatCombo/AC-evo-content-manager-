@@ -40,11 +40,14 @@ async function dashboard() {
   // the clear and the appends is a window for a second render to interleave.
   // These five used to run one after another, so a slow overview made the
   // whole dashboard wait five times.
+  // Overview already has backend + counts. Waiting on /api/cars here made
+  // every dashboard visit pay for a kspkg walk that the tiles do not need.
   const settled = await Promise.allSettled([
-    api('state'), api('profiles'), api('cars'), api('tracks'), api('overview'),
+    api('state'), api('profiles'), api('overview'),
   ]);
   const val = i => (settled[i].status === 'fulfilled' && settled[i].value) || {};
-  const s = val(0), pr = val(1), cars = val(2), trk = val(3), ov = val(4);
+  const s = val(0), pr = val(1), ov = val(2);
+  const cars = {}, trk = {};
   const profs = (pr && pr.profiles) || [];
   const b = (s && s.backend) || (ov && ov.backend) || {};
   const p = $('#page');
@@ -96,7 +99,7 @@ async function dashboard() {
     [ov.running ?? 0, `server${ov.running === 1 ? '' : 's'} running`],
     [ov.players ?? 0, 'players connected'],
     [ov.tracks ?? trk.total ?? '—', 'tracks you can load'],
-    [cars.total ?? '—', `cars (${cars.mods ?? 0} modded)`],
+    [ov.cars ?? cars.total ?? '—', `cars (${cars.mods ?? 0} modded)`],
     [ov.shared ?? 0, 'items shared for download'],
     [b.listening ? 'UP' : 'DOWN', `own backend :${b.port ?? '—'}`],
   ];
@@ -195,9 +198,11 @@ async function dashboard() {
 /* -------------------------------------------------------------- servers -- */
 let editing = null;
 async function serversPage() {
-  const { profiles, template, options, telemetry: telState } = await api('profiles');
-  const trk = (await api('tracks')).tracks || [];
-  const worker = await api('game/worker');
+  const [pr, trkWrap, worker] = await Promise.all([
+    api('profiles'), api('tracks'), api('game/worker'),
+  ]);
+  const { profiles, template, options, telemetry: telState } = pr || {};
+  const trk = (trkWrap && trkWrap.tracks) || [];
   const p = $('#page');
   p.innerHTML = '';
   if (worker && worker.attached) {
@@ -806,11 +811,12 @@ let carFilter = '';
    made once; a tile with no render yet simply stays blank rather than blocking
    the page while ~2 s of GPU work happens per car. */
 async function carGallery(p) {
-  const cars = (await api('viewer/cars')).cars || [];
-  const st = await api('thumbs/status');
-  const have = new Set(st.have || []);
-  const cat = await api('cars');
-  const profs = (await api('profiles')).profiles || [];
+  const [viewer, st, cat, pr] = await Promise.all([
+    api('viewer/cars'), api('thumbs/status'), api('cars'), api('profiles'),
+  ]);
+  const cars = (viewer && viewer.cars) || [];
+  const have = new Set((st && st.have) || []);
+  const profs = (pr && pr.profiles) || [];
 
   // ⚠ Two different ids. The gallery is keyed by MODEL (ks_abarth_695_biposto)
   // because that is what has a render; a server's allowed list is keyed by
@@ -1076,17 +1082,17 @@ async function carsPage() {
 
 /* --------------------------------------------------------------- tracks -- */
 async function tracksPage() {
-  const d = await api('tracks');
+  const [d, loc, st] = await Promise.all([
+    api('tracks'), api('browser/local'), api('thumbs/status'),
+  ]);
   const p = $('#page');
   p.innerHTML = '';
 
   // Every track the game can load, with the cover art it ships. Only some
   // tracks have one; the rest show a blank tile rather than a placeholder
   // pretending to be a photo.
-  const loc = await api('browser/local');
-  const map = loc.track_map || {};
+  const map = (loc && loc.track_map) || {};
   const gal = el('div', 'card');
-  const st = await api('thumbs/status');
   const shipped = (st.covers || []).length;
   const done = (st.covers_have || []).length;
   gal.innerHTML = `<h2>Tracks &middot; ${Object.keys(map).length}</h2>`
@@ -2277,8 +2283,8 @@ async function browserPage() {
   const p = $('#page');
   p.innerHTML = '';
   p.append(fetchHostCard());
-  const d = await api('browser');
-  brLocal = await api('browser/local');
+  const [d, loc] = await Promise.all([api('browser'), api('browser/local')]);
+  brLocal = loc || {};
 
   // ⚠ An empty browser is never self-explanatory. The list is CAPTURED from
   // the game's own traffic, so it stays empty and silent whenever any link in

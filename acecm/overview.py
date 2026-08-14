@@ -23,14 +23,18 @@ def _port_busy(port):
     down entirely - 120 GB of virtual address space and a hard freeze. Naming
     the conflict up front is the cheapest possible fix.
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        s.settimeout(0.15)
-        return s.connect_ex(("127.0.0.1", int(port))) == 0
+        from . import winproc
+        return bool(winproc.tcp_listen_pids(int(port)))
     except Exception:
-        return False
-    finally:
-        s.close()
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.settimeout(0.15)
+            return s.connect_ex(("127.0.0.1", int(port))) == 0
+        except Exception:
+            return False
+        finally:
+            s.close()
 
 
 _EVENTS = None
