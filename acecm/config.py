@@ -67,6 +67,8 @@ DEFAULTS = {
     "update_token": "",
     # ports we own
     "ui_port": 8092,
+    # 0.0.0.0 = LAN/internet can fetch content. 127.0.0.1 hid the share.
+    "listen": "0.0.0.0",
     "telemetry_port": 8091,
     "backend_port": 448,
     # default server settings for new profiles

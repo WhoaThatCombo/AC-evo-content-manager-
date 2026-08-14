@@ -164,6 +164,15 @@ def attention(srv, be):
                 "do": "Players missing the track cannot download it from you - "
                       "deploy it from Content to publish automatically",
             })
+        if published:
+            items.append({
+                "level": "info",
+                "what": "Remote players fetch content from this ACECM, not "
+                        "from the game port",
+                "do": "They need TCP 8092 (this window) plus the game's "
+                      "TCP+UDP port (usually 9700). Forward both if they "
+                      "are not on your LAN, and allow 8092 in Windows Firewall.",
+            })
     except Exception:
         pass
     return items
