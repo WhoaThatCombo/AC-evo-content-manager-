@@ -216,9 +216,12 @@ def discover(host, port=None, ports=None, timeout=TIMEOUT):
         return {"ok": True, "base": base, "port": p,
                 "servers": servers}
     return {"ok": False, "tried": tried,
-            "error": f"no ACECM answering on {host} - the host is not sharing "
-                     f"content, so anything you are missing has to come from "
-                     f"them another way"}
+            "error": f"no ACECM answering on {host} "
+                     f"(tried TCP {', '.join(str(p) for p in tried)}). "
+                     "Content is NOT the game port: the host must run ACECM "
+                     "and allow inbound TCP 8092 (Windows Firewall + router "
+                     "port-forward if you are not on the same LAN). "
+                     "Game join still needs TCP+UDP 9700."}
 
 
 def scan(servers, limit=24, workers=6):

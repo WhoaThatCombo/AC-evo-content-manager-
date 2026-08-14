@@ -10,6 +10,7 @@ import mimetypes
 import os
 import shutil
 import socketserver
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -528,6 +529,35 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def _allow_share_port(port):
+    """Ask Windows Firewall to allow inbound TCP on the content port.
+
+    Without this, binding 0.0.0.0 still looks dead from another PC: the
+    packet arrives, the firewall drops it, discover() says the host is
+    not sharing. Best-effort - a non-admin start just logs and continues.
+    """
+    name = f"ACECM-content-{int(port)}"
+    try:
+        r = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule",
+             f"name={name}"],
+            capture_output=True, text=True, timeout=8)
+        if r.returncode == 0 and name in (r.stdout or ""):
+            return
+        r = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "add", "rule",
+             f"name={name}", "dir=in", "action=allow", "protocol=TCP",
+             f"localport={int(port)}", "profile=any"],
+            capture_output=True, text=True, timeout=8)
+        if r.returncode == 0:
+            logs.LOG.info("firewall: allowed inbound TCP %s", port)
+        else:
+            logs.LOG.warning("firewall: could not open TCP %s (need admin?): %s",
+                             port, (r.stderr or r.stdout or "").strip()[:200])
+    except Exception as ex:
+        logs.LOG.warning("firewall: %s", ex)
+
+
 class App(socketserver.ThreadingTCPServer):
     daemon_threads = True
     # NOT reusable: on Windows a second process can otherwise bind the same
@@ -603,12 +633,26 @@ def serve():
     _rescan_content()
     _watch_lobby()
     port = config.CFG["ui_port"]
+    # ⚠ 127.0.0.1 made the window work and made content sharing a lie.
+    # Get content probes this HTTP port on the game server's IP. Bound
+    # only to loopback, a friend on the LAN or the internet can never
+    # reach it - "can't reach the IP" - even with 9700 forwarded.
+    listen = (config.CFG.get("listen") or "0.0.0.0").strip() or "0.0.0.0"
     try:
-        srv = App(("127.0.0.1", port), Handler)
+        srv = App((listen, port), Handler)
     except OSError as ex:
         raise SystemExit(f"port {port} in use ({ex}) - is ACECM already running?")
     url = f"http://localhost:{port}"
+    lan = ""
+    try:
+        from . import netutil
+        lan = netutil.lan_ipv4() or ""
+    except Exception:
+        pass
+    _allow_share_port(port)
     print(f"Assetto Corsa EVO Content Manager\n  {url}")
+    if lan:
+        print(f"  share     : http://{lan}:{port}  (TCP {port} must be reachable)")
     print(f"  server dir : {config.server_dir()}")
     print(f"  tools dir  : {config.tools_dir()}")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
