@@ -141,10 +141,16 @@ class Handler(BaseHTTPRequestHandler):
                 # a blocked request before we can say "that host is not running
                 # ACECM" - long enough that the webview reports the app as not
                 # responding, which reads as a crash rather than an answer.
+                # A pasted share URL is one address: give it longer, it is
+                # often on the other side of someone's router.
+                raw = (q.get("host") or [""])[0]
+                _h, explicit, given = contentsync.parse_target(raw)
+                to = 8.0 if (given or explicit) else 2.0
                 return _json(self, contentsync.discover(
-                    (q.get("host") or [""])[0],
-                    (q.get("port") or [None])[0],
-                    ports=(8092, 8093), timeout=2.0))
+                    raw, (q.get("port") or [None])[0],
+                    ports=(8092, 8093), timeout=to))
+            if path == "/api/share":
+                return _json(self, contentsync.share_info())
             if path == "/api/browser/needs":
                 # servers running something this machine cannot load, from the
                 # remembered list - answerable with the game closed

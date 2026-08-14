@@ -180,13 +180,69 @@ def _get(url, timeout=TIMEOUT):
         return json.loads(r.read() or b"{}")
 
 
+def parse_target(raw):
+    """Turn a pasted share link, host:port, or bare IP into (host, port, base)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return "", None, ""
+    if "://" in raw:
+        u = urllib.parse.urlparse(raw)
+        host = (u.hostname or "").strip("[]")
+        port = u.port
+        if host:
+            scheme = u.scheme or "http"
+            netloc = u.netloc or (f"{host}:{port}" if port else host)
+            return host, port, f"{scheme}://{netloc}"
+        return "", None, ""
+    if raw.count(":") == 1:
+        left, right = raw.rsplit(":", 1)
+        if right.isdigit() and left:
+            return left, int(right), ""
+    return raw, None, ""
+
+
+def share_info():
+    """What a host should send a joining player."""
+    from . import netutil
+    port = int(config.CFG.get("ui_port") or 8092)
+    lan = netutil.lan_ipv4() or ""
+    pub = []
+    for e in registry.load():
+        if not e.get("public", True):
+            continue
+        pub.append({
+            "id": e.get("id"), "name": e.get("name"),
+            "tracks": e.get("required_tracks") or [],
+            "mods": e.get("required_mods") or [],
+        })
+    return {
+        "ok": True,
+        "port": port,
+        "listen": (config.CFG.get("listen") or "0.0.0.0"),
+        "lan_ip": lan,
+        "lan_url": f"http://{lan}:{port}" if lan else "",
+        "localhost_url": f"http://127.0.0.1:{port}",
+        "published": pub,
+        "hint": (f"Players paste the URL into Server browser → Fetch from "
+                 f"ACECM. They need TCP {port} (this app) and the game's "
+                 f"TCP+UDP port (usually 9700). Same LAN: firewall on "
+                 f"{port}. Different network: forward both."),
+    }
+
+
 def discover(host, port=None, ports=None, timeout=TIMEOUT):
     """Find the ACECM sharing content beside a game server.
 
-    Returns its base URL and the servers it publishes, or an explanation. A
-    host that simply is not running ACECM is the normal case, not an error.
+    Accepts a bare IP, host:port, or a full http:// URL (the share link
+    a host copies from Content). A host that simply is not running ACECM
+    is the normal case, not an error.
     """
-    host = (host or "").strip()
+    host, parsed_port, given_base = parse_target(host)
+    if port:
+        try:
+            parsed_port = int(port)
+        except (TypeError, ValueError):
+            pass
     if not host:
         return {"ok": False, "error": "no host given"}
 
@@ -199,13 +255,31 @@ def discover(host, port=None, ports=None, timeout=TIMEOUT):
         from . import netutil
         if host in set(netutil.our_ips() or []):
             host = "127.0.0.1"
+            if given_base:
+                given_base = ""
     except Exception as ex:
         logs.LOG.debug("own-ip check: %s", ex)
 
+    if given_base:
+        try:
+            got = _get(f"{given_base}/api/registry/list", timeout)
+            servers = got.get("servers") if isinstance(got, dict) else got
+            if servers is not None:
+                return {"ok": True, "base": given_base,
+                        "port": parsed_port, "servers": servers}
+        except (urllib.error.URLError, OSError, ValueError) as ex:
+            return {"ok": False, "tried": [parsed_port],
+                    "error": f"no ACECM at {given_base} ({ex}). "
+                             "The host must be running ACECM and TCP "
+                             f"{parsed_port or 8092} must be reachable."}
+
     tried = []
-    for p in ([int(port)] if port else (ports or PORTS)):
-        base = f"http://{host}:{p}"
-        tried.append(p)
+    probe = [parsed_port] if parsed_port else list(ports or PORTS)
+    for p in probe:
+        if not p:
+            continue
+        base = f"http://{host}:{int(p)}"
+        tried.append(int(p))
         try:
             got = _get(f"{base}/api/registry/list", timeout)
         except (urllib.error.URLError, OSError, ValueError):
@@ -213,11 +287,11 @@ def discover(host, port=None, ports=None, timeout=TIMEOUT):
         servers = got.get("servers") if isinstance(got, dict) else got
         if servers is None:
             continue
-        return {"ok": True, "base": base, "port": p,
+        return {"ok": True, "base": base, "port": int(p),
                 "servers": servers}
     return {"ok": False, "tried": tried,
             "error": f"no ACECM answering on {host} "
-                     f"(tried TCP {', '.join(str(p) for p in tried)}). "
+                     f"(tried TCP {', '.join(str(p) for p in tried) or 'none'}). "
                      "Content is NOT the game port: the host must run ACECM "
                      "and allow inbound TCP 8092 (Windows Firewall + router "
                      "port-forward if you are not on the same LAN). "

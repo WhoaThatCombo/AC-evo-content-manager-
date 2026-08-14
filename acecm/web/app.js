@@ -1448,12 +1448,36 @@ async function shareCard(p) {
     .filter(([, folder]) => imported.has(folder))
     .sort((a, b) => a[0].localeCompare(b[0]));
 
+  const share = await api('share');
   const c = el('div', 'card');
   c.innerHTML = '<h2>Shared for download</h2>'
     + '<div class="tiny dim" style="margin-bottom:10px">A player who does not '
     + 'have your track cannot join, and the game will not send it to them. '
-    + 'Share it here and their ACECM can download it from you. Only tracks you '
-    + 'imported are listed — stock tracks everyone already has.</div>';
+    + 'Share it here, copy the link, and they paste it into '
+    + '<b>Server browser → Fetch from ACECM</b>. Only tracks you imported '
+    + 'are listed — stock tracks everyone already has.</div>';
+  if (share.lan_url) {
+    const box = el('div', 'row wrap');
+    box.style.marginBottom = '10px';
+    const url = el('input');
+    url.readOnly = true;
+    url.value = share.lan_url;
+    url.style.minWidth = '18em';
+    url.title = share.hint || '';
+    const copy = el('button', 'sm primary', 'Copy share link');
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(share.lan_url); } catch (e) {}
+      toast('Copied ' + share.lan_url + ' — they paste this in Server browser');
+    };
+    box.append(url, copy);
+    c.append(box);
+    c.append(el('div', 'tiny dim',
+      `They need <b>TCP ${share.port}</b> (this app) and the game `
+      + '<b>TCP+UDP 9700</b>. Same LAN: allow 8092 in Windows Firewall. '
+      + 'Different internet: forward both, and swap the LAN address in the '
+      + 'link for your public IP — keep <code>:' + share.port + '</code>. '
+      + 'ACECM stays open while they download.'));
+  }
   if (!rows.length) {
     c.append(el('div', 'empty', 'No imported tracks to share'));
   } else {
@@ -2206,9 +2230,36 @@ async function contentFrom(s) {
   }, 1000);
 }
 
+function fetchHostCard() {
+  const c = el('div', 'card');
+  c.innerHTML = '<h2>Fetch from a hosted ACECM</h2>'
+    + '<div class="tiny dim" style="margin-bottom:10px">If someone is hosting '
+    + 'a modded server, they copy a share link from their Content page. Paste '
+    + 'it here — you do not need the in-game list for this. '
+    + '<code>http://192.168.1.10:8092</code> or just the IP.</div>';
+  const row = el('div', 'row wrap');
+  const inp = el('input');
+  inp.placeholder = 'http://host:8092  or  1.2.3.4';
+  inp.style.minWidth = '18em';
+  const go = el('button', 'primary', 'Fetch content');
+  go.onclick = async () => {
+    const host = inp.value.trim();
+    if (!host) { toast('Paste the host’s ACECM link first', true); return; }
+    await contentFrom({ server_ip: host });
+  };
+  inp.onkeydown = e => { if (e.key === 'Enter') go.onclick(); };
+  row.append(inp, go);
+  c.append(row);
+  const prog = el('div', 'tiny dim');
+  prog.id = 'brprog';
+  c.append(prog);
+  return c;
+}
+
 async function browserPage() {
   const p = $('#page');
   p.innerHTML = '';
+  p.append(fetchHostCard());
   const d = await api('browser');
   brLocal = await api('browser/local');
 
@@ -2314,7 +2365,7 @@ async function browserPage() {
   };
   row.append(scan);
 
-  const prog = el('div', 'tiny dim');
+  const prog = $('#brprog') || el('div', 'tiny dim');
   prog.id = 'brprog';
   head.append(prog);
 

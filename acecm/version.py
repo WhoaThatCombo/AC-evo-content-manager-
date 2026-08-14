@@ -22,7 +22,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 NAME = "Assetto Corsa EVO Content Manager"
 
 
