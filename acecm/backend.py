@@ -369,7 +369,27 @@ def start(mode="proxy"):
     if not os.path.exists(lobby.PATH):
         items = _servers.load()
         lobby.write(items[0] if items else {})
+    # ⚠ The proxy needs the game's protobuf schemas to understand lobby traffic,
+    # and they are extracted from the user's own exe rather than shipped. That
+    # extraction only ever happened as a side effect of opening Game Settings,
+    # which nobody has to do - so on a machine where it never ran, the proxy
+    # starts, binds, relays raw bytes, and captures NOTHING, while every
+    # indicator reads healthy. Extract here, and say so plainly if we cannot.
     env["ACECM_PROTOS"] = protolib.cache_dir()
+    try:
+        if not protolib.has("BackendMessage"):
+            got = protolib.extract()
+            logs.LOG.info("schema extraction before backend start: %s", got)
+    except Exception as ex:
+        logs.LOG.warning("schema extraction before backend start failed: %s", ex)
+    if not protolib.has("BackendMessage"):
+        return {"ok": False, "error":
+                "the game's message schemas are missing, so the backend could "
+                "read lobby traffic but never understand it - the server "
+                "browser would stay empty with everything looking fine. They "
+                "are read from your own AssettoCorsaEVO.exe: set game_dir in "
+                "Settings to your Assetto Corsa EVO install and start it again",
+                "protos": protolib.cache_dir()}
     env["ACECM_CERTS"] = certs_dir()
     env["LOBBY_JSON"] = lobby.PATH
     lan = netutil.lan_ipv4()
@@ -398,7 +418,10 @@ def start(mode="proxy"):
     # when our child died on bind and a stale backend owns the socket, which
     # is precisely the case that made this look healthy while nothing worked.
     # The listener must be OUR child.
-    deadline = time.time() + 8.0
+    # Generous, because the child is another onefile exe: it unpacks ~70 MB and
+    # Defender scans it on first run. 8s was fine on a warm SSD and short on a
+    # cold machine, which is the machine that needs the check to be right.
+    deadline = time.time() + 30.0
     port = config.CFG["backend_port"]
     owner = []
     while time.time() < deadline:
@@ -408,6 +431,18 @@ def start(mode="proxy"):
         if p.poll() is not None:
             break
         time.sleep(0.5)
+    # ⚠ Do not leave a late child running after calling it a failure. On a slow
+    # machine (onefile unpack + a Defender scan of a 70 MB exe) it can bind
+    # AFTER we time out; we then report "never listened" while it quietly takes
+    # the port, and the obvious retry fails with "already held" - blaming the
+    # user for our own leftover. Either it started in time or it does not run.
+    if p.poll() is None:
+        try:
+            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
+                           capture_output=True, timeout=15)
+        except Exception:
+            p.terminate()
+        _procs.pop(mode, None)
     tail = [ln for ln in log_tail_text(mode).splitlines() if ln.strip()][-6:]
     if owner:
         why = (f"port {port} is already held by another process (pid "
