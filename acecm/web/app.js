@@ -27,12 +27,13 @@ async function dashboard() {
   // ⚠ Fetch everything FIRST, then clear and build. Clearing early leaves the
   // page blank for as long as the slowest request takes, and any await between
   // the clear and the appends is a window for a second render to interleave.
-  const s = await api('state');
-  const profs = (await api('profiles')).profiles || [];
-  const cars = await api('cars');
-  const trk = await api('tracks');
-  const ov = await api('overview');
-  const b = s.backend || {};
+  // These five used to run one after another, so a slow overview made the
+  // whole dashboard wait five times.
+  const [s, pr, cars, trk, ov] = await Promise.all([
+    api('state'), api('profiles'), api('cars'), api('tracks'), api('overview'),
+  ]);
+  const profs = (pr && pr.profiles) || [];
+  const b = (s && s.backend) || (ov && ov.backend) || {};
   const p = $('#page');
   p.innerHTML = '';
 
@@ -2180,6 +2181,9 @@ let brFilter = '', brSort = 'players';
 /* What this machine already has, so a row can say "you are missing this"
    without a round trip per server. */
 let brLocal = { tracks: [], cars: [] };
+let brTags = {};
+let brAcecmOnly = false;
+let brRenderT;
 
 /* Ask the host beside a game server for whatever we lack.
 
@@ -2306,7 +2310,11 @@ async function browserPage() {
   const search = el('input');
   search.placeholder = 'Filter by name, track or car…';
   search.value = brFilter;
-  search.oninput = () => { brFilter = search.value.toLowerCase(); render(); };
+  search.oninput = () => {
+    brFilter = search.value.toLowerCase();
+    clearTimeout(brRenderT);
+    brRenderT = setTimeout(render, 120);
+  };
   const sort = el('select');
   [['players','Most players'],['ping','Lowest ping'],['name','Name'],
    ['track','Track']].forEach(([v,l]) => {
@@ -2314,7 +2322,11 @@ async function browserPage() {
     if (v === brSort) o.selected = true; sort.append(o);
   });
   sort.onchange = () => { brSort = sort.value; render(); };
-  row.append(search, sort);
+  const only = el('button', brAcecmOnly ? 'sm primary' : 'sm',
+                  'ACECM only');
+  only.title = 'Servers whose ACECM is reachable on TCP 8092 and is sharing content';
+  only.onclick = () => { brAcecmOnly = !brAcecmOnly; browserPage(); };
+  row.append(search, sort, only);
   head.append(row);
   p.append(head);
 
@@ -2374,7 +2386,13 @@ async function browserPage() {
 
   function render() {
     tblCard.innerHTML = '';
+    const acecmOf = s => {
+      const ip = s.server_ip || '';
+      if (brTags[ip] && brTags[ip].hosted) return true;
+      return /\[ACECM\]/i.test(String(s.server_name || ''));
+    };
     let rows = (d.servers || []).filter(s => {
+      if (brAcecmOnly && !acecmOf(s)) return false;
       if (!brFilter) return true;
       return [s.server_name, s.track, s.layout, s.event_name]
         .some(x => String(x || '').toLowerCase().includes(brFilter));
@@ -2394,9 +2412,12 @@ async function browserPage() {
     const body = el('tbody');
     rows.slice(0, 300).forEach(s => {
       const tr = el('tr');
+      tr.dataset.ip = s.server_ip || '';
       const locked = s.driver_password ? ' 🔒' : '';
-      tr.innerHTML = `<td>${esc(s.server_name || '(unnamed)')}${locked}
-          <div class="tiny dim">${esc(s.server_ip||'')}:${s.server_tcp_port||''}</div></td>
+      const tag = acecmOf(s)
+        ? ' <span class="pill acecm"><i class="dot"></i>ACECM</span>' : '';
+      tr.innerHTML = `<td>${esc(s.server_name || '(unnamed)')}${locked}${tag}
+          <div class="tiny dim">${esc(s.server_ip||'')}:${s.server_tcp_port||''}</div></td>`
         <td>${esc(s.track||'')}<div class="tiny dim">${esc(String(s.layout||'').replace(/^layout_/,''))}</div></td>
         <td>${num(s.players)}/${num(s.max_players)}</td>
         <td class="dim">${num(s.ping) || '—'}</td>
@@ -2457,6 +2478,35 @@ async function browserPage() {
     tblCard.append(t);
   }
   render();
+
+  // Tag after the table is on screen. Probing 8092 on every row up front
+  // would stall the page; this fills ACECM pills as replies come back.
+  (async () => {
+    const ips = [...new Set((d.servers || []).map(s => s.server_ip).filter(Boolean))];
+    for (let i = 0; i < Math.min(ips.length, 120); i += 24) {
+      const chunk = ips.slice(i, i + 24).filter(ip => !brTags[ip] || brTags[ip].pending);
+      if (!chunk.length) continue;
+      chunk.forEach(ip => { if (!brTags[ip]) brTags[ip] = { pending: true }; });
+      try {
+        const qs = chunk.map(ip => 'ip=' + encodeURIComponent(ip)).join('&');
+        const r = await fetch('/api/browser/tag?' + qs).then(x => x.json());
+        Object.assign(brTags, (r && r.hosts) || {});
+      } catch (e) {}
+      document.querySelectorAll('#page tr[data-ip]').forEach(tr => {
+        const info = brTags[tr.dataset.ip];
+        if (!(info && info.hosted)) return;
+        const cell = tr.querySelector('td');
+        if (cell && !cell.querySelector('.pill.acecm')) {
+          const span = document.createElement('span');
+          span.className = 'pill acecm';
+          span.innerHTML = '<i class="dot"></i>ACECM';
+          const dim = cell.querySelector('.tiny.dim');
+          if (dim) dim.before(span);
+          else cell.append(span);
+        }
+      });
+    }
+  })();
 }
 
 
