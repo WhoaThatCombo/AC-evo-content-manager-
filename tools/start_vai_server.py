@@ -30,7 +30,32 @@ import zlib
 # checkout purely because the script lives next to the server there.
 SRV = (os.environ.get("SERVER_DIR")
        or os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(SRV, os.environ.get("SERVER_EXE", "AssettoCorsaEVOServer.exe"))
+
+
+def _resolve_exe(srv):
+    """Pick a real executable. An empty SERVER_EXE must not win.
+
+    os.environ.get('SERVER_EXE', default) returns '' when ACECM sets the
+    variable to blank (the default after we stopped shipping a machine-
+    specific filename). join(dir, '') is the directory itself, and
+    Popen(directory) is WinError 5 Access Denied - which is how every
+    frozen start died while the UI said the server had launched.
+    """
+    raw = (os.environ.get("SERVER_EXE") or "").strip()
+    cands = []
+    if raw:
+        cands.append(raw)
+        if not os.path.isabs(raw):
+            cands.append(os.path.join(srv, raw))
+        cands.append(os.path.join(srv, os.path.basename(raw)))
+    cands.append(os.path.join(srv, "AssettoCorsaEVOServer.exe"))
+    for p in cands:
+        if p and os.path.isfile(p):
+            return os.path.abspath(p)
+    return ""
+
+
+EXE = _resolve_exe(SRV)
 LOG = os.path.join(SRV, "serverConfig",
                    os.environ.get("LOG_FILE", "vai_server.log"))
 
@@ -255,6 +280,11 @@ def main():
     for extra in filter(None, os.environ.get("EXTRA_FLAGS", "").split()):
         args.append(extra)
 
+    if not EXE:
+        print(f"server exe not found in {SRV!r} "
+              f"(SERVER_EXE={os.environ.get('SERVER_EXE')!r})")
+        return 1
+    print(f"exe    : {EXE}")
     os.makedirs(os.path.dirname(LOG), exist_ok=True)
     out = open(LOG, "w", encoding="utf-8", errors="replace")
     p = subprocess.Popen(args, cwd=SRV, stdout=out, stderr=subprocess.STDOUT)
