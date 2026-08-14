@@ -7,14 +7,25 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g,
 
 async function api(path, body) {
   const opt = body ? { method: 'POST', body: JSON.stringify(body) } : {};
-  const r = await fetch('/api/' + path, opt);
-  const j = await r.json().catch(() => ({ error: 'bad response' }));
-  if (j && j.error) toast(j.error, true);
-  return j;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const r = await fetch('/api/' + path, { ...opt, signal: ctrl.signal });
+    const j = await r.json().catch(() => ({ error: 'bad response' }));
+    if (j && j.error) toast(j.error, true);
+    return j;
+  } catch (e) {
+    const msg = (e && e.name === 'AbortError')
+      ? (path + ' timed out') : String(e && e.message || e);
+    return { error: msg };
+  } finally {
+    clearTimeout(t);
+  }
 }
 let toastT;
 function toast(msg, bad) {
   const t = $('#toast');
+  if (!t) return;
   t.textContent = msg;
   t.style.borderLeftColor = bad ? 'var(--red)' : 'var(--accent)';
   t.classList.add('show');
@@ -29,9 +40,11 @@ async function dashboard() {
   // the clear and the appends is a window for a second render to interleave.
   // These five used to run one after another, so a slow overview made the
   // whole dashboard wait five times.
-  const [s, pr, cars, trk, ov] = await Promise.all([
+  const settled = await Promise.allSettled([
     api('state'), api('profiles'), api('cars'), api('tracks'), api('overview'),
   ]);
+  const val = i => (settled[i].status === 'fulfilled' && settled[i].value) || {};
+  const s = val(0), pr = val(1), cars = val(2), trk = val(3), ov = val(4);
   const profs = (pr && pr.profiles) || [];
   const b = (s && s.backend) || (ov && ov.backend) || {};
   const p = $('#page');

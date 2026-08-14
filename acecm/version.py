@@ -22,7 +22,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.6.14"
+VERSION = "0.6.15"
 NAME = "Assetto Corsa EVO Content Manager"
 
 
@@ -113,7 +113,8 @@ def check():
                 "error": f"{type(ex).__name__}: {ex}"}
 
 
-def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True):
+def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True,
+                       ver=None):
     """The script that replaces a running exe once it exits.
 
     Split out so it can be tested without downloading anything - the swap is
@@ -149,6 +150,8 @@ def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True):
             ")\r\n"
             f'move /y "{new}" "{exe}" >>%LOG% 2>&1\r\n'
             'echo swapped ok >>%LOG%\r\n'
+            + (f'echo {ver}> "{os.path.join(os.path.dirname(exe), "version.txt")}"\r\n'
+               if ver else "")
             + (f'start "" "{exe}"\r\n' if relaunch else "")
             + 'del "%~f0"\r\n')
     return bat, blog
@@ -193,7 +196,8 @@ def apply(url=None, sha256=None):
                 "error": f"checksum mismatch (got {got[:12]}, "
                          f"expected {sha256[:12]})"}
 
-    bat, blog = _write_swap_script(exe, new, os.getpid())
+    bat, blog = _write_swap_script(exe, new, os.getpid(),
+                                   ver=info.get("latest") or VERSION)
     # ⚠ CREATE_NO_WINDOW, not DETACHED_PROCESS. Detached leaves the batch with
     # no console at all, and the commands it needs (timeout, and reliable
     # redirection) fail outright there - the first version scheduled a swap

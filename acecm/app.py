@@ -564,6 +564,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
         data = open(full, "rb").read()
+        # Bust the WebView2 disk / V8 code cache on every new build. A
+        # persistent profile otherwise keeps serving yesterday's app.js.
+        if rel == "index.html":
+            tag = version.VERSION.encode("ascii", "replace")
+            data = data.replace(b'href="/style.css"',
+                                b'href="/style.css?v=' + tag + b'"')
+            data = data.replace(b'src="/app.js"',
+                                b'src="/app.js?v=' + tag + b'"')
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -708,10 +716,16 @@ def main(mode="window"):
     if mode == "window":
         from . import ui
         if ui.available():
-            ui.run(url)          # blocks until the window is closed
-            return
-        print("  (no native webview available - falling back to the browser)")
-        mode = "browser"
+            try:
+                ui.run(url)      # blocks until the window is closed
+                return
+            except Exception:
+                logs.LOG.exception("native window failed - opening in the browser")
+                print("  (native window failed - falling back to the browser)")
+                mode = "browser"
+        else:
+            print("  (no native webview available - falling back to the browser)")
+            mode = "browser"
     if mode == "browser":
         threading.Timer(0.6, lambda: os.startfile(url)).start()   # noqa: S606
     try:
