@@ -13,7 +13,40 @@ launched - those are separate processes on purpose, so a server keeps running
 when you close the manager. Stop them from the Servers tab if that is not what
 you want.
 """
+import os
+import shutil
 import sys
+
+
+def _storage_path():
+    """Per-build WebView2 profile under ACECM's own data dir.
+
+    private_mode=False keeps cookies and session, but the default profile
+    lives in %APPDATA%\\pywebview and is shared across every ACECM.exe that
+    has ever run on this machine. After an in-app update the window then
+    paints yesterday's JS/CSS from Chromium's disk + V8 code cache, which
+    reads as a dead UI even though the new exe is serving the new files.
+    """
+    from . import config, version
+    root = os.path.join(config.DATA, "webview")
+    marker = os.path.join(root, "ace_version")
+    try:
+        have = open(marker, encoding="utf-8").read().strip()
+    except OSError:
+        have = ""
+    if have != version.VERSION:
+        if os.path.isdir(root):
+            shutil.rmtree(root, ignore_errors=True)
+        leftover = os.path.join(os.environ.get("APPDATA") or "", "pywebview")
+        if leftover and os.path.isdir(leftover):
+            shutil.rmtree(leftover, ignore_errors=True)
+        os.makedirs(root, exist_ok=True)
+        try:
+            open(marker, "w", encoding="utf-8").write(version.VERSION)
+        except OSError:
+            pass
+    os.makedirs(root, exist_ok=True)
+    return root
 
 
 def available():
@@ -54,6 +87,6 @@ def run(url, title="Assetto Corsa EVO Content Manager"):
                           width=1360, height=900,
                           min_size=(1024, 680),
                           background_color="#0b0e13")
-    # private_mode=False keeps a persistent profile, so the webview does not
-    # re-download and re-parse everything on every launch.
-    webview.start(private_mode=False)
+    # Persistent profile (so the window comes back quickly), but isolated
+    # per ACECM version - see _storage_path.
+    webview.start(private_mode=False, storage_path=_storage_path())
