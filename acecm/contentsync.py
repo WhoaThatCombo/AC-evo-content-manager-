@@ -141,8 +141,36 @@ def track_map(refresh=False):
     return out
 
 
+def loadable_cars():
+    """Every car id this CLIENT can actually drive.
+
+    Two sources, because there are two kinds of car:
+      * Kunos presets, which live in the base archive - carsmap reads them
+      * mod presets, which each mod's own .json declares
+
+    ⚠ Ids, not names. A server advertises `preset_apex_ind_h_mech_1`, and
+    matching that against a display name like "APEX INDYCAR INDY" is the same
+    identity-vs-label trap as tracks.
+    """
+    out = set()
+    try:
+        from . import carsmap
+        out |= set((carsmap.table().get("presets") or {}).keys())
+    except Exception as ex:
+        logs.LOG.info("carsmap for loadable cars: %s", ex)
+    try:
+        for m in install.installed("client").get("mods") or []:
+            for c in m.get("cars") or []:
+                if c.get("id"):
+                    out.add(c["id"])
+    except Exception as ex:
+        logs.LOG.info("client mods for loadable cars: %s", ex)
+    return sorted(out)
+
+
 def local(refresh=False):
     return {"tracks": installed_tracks(), "cars": installed_cars(),
+            "car_ids": loadable_cars(),
             "track_map": track_map(refresh), "tracks_dir": tracks_dir()}
 
 
@@ -152,7 +180,7 @@ def _get(url, timeout=TIMEOUT):
         return json.loads(r.read() or b"{}")
 
 
-def discover(host, port=None):
+def discover(host, port=None, ports=None, timeout=TIMEOUT):
     """Find the ACECM sharing content beside a game server.
 
     Returns its base URL and the servers it publishes, or an explanation. A
@@ -161,12 +189,25 @@ def discover(host, port=None):
     host = (host or "").strip()
     if not host:
         return {"ok": False, "error": "no host given"}
+
+    # ⚠ Asking OUR OWN server has to go over loopback. The browser row carries
+    # the public address, and probing your own public IP from inside the same
+    # network usually never comes back (no NAT hairpinning) - so a host that is
+    # very much sharing content reports as not sharing, and the obvious
+    # conclusion is that your own sharing is broken.
+    try:
+        from . import netutil
+        if host in set(netutil.our_ips() or []):
+            host = "127.0.0.1"
+    except Exception as ex:
+        logs.LOG.debug("own-ip check: %s", ex)
+
     tried = []
-    for p in ([int(port)] if port else PORTS):
+    for p in ([int(port)] if port else (ports or PORTS)):
         base = f"http://{host}:{p}"
         tried.append(p)
         try:
-            got = _get(f"{base}/api/registry/list")
+            got = _get(f"{base}/api/registry/list", timeout)
         except (urllib.error.URLError, OSError, ValueError):
             continue
         servers = got.get("servers") if isinstance(got, dict) else got
@@ -178,6 +219,62 @@ def discover(host, port=None):
             "error": f"no ACECM answering on {host} - the host is not sharing "
                      f"content, so anything you are missing has to come from "
                      f"them another way"}
+
+
+def scan(servers, limit=24, workers=6):
+    """Ask a set of hosts whether they can supply content, in parallel.
+
+    Point this at the servers running something you do not have, and it comes
+    back with the ones you can actually fix - all without the game running, so
+    the content is in place before it next starts.
+
+    ⚠ Only servers you are MISSING content for, capped, and only the two ports
+    ACECM really uses. Probing every host in a 786-server list on seven ports
+    would be a port scan of other people's machines, which is not what asking
+    "can I join this?" should mean.
+    """
+    import concurrent.futures as cf
+
+    seen, targets = set(), []
+    for s in servers:
+        ip = (s.get("server_ip") or "").strip()
+        if not ip or ip in seen:
+            continue
+        seen.add(ip)
+        targets.append(s)
+        if len(targets) >= limit:
+            break
+
+    def probe(s):
+        d = discover(s.get("server_ip"), None,
+                     ports=(8092, 8093), timeout=1.5)
+        if not d.get("ok"):
+            return None
+        return {"server": s.get("server_name"), "ip": s.get("server_ip"),
+                "port": s.get("server_tcp_port"), "base": d["base"],
+                "entries": [{"id": e.get("id"), "name": e.get("name"),
+                             "tracks": e.get("required_tracks") or [],
+                             "mods": e.get("required_mods") or [],
+                             "bytes": e.get("content_bytes") or 0}
+                            for e in (d.get("servers") or [])]}
+
+    out = []
+    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+        for r in pool.map(probe, targets):
+            if r and r["entries"]:
+                out.append(r)
+    return {"ok": True, "probed": len(targets), "hosts": out}
+
+
+def needs(servers):
+    """The servers in a list running a track this machine cannot load."""
+    known = track_map()
+    out = []
+    for s in servers:
+        t = (s.get("track") or "").strip()
+        if t and t not in known:
+            out.append(s)
+    return out
 
 
 def plan(base, server_id):

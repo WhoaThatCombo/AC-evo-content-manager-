@@ -227,9 +227,16 @@ async function serversPage() {
   for (const prof of profiles) {
     const card = el('div', 'card');
     const t = trk.find(x => x.index === prof.track_index);
+    // ⚠ A custom track WINS the summary. The row was built from track_index
+    // alone, so a profile set to a deployed track still read as whatever stock
+    // event the index happened to hold - "Watkins Glen" on a Miami server.
+    // That is the same lie that made a profile look configured when it was not.
+    const shown = prof.custom_track
+      ? prof.custom_track + ' (deployed)'
+      : (t ? t.label : 'track ' + prof.track_index);
     card.innerHTML = `<div class="row"><div class="grow">
         <b>${esc(prof.name)}</b>
-        <div class="tiny dim">${esc(t ? t.label : 'track ' + prof.track_index)}
+        <div class="tiny dim">${esc(shown)}
         &middot; ${esc(prof.game_mode || 'PRACTICE')}
         &middot; ${prof.ai} AI &middot; ${prof.max_players} slots
         &middot; ${esc(prof.weather || 'CLEAR')}
@@ -264,6 +271,20 @@ async function serversPage() {
       toast('Starting — this takes about 30 seconds');
       setTimeout(() => { clearInterval(tick); serversPage(); }, 31000);
     };
+    // ⚠ Stops THIS server, by its own pid or its own HTTP port. "Stop all" is
+    // still there, but it should be a choice rather than the only option -
+    // with several servers up, stopping one meant ending everyone's session.
+    const stop = el('button', 'sm danger', 'Stop');
+    stop.title = 'Stop only this server';
+    stop.onclick = async () => {
+      stop.disabled = true;
+      const r = await api('server/stop', { id: prof.id });
+      stop.disabled = false;
+      toast(r.ok ? `Stopped ${prof.name}` : (r.error || 'Could not stop'),
+            !r.ok);
+      setTimeout(serversPage, 900);
+    };
+
     const edit = el('button', 'sm', 'Edit');
     edit.onclick = () => { editing = { ...prof }; serversPage(); };
     const logs = el('button', 'sm', 'Logs');
@@ -310,7 +331,7 @@ async function serversPage() {
       toast(r.ok ? (r.hint || 'Worker launching') : (r.error || 'Failed'), !r.ok);
       setTimeout(serversPage, 2000);
     };
-    row.append(start, edit, logs, del, tOn, tOff, tView, wAI, tpill);
+    row.append(start, stop, edit, logs, del, tOn, tOff, tView, wAI, tpill);
     card.append(row, pre);
     p.append(card);
 
@@ -373,24 +394,28 @@ function editor(prof, trk, opts, extra) {
   // things you set once a year. Showing all of them flat, equally weighted, is
   // what made this page hard to read - so the rare ones fold away and the page
   // opens on what you actually came to change.
-  let advanced = null;
+  // ⚠ Every section stays VISIBLE as a heading; the rare ones just start
+  // folded. Bundling them into a single "Everything else" box hid the fact
+  // that AI, weather, penalties and ports exist at all - which is worse than
+  // the flat wall of fields it replaced, because now you cannot even find
+  // them. One labelled fold each: scannable, and nothing is a mystery.
   const section = (title, hint, rare) => {
-    let host = c;
-    if (rare) {
-      if (!advanced) {
-        advanced = el('details');
-        advanced.style.margin = '4px 0 12px';
-        advanced.append(el('summary', 'tiny dim',
-          'Everything else — AI, weather, penalties, ports, files'));
-        c.append(advanced);
-      }
-      host = advanced;
-    }
-    host.append(el('div', 'tiny dim', `<b style="color:var(--fg)">${esc(title)}</b>`
-      + (hint ? ` — ${hint}` : '')));
     const g = el('div', 'grid g2');
     g.style.margin = '6px 0 12px';
-    host.append(g);
+    if (!rare) {
+      c.append(el('div', 'tiny dim',
+        `<b style="color:var(--fg)">${esc(title)}</b>`
+        + (hint ? ` — ${hint}` : '')));
+      c.append(g);
+      return g;
+    }
+    const d = el('details');
+    d.style.margin = '4px 0 10px';
+    d.append(el('summary', 'tiny dim',
+      `<b style="color:var(--fg)">${esc(title)}</b>`
+      + (hint ? ` — ${hint}` : '')));
+    d.append(g);
+    c.append(d);
     return g;
   };
 
@@ -426,8 +451,57 @@ function editor(prof, trk, opts, extra) {
 
   let g = section('Identity');
   mk(g, 'name', 'Server name', 'text');
-  mk(g, 'track_index', 'Track / layout', 'select',
-     trk.map(t => ({ value: t.index, label: t.label })));
+
+  /* ⚠ ONE track chooser, listing stock events and deployed tracks together.
+     They are selected by different mechanisms - an index into events_*.json
+     versus a name the server resolves through tracks.table - and exposing that
+     as two controls let a profile hold both, with nothing saying which wins.
+     That is exactly how "Highland drift" came to host Nurburgring. */
+  {
+    const l = el('label', 'f', '<span>Track / layout</span>');
+    const s = el('select');
+    const stock = el('optgroup');
+    stock.label = 'Stock tracks';
+    trk.forEach(t => {
+      const o = el('option', null, esc(t.label));
+      o.value = 'idx:' + t.index;
+      if (!prof.custom_track && String(t.index) === String(prof.track_index))
+        o.selected = true;
+      stock.append(o);
+    });
+    s.append(stock);
+    const mods = (extra && extra.modTracks) || [];
+    if (mods.length) {
+      const og = el('optgroup');
+      og.label = 'Deployed tracks';
+      mods.forEach(([name, folder]) => {
+        const o = el('option', null, `${name}  (${folder})`);
+        o.value = 'custom:' + name;
+        if (prof.custom_track === name) o.selected = true;
+        og.append(o);
+      });
+      s.append(og);
+    }
+    // a track saved before this existed, or since uninstalled, must not vanish
+    if (prof.custom_track && !mods.some(([n]) => n === prof.custom_track)) {
+      const o = el('option', null,
+                   `${prof.custom_track}  (not installed here)`);
+      o.value = 'custom:' + prof.custom_track;
+      o.selected = true;
+      s.append(o);
+    }
+    s.onchange = () => {
+      const v = s.value;
+      if (v.startsWith('custom:')) {
+        prof.custom_track = v.slice(7);
+      } else {
+        prof.custom_track = '';
+        prof.track_index = Number(v.slice(4));
+      }
+    };
+    l.append(s);
+    g.append(l);
+  }
 
   g = section('Session', 'what the server actually runs');
   mk(g, 'game_mode', 'Game mode', 'select', opts.game_mode);
@@ -436,13 +510,12 @@ function editor(prof, trk, opts, extra) {
   mk(g, 'max_players', 'Player slots', 'number');
   mk(g, 'cycle', 'Cycle sessions', 'bool');
 
-  g = section('AI', 'skill min/max spread the field — equal skill makes them clump',
-              true);
+  g = section('AI', 'skill min/max spread the field — equal skill makes them clump');
   mk(g, 'ai', 'AI cars', 'number');
   mk(g, 'skill_min', 'Skill min', 'number');
   mk(g, 'skill_max', 'Skill max', 'number');
 
-  g = section('Time & weather', 'time multiplier 0 freezes the clock', true);
+  g = section('Time & weather', 'time multiplier 0 freezes the clock');
   mk(g, 'tod_hour', 'Time of day (hour)', 'number');
   mk(g, 'tod_minute', 'Minute', 'number');
   mk(g, 'time_mult', 'Time multiplier', 'number');
@@ -450,7 +523,7 @@ function editor(prof, trk, opts, extra) {
   mk(g, 'weather_behaviour', 'Weather behaviour', 'select', opts.weather_behaviour);
   mk(g, 'grip', 'Initial grip', 'select', opts.grip);
 
-  g = section('Rules', '', true);
+  g = section('Rules');
   mk(g, 'tuning', 'Tuning', 'select', opts.tuning);
   mk(g, 'pi_min', 'PI min (0 = no limit)', 'number', { step: 0.1 });
   mk(g, 'pi_max', 'PI max (0 = no limit)', 'number', { step: 0.1 });
@@ -478,12 +551,15 @@ function editor(prof, trk, opts, extra) {
   g = section('Handicaps', 'per car: name:ballast:restrictor, comma separated', true);
   mk(g, 'car_handicaps', 'Car handicaps', 'text');
 
-  g = section('Custom track',
-    'Pick what is actually deployed. Only needed when a custom track borrows ' +
-    'a stock track’s slots — a native install already reports its own name.');
-  trackPicker(g, 'track_label', 'Deployed track',
+  // ⚠ Display only. Which track the server HOSTS is chosen once, above; this
+  // just corrects the NAME when a track is sitting in a borrowed stock slot,
+  // so maps and labels do not report the host's name.
+  g = section('Slot label',
+    'Only for a borrowed-slot install: what is really in that stock slot. ' +
+    'A native install already reports its own name.', true);
+  trackPicker(g, 'track_label', 'Really running',
               (extra && extra.modTracks) || [],
-              'Stock track — use the layout above');
+              'Nothing borrowed — report the track as-is');
 
   // Which cars this server accepts. Modded cars are the ones worth picking
   // deliberately: a mod nobody else has is the usual reason a join is refused.
@@ -585,13 +661,13 @@ function editor(prof, trk, opts, extra) {
   g = section('Penalties',
     'Per server — carried in this server’s season blob, so no game files ' +
     'are modified. Accepted by the server, but enforcement is unverified: ' +
-    'test it by cutting a corner on track.', true);
+    'test it by cutting a corner on track.');
   mk(g, 'penalties', 'Enable custom penalties', 'bool');
   mk(g, 'car_cut_tyres_out', 'Wheels off track to count as a cut (1-4)', 'number');
   mk(g, 'warning_trigger_countdown', 'Warnings before the penalty', 'number');
   mk(g, 'time_penalty_ms', 'Time penalty (ms)', 'number');
 
-  g = section('Ports & files', 'internal ports default to the listener port', true);
+  g = section('Ports & files', 'internal ports default to the listener port');
   mk(g, 'tcp_port', 'TCP/UDP port', 'number');
   mk(g, 'http_port', 'HTTP status port', 'number');
   mk(g, 'tcp_internal_port', 'TCP internal (0 = same)', 'number');
@@ -1390,6 +1466,56 @@ async function shareCard(p) {
       c.append(row);
     });
   }
+
+  // ⚠ Cars too. A modded car is as much a reason a join is refused as a
+  // missing track - the backend even answers with `missing_cars` - and the
+  // delivery side already handled them; there was simply no way to say "share
+  // this one", so nobody could ever download a car from you.
+  const mods = [...new Set([].concat(
+    ((await api('mods?side=client')).mods || []).map(m => m.name),
+    ((await api('mods?side=server')).mods || []).map(m => m.name)))].sort();
+  const sharedMods = {};
+  (reg.servers || []).forEach(e => (e.required_mods || []).forEach(
+    m => { sharedMods[m] = e; }));
+
+  c.append(el('div', 'tiny dim', '<b style="color:var(--fg)">Car mods</b>'));
+  if (!mods.length) {
+    c.append(el('div', 'empty', 'No car mods installed'));
+  } else {
+    mods.forEach(name => {
+      const row = el('div', 'chk');
+      const on = !!sharedMods[name];
+      row.innerHTML = `<span class="name"><b>${esc(name)}</b></span>`
+        + `<span class="pill ${on ? 'on' : 'off'}"><i class="dot"></i>`
+        + `${on ? 'shared' : 'not shared'}</span>`;
+      const b = el('button', on ? 'sm danger' : 'sm primary',
+                   on ? 'Stop sharing' : 'Share');
+      b.onclick = async () => {
+        if (on) {
+          const e = sharedMods[name];
+          const keep = (e.required_mods || []).filter(m => m !== name);
+          // an entry that shared only this car has nothing left to offer
+          if (!keep.length && !(e.required_tracks || []).length) {
+            await api('registry/delete', { id: e.id });
+          } else {
+            await api('registry/save', { ...e, required_mods: keep });
+          }
+          toast('No longer shared');
+        } else {
+          const r = await api('registry/save', {
+            name: `${name} (car mod)`,
+            description: `Car mod ${name} shared by this host`,
+            required_mods: [name], public: true,
+          });
+          toast(r && r.error ? r.error : `${name} is now downloadable`,
+                !!(r && r.error));
+        }
+        contentPage();
+      };
+      row.append(b);
+      c.append(row);
+    });
+  }
   p.append(c);
 }
 
@@ -1404,6 +1530,52 @@ async function contentPage() {
   await shareCard(p);
   // --- custom track deploy -------------------------------------------------
   const td = await api('trackdeploy');
+
+  /* Tracks you already imported, deployable straight to the server.
+
+     ⚠ This is the normal case and it had no button anywhere: the list below
+     only shows slot-borrow packages, so a track imported in EvoForge could
+     not be hosted from the UI at all - while the server refused to start,
+     telling you to "deploy it from Content". */
+  const ic = el('div', 'card');
+  const imported = (td.imported || []).filter(t => t.ok);
+  ic.innerHTML = `<h2>Your imported tracks &middot; ${imported.length}</h2>`
+    + '<div class="tiny dim" style="margin-bottom:10px">Deploying puts the '
+    + 'track\'s logic into the server archive under its own name, and shares '
+    + 'it so players missing it can download from you. Stock tracks are not '
+    + 'touched.</div>';
+  if (!imported.length) {
+    ic.append(el('div', 'empty',
+      'No imported tracks found in Saved Games\\ACE\\mods'));
+  } else {
+    imported.forEach(t => {
+      const row = el('div', 'chk');
+      row.innerHTML = `<span class="name"><b>${esc(t.display_name)}</b>`
+        + `<div class="tiny dim">${esc(t.folder)} · layout `
+        + `${esc(t.layout || '?')} · ${t.files} file(s)</div></span>`;
+      const go = el('button', 'sm primary', 'Deploy to server');
+      go.disabled = td.server_running;
+      go.title = td.server_running
+        ? 'Stop the server first — it holds content.kspkg open'
+        : 'Install at its own paths and publish it for download';
+      go.onclick = async () => {
+        if (!confirm(`Deploy "${t.display_name}" to the server?\n\n`
+            + 'It is installed under its own name, so no stock track is '
+            + 'overwritten, and it is published so players can download it.'))
+          return;
+        toast('Deploying — this rewrites a 300 MB archive, please wait…');
+        const r = await api('trackdeploy/deploy',
+                            { path: t.path, native: 1 });
+        toast(r.ok ? `Deployed as "${r.display_name}" — ${r.modes} game modes`
+                   : (r.error || 'Deploy failed'), !r.ok);
+        contentPage();
+      };
+      row.append(go);
+      ic.append(row);
+    });
+  }
+  p.append(ic);
+
   const dc = el('div', 'card');
   dc.innerHTML = '<h2>Deploy a custom track</h2>'
     + '<div class="tiny dim" style="margin-bottom:10px">'
@@ -1979,26 +2151,25 @@ async function contentFrom(s) {
   if (!(d.servers || []).length) {
     toast('That host runs ACECM but publishes no content', true); return;
   }
-  // Prefer the entry that actually carries the track this server is running.
-  // ⚠ Match on the FOLDER, never the display name - the lobby says "Highlands
-  // Drift" and the content is highlands_kp, and a host may publish several
-  // tracks. Port is only a fallback for hosts predating this.
-  const wantFolder = (brLocal.track_map || {})[String(s.track || '').trim()];
-  const entry = (wantFolder && d.servers.find(x =>
-                   (x.required_tracks || []).includes(wantFolder)))
-    || d.servers.find(x => String(x.port) === String(s.server_tcp_port))
-    || d.servers[0];
+  // ⚠ Ask about EVERYTHING the host publishes, not just the entry matching
+  // the track. A host lists one entry per thing - tracks and car mods - so
+  // picking one meant the car mods were never fetched, and a server needing
+  // both looked half-satisfied.
   toast('Checking what you need…');
-  const plan = await api(`browser/plan?base=${encodeURIComponent(d.base)}`
-    + `&id=${encodeURIComponent(entry.id)}`);
-  if (!plan.ok) { toast(plan.error || 'could not read the manifest', true); return; }
-  if (!plan.need.length) {
-    toast('You already have everything this server needs'); return;
+  const plans = await Promise.all(d.servers.map(e =>
+    api(`browser/plan?base=${encodeURIComponent(d.base)}`
+        + `&id=${encodeURIComponent(e.id)}`).then(p => ({ e, p }))));
+  const wanted = plans.filter(x => x.p.ok && (x.p.need || []).length);
+  if (!wanted.length) {
+    toast('You already have everything this host offers'); return;
   }
-  const mb = (plan.bytes / 1e6).toFixed(0);
-  if (!confirm(`${entry.name}\n\nMissing ${plan.need.length} file(s), ${mb} MB.`
+  const files = wanted.reduce((a, x) => a + x.p.need.length, 0);
+  const mb = (wanted.reduce((a, x) => a + (x.p.bytes || 0), 0) / 1e6).toFixed(0);
+  if (!confirm(wanted.map(x => '• ' + x.e.name).join('\n')
+      + `\n\nMissing ${files} file(s), ${mb} MB.`
       + `\n\nDownload from ${d.base} and install?`)) return;
-  const r = await api('browser/install', { base: d.base, id: entry.id });
+  const r = await api('browser/install',
+                      { base: d.base, ids: wanted.map(x => x.e.id) });
   if (!r.ok) { toast(r.error || 'install failed', true); return; }
   const bar = $('#brprog');
   const poll = setInterval(async () => {
@@ -2051,6 +2222,53 @@ async function browserPage() {
   head.append(row);
   p.append(head);
 
+  // ⚠ Works with the game CLOSED. The list is remembered from the last time
+  // the in-game browser was open, and content comes from each host's ACECM -
+  // neither needs the game running, which is the point: get the mods in place
+  // BEFORE you next start it.
+  const scan = el('button', 'sm', 'Find downloadable content');
+  scan.title = 'Ask the hosts running a track you do not have whether they '
+    + 'can send it to you';
+  scan.onclick = async () => {
+    scan.disabled = true;
+    scan.textContent = 'asking hosts…';
+    const r = await api('browser/scan', { only_missing: true });
+    scan.disabled = false;
+    scan.textContent = 'Find downloadable content';
+    if (!r.ok) { toast(r.error || 'scan failed', true); return; }
+    const box = $('#brprog');
+    if (!r.hosts.length) {
+      box.textContent = `asked ${r.probed} host(s) — none are sharing content`;
+      return;
+    }
+    box.innerHTML = '';
+    r.hosts.forEach(h => {
+      const line = el('div', 'row wrap');
+      const mb = h.entries.reduce((a, e) => a + (e.bytes || 0), 0) / 1e6;
+      // ⚠ Tracks AND cars. This comes from the host's own ACECM, not from the
+      // lobby capture, so it is answerable with the game shut - which is the
+      // whole point of asking hosts directly.
+      const tracks = [...new Set([].concat(
+        ...h.entries.map(e => e.tracks || [])))];
+      const mods = [...new Set([].concat(
+        ...h.entries.map(e => e.mods || [])))];
+      const need = [];
+      if (tracks.length) need.push(tracks.join(', '));
+      if (mods.length) need.push(`${mods.length} car mod`
+        + (mods.length === 1 ? '' : 's'));
+      line.append(el('span', 'tiny',
+        `<b>${esc(h.server || h.ip)}</b> — ` + esc(need.join(' · '))
+        + (mb ? ` · ${mb.toFixed(0)} MB` : '')));
+      const get = el('button', 'sm primary', 'Download');
+      get.onclick = () => contentFrom({ server_ip: h.ip,
+                                        server_tcp_port: h.port,
+                                        track: '' });
+      line.append(get);
+      box.append(line);
+    });
+  };
+  row.append(scan);
+
   const prog = el('div', 'tiny dim');
   prog.id = 'brprog';
   head.append(prog);
@@ -2101,6 +2319,25 @@ async function browserPage() {
         tr.children[1].append(warn);
       } else if (folder) {
         tr.children[1].append(el('div', 'tiny dim', esc(folder)));
+      }
+
+      // ⚠ Cars too, not just the track. A server can restrict itself to cars
+      // you do not own, and the game only tells you at the point of refusal.
+      // An empty list means every car, so it is never "missing".
+      const wantCars = [].concat(s.allowed_cars_list || [],
+                                 s.allowed_cars_list_full || [])
+        .filter(x => typeof x === 'string' && x);
+      if (wantCars.length && brLocal.car_ids) {
+        const have = new Set(brLocal.car_ids);
+        const lack = [...new Set(wantCars.filter(c => !have.has(c)))];
+        if (lack.length) {
+          const w = el('div', 'tiny');
+          w.textContent = `⚠ ${lack.length} car`
+            + (lack.length === 1 ? '' : 's') + ' you do not have';
+          w.title = lack.slice(0, 12).join('\n');
+          w.style.color = 'var(--bad, #e5a13c)';
+          tr.children[0].append(w);
+        }
       }
 
       const td = el('td');
