@@ -250,26 +250,24 @@ def status(profile):
     st = {"running": False, "pid": None, "clients": None, "log_age": None}
     rec = runtime().get(profile.get("id") or "", {})
     pid = rec.get("pid")
+    http_port = int(profile.get("http_port") or 8080)
     if pid and _alive(pid):
         st["running"], st["pid"] = True, pid
     elif not _port_shared(profile):
         # Fall back to the HTTP port - but ONLY when this profile alone uses
-        # it. ⚠ The comment here used to claim the port "IS unique per
-        # profile"; nothing enforces that, and two profiles sharing 8080 both
-        # reported running whenever either was up. Worse, per-server Stop
-        # resolves by the same port, so it could kill the other one's process.
-        try:
-            url = f"http://127.0.0.1:{profile.get('http_port', 8080)}/"
-            with urllib.request.urlopen(url, timeout=1.0):
-                st["running"] = True
-        except Exception:
-            pass
+        # it. Two profiles sharing 8080 both reported running whenever either
+        # was up. Do not HTTP-probe a closed port: urlopen's 1s timeout made
+        # every dashboard / overview load wait a full second when the server
+        # was stopped.
+        from . import winproc
+        if winproc.tcp_listen_pids(http_port):
+            st["running"] = True
     else:
         st["ambiguous"] = True
     if st["running"]:
         try:
-            url = f"http://127.0.0.1:{profile.get('http_port', 8080)}/"
-            with urllib.request.urlopen(url, timeout=1.5) as r:
+            url = f"http://127.0.0.1:{http_port}/"
+            with urllib.request.urlopen(url, timeout=0.35) as r:
                 st["clients"] = json.loads(r.read()).get("clients")
         except Exception:
             st["clients"] = None

@@ -580,7 +580,11 @@ def join_state():
     """Is a game client attached to our backend and joinable?"""
     import urllib.request
     try:
-        with urllib.request.urlopen(CONTROL + "/", timeout=1.0) as r:
+        from . import winproc
+        if not winproc.tcp_listen_pids(8093):
+            return {"control": False, "error": "proxy not listening",
+                    "hint": "start the proxy backend to enable direct join"}
+        with urllib.request.urlopen(CONTROL + "/", timeout=0.4) as r:
             return {"control": True, **json.loads(r.read())}
     except Exception as ex:
         return {"control": False, "error": f"{type(ex).__name__}",
@@ -598,8 +602,19 @@ def server_list():
     """
     import urllib.request
     cache = os.path.join(config.DATA, "server_list.json")
+    # Proxy control is :8093. urlopen's 4s timeout ran on every Server
+    # browser visit when the backend was down, which is how that menu
+    # felt frozen after the UI script started working again.
+    listening = False
     try:
-        with urllib.request.urlopen(CONTROL + "/servers", timeout=4) as r:
+        from . import winproc
+        listening = bool(winproc.tcp_listen_pids(8093))
+    except Exception:
+        listening = True
+    try:
+        if not listening:
+            raise OSError("proxy control is not listening")
+        with urllib.request.urlopen(CONTROL + "/servers", timeout=1.5) as r:
             got = {"ok": True, **json.loads(r.read())}
         # ⚠ Keep it. The list only passes through while the game is open, and
         # everything you would DO with it - see which servers need content you
