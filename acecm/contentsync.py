@@ -400,6 +400,142 @@ def destination(rel):
     return os.path.join(tracks_dir(), os.path.basename(rel))
 
 
+def _entry_sid(entry):
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(entry.get("url") or "").query)
+    return (q.get("id") or [""])[0]
+
+
+def _entry_base(entry):
+    u = urllib.parse.urlparse(entry.get("url") or "")
+    if not u.scheme or not u.netloc:
+        return ""
+    return f"{u.scheme}://{u.netloc}"
+
+
+def fetch_track_pack(base, sid, folder, files, progress=None):
+    """Pull one tar and unpack it. Falls back to the caller on 404."""
+    import tarfile
+    url = f"{base}/api/registry/pack?id={urllib.parse.quote(sid)}" \
+          f"&track={urllib.parse.quote(folder)}"
+    dest_dir = os.path.join(tracks_dir(), folder)
+    os.makedirs(dest_dir, exist_ok=True)
+    tmp = dest_dir.rstrip("\\/") + ".tar.part"
+    done = 0
+    req = urllib.request.Request(url, headers={"User-Agent": "ACECM"})
+    try:
+        r = urllib.request.urlopen(req, timeout=600)
+    except urllib.error.HTTPError as ex:
+        if ex.code == 404:
+            raise FileNotFoundError("host has no pack endpoint") from ex
+        raise
+    try:
+        with r, open(tmp, "wb") as fh:
+            want = (r.headers.get("X-ACECM-SHA256") or "").strip()
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, int(r.headers.get("Content-Length") or 0))
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    got = registry.file_digest(tmp)
+    if want and got != want:
+        os.remove(tmp)
+        raise ValueError(f"pack checksum mismatch for {folder}")
+    with tarfile.open(tmp, "r:") as tar:
+        tar.extractall(dest_dir, filter="data")
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    if files:
+        missing = [f["path"] for f in files
+                   if not os.path.isfile(f.get("dest") or destination(f["path"]))]
+        if missing:
+            raise ValueError(f"pack for {folder} missed {len(missing)} file(s)")
+    return dest_dir
+
+
+def install_files(need, status):
+    """Install a plan: one tar per track, then leftover files in parallel.
+
+    A track is thousands of tiny files. One stream uses a gigabit uplink;
+    one HTTP GET per file cannot.
+    """
+    import threading
+    from collections import defaultdict
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    tracks = defaultdict(list)
+    rest = []
+    for e in need:
+        rel = (e.get("path") or "").replace("\\", "/")
+        parts = rel.split("/")
+        if len(parts) >= 3 and parts[0] == "tracks" and parts[1]:
+            tracks[parts[1]].append(e)
+        else:
+            rest.append(e)
+
+    moved = 0
+    installed = []
+
+    def set_done(n):
+        status["done"] = n
+
+    for folder, files in tracks.items():
+        sid = _entry_sid(files[0])
+        base = _entry_base(files[0])
+        packed = False
+        if sid and base and len(files) >= 8:
+            status["detail"] = f"track pack {folder} ({len(files)} files)"
+            try:
+                def tick(done, _size, base_n=moved):
+                    set_done(base_n + done)
+                fetch_track_pack(base, sid, folder, files, tick)
+                moved += sum(f.get("size", 0) for f in files)
+                set_done(moved)
+                installed.extend(f["path"] for f in files)
+                packed = True
+            except FileNotFoundError:
+                packed = False
+            except Exception as ex:
+                logs.LOG.warning("track pack %s failed, per-file fallback: %s",
+                                 folder, ex)
+                packed = False
+        if not packed:
+            rest.extend(files)
+
+    lock = threading.Lock()
+    if rest:
+        status["detail"] = f"{len(rest)} leftover file(s)"
+
+        def one(entry):
+            contentsync_fetch = fetch
+            contentsync_fetch(entry)
+            return entry
+
+        workers = 8 if len(rest) > 1 else 1
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(one, e) for e in rest]
+            for i, fut in enumerate(as_completed(futs), 1):
+                entry = fut.result()
+                with lock:
+                    moved += entry.get("size", 0)
+                    set_done(moved)
+                    installed.append(entry["path"])
+                    status["detail"] = f"{i}/{len(rest)} {entry['path']}"
+
+    status["files"] = installed
+    return installed
+
+
 def fetch(entry, progress=None):
     """Download one manifest entry, verify it, then move it into place.
 
@@ -413,7 +549,7 @@ def fetch(entry, progress=None):
     size = entry.get("size") or 0
     done = 0
     req = urllib.request.Request(entry["url"], headers={"User-Agent": "ACECM"})
-    with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as fh:
+    with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as fh:
         while True:
             chunk = r.read(1 << 20)
             if not chunk:

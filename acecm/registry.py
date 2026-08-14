@@ -217,6 +217,68 @@ def manifest(sid, base_url="", digests=True):
             "missing_locally": missing}
 
 
+def _track_sig(files):
+    """Cheap 'did anything change' stamp: count + bytes + newest mtime."""
+    n = total = latest = 0
+    for _rel, p in files:
+        st = os.stat(p)
+        n += 1
+        total += st.st_size
+        latest = max(latest, int(st.st_mtime_ns))
+    return f"{n}:{total}:{latest}"
+
+
+def ensure_track_pack(folder):
+    """One uncompressed tar of a track folder, rebuilt only when files change.
+
+    3653 tiny files over a new TCP connection each cannot use a gigabit
+    uplink. One 1 GB stream can. Cached under <data>/packs/.
+    """
+    folder = (folder or "").strip().replace("\\", "/").strip("/")
+    if not folder or "/" in folder or folder in (".", ".."):
+        return None
+    files = _track_files(folder)
+    if not files:
+        return None
+    d = os.path.join(config.DATA, "packs")
+    os.makedirs(d, exist_ok=True)
+    tar_path = os.path.join(d, folder + ".tar")
+    sig_path = tar_path + ".sig"
+    sha_path = tar_path + ".sha256"
+    want = _track_sig(files)
+    have = ""
+    try:
+        have = open(sig_path, encoding="ascii").read().strip()
+    except OSError:
+        pass
+    if have == want and os.path.isfile(tar_path) and os.path.isfile(sha_path):
+        return tar_path
+    import tarfile
+    import threading
+    tmp = f"{tar_path}.part.{os.getpid()}.{threading.get_ident()}"
+    prefix = f"tracks/{folder}/"
+    with tarfile.open(tmp, "w") as tar:
+        for rel, path in files:
+            arc = rel[len(prefix):] if rel.startswith(prefix) else os.path.basename(rel)
+            if not arc or arc.startswith("/") or ".." in arc.split("/"):
+                continue
+            tar.add(path, arcname=arc)
+    os.replace(tmp, tar_path)
+    digest = file_digest(tar_path)
+    open(sig_path, "w", encoding="ascii").write(want + "\n")
+    open(sha_path, "w", encoding="ascii").write((digest or "") + "\n")
+    flush_cache()
+    return tar_path
+
+
+def track_pack_sha(folder):
+    p = os.path.join(config.DATA, "packs", folder + ".tar.sha256")
+    try:
+        return open(p, encoding="ascii").read().strip()
+    except OSError:
+        return ""
+
+
 def resolve(sid, rel):
     """Map a manifest path back to a real file, refusing anything outside."""
     entry = next((e for e in load() if e["id"] == sid), None)
