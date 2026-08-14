@@ -203,42 +203,46 @@ def _shortcuts(target, desktop=True):
 
 
 def restart(delay=0.8):
-    """Start a fresh copy of ACECM and quit this one.
+    """Quit this process. Relaunch unless an update swap is already waiting.
 
-    ⚠ The new process must be fully detached, or it dies with its parent and
-    the user is left with nothing running. And this one has to exit AFTER the
-    child is up, or the UI port is still held when the child tries to bind -
-    which looks like "ACECM is already running".
+    ⚠ DETACHED_PROCESS is what made Restart look like it closed ACECM and
+    never came back: the child has no console and often no visible window.
+    `cmd /c start` is how the update script launches us and it does show.
 
-    Only meaningful frozen: from source `sys.executable` is Python and the
-    arguments are the module, so relaunching means reconstructing a command
-    line we do not own.
+    ⚠ After Download & install the swap batch is already waiting for this
+    PID. Launching another ACECM.exe here holds the file and port 8092, so
+    the new build never writes --okflag and the script rolls back. Just
+    exit and let the batch swap + start.
     """
     exe = running_exe()
     if not exe:
         return {"ok": False,
                 "error": "running from source - restart it the way you "
                          "started it"}
-    args = [exe] + [a for a in sys.argv[1:] if a not in ("--install",)]
-    flags = 0
-    if sys.platform == "win32":
-        flags = (subprocess.CREATE_NEW_PROCESS_GROUP
-                 | getattr(subprocess, "DETACHED_PROCESS", 0))
-    try:
-        subprocess.Popen(args, close_fds=True, creationflags=flags,
-                         cwd=os.path.dirname(exe))
-    except Exception as ex:
-        return {"ok": False, "error": f"could not relaunch: {ex}"}
+    pending = version.swap_pending()
+    if not pending:
+        inst = os.path.dirname(exe)
+        try:
+            # start's first quoted token is the window TITLE, not the exe.
+            subprocess.Popen(
+                ["cmd", "/c", "start", "ACECM", "/d", inst, exe],
+                close_fds=True,
+                creationflags=0x00000200,  # CREATE_NEW_PROCESS_GROUP
+                cwd=inst)
+        except Exception as ex:
+            return {"ok": False, "error": f"could not relaunch: {ex}"}
 
     def bye():
         import time
-        time.sleep(delay)
-        logs.LOG.info("restarting - new instance launched")
+        time.sleep(0.3 if pending else delay)
+        logs.LOG.info("restarting - %s",
+                      "swap will relaunch" if pending else "new instance launched")
         os._exit(0)                      # noqa: SLF001 - immediate, no cleanup
 
     import threading
     threading.Thread(target=bye, daemon=True).start()
-    return {"ok": True, "restarting": True, "exe": exe}
+    return {"ok": True, "restarting": True, "exe": exe,
+            "pending_update": pending}
 
 
 def uninstall(remove_exe=False):

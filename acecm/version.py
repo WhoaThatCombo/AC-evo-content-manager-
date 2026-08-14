@@ -25,7 +25,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.6.35"
+VERSION = "0.6.36"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -81,17 +81,39 @@ def check():
         if repo:
             rel = _get_json(f"https://api.github.com/repos/{repo}/releases/latest")
             latest = str(rel.get("tag_name") or rel.get("name") or "").lstrip("vV")
-            asset = next((a for a in rel.get("assets", [])
+            assets = rel.get("assets") or []
+            asset = next((a for a in assets
                           if a.get("name", "").lower() == "acecm.exe"), None)
-            # GitHub publishes a digest as "sha256:<hex>" when it has one.
+            # Prefer the ACECM.exe.sha256 we upload. GitHub's own digest is
+            # often missing, and when it is present it is not always the
+            # same string we published.
+            sha = ""
             digest = (asset or {}).get("digest") or ""
+            if digest:
+                sha = digest.split(":")[-1]
+            sum_asset = next((a for a in assets
+                              if a.get("name", "").lower()
+                              == "acecm.exe.sha256"), None)
+            if sum_asset and sum_asset.get("browser_download_url"):
+                try:
+                    txt = urllib.request.urlopen(
+                        urllib.request.Request(
+                            sum_asset["browser_download_url"],
+                            headers={**_headers(),
+                                     "Accept": "application/octet-stream"}),
+                        timeout=20).read().decode("ascii", "replace")
+                    hexpart = txt.strip().split()[0]
+                    if len(hexpart) == 64:
+                        sha = hexpart
+                except Exception:
+                    pass
             return {"ok": True, "current": VERSION, "checked": True,
                     "source": f"github:{repo}",
                     "latest": latest, "available": _newer(latest, VERSION),
                     "notes": (rel.get("body") or "")[:4000],
                     "published": rel.get("published_at"),
                     "url": (asset or {}).get("browser_download_url", ""),
-                    "sha256": digest.split(":")[-1] if digest else "",
+                    "sha256": sha,
                     "error": None if asset else
                              "that release has no ACECM.exe asset attached"}
         man = _get_json(url)
@@ -119,6 +141,15 @@ def check():
 
 def rollback_flag_path():
     return os.path.join(config.DATA, "update-rollback.flag")
+
+
+def pending_path():
+    return os.path.join(config.DATA, "update-pending.flag")
+
+
+def swap_pending():
+    """True when a downloaded exe is waiting for this process to exit."""
+    return os.path.isfile(pending_path())
 
 
 def last_rollback():
@@ -223,23 +254,33 @@ def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True,
         lines.append(f'echo {ver}> "{marker}"\r\n')
     if relaunch:
         lines.extend([
-            f'start "" /d "{inst}" "{exe}"{args}\r\n',
+            f'start "ACECM" /d "{inst}" "{exe}"{args}\r\n',
             "set W=0\r\n",
             ":waitok\r\n",
             "ping -n 3 127.0.0.1 >nul\r\n",
             (f'if exist "{okflag}" goto upok\r\n' if okflag
              else "goto upok\r\n"),
             "set /a W+=1\r\n",
-            "if !W! lss 12 goto waitok\r\n",
+            # ~60s. PyInstaller + WebView2 is slow the first time.
+            "if !W! lss 20 goto waitok\r\n",
+            # A live ACECM.exe after the swap is success even if the flag
+            # file was lost. Rolling back then fights that process and
+            # leaves the user with a closed window.
+            f'tasklist /fi "IMAGENAME eq ACECM.exe" 2>nul | find /i "ACECM.exe" >nul\r\n',
+            "if not errorlevel 1 (\r\n",
+            "  echo new exe is running without a flag - keeping it >>%LOG%\r\n",
+            "  goto upok\r\n",
+            ")\r\n",
             "echo new exe did not start - rolling back >>%LOG%\r\n",
             ":rollback\r\n",
             f'copy /y "{exe}.old" "{exe}" >>%LOG% 2>&1\r\n',
             f'if exist "{prev_marker}" copy /y "{prev_marker}" "{marker}" >>%LOG% 2>&1\r\n',
             f'echo rollback> "{rolled}"\r\n',
-            f'start "" /d "{inst}" "{exe}"\r\n',
+            f'start "ACECM" /d "{inst}" "{exe}"\r\n',
             "goto done\r\n",
             ":upok\r\n",
             (f'del "{okflag}" >nul 2>&1\r\n' if okflag else ""),
+            f'del "{pending_path()}" >nul 2>&1\r\n',
             "echo handshake ok >>%LOG%\r\n",
             "goto done\r\n",
         ])
@@ -267,8 +308,17 @@ def apply(url=None, sha256=None):
         return {"ok": False, "error": "no download url"}
 
     exe = sys.executable
-    new = exe + ".new"
+    # ⚠ Do not write ACECM.exe.new next to the running exe. A previous
+    # failed swap leaves that file locked and apply() then crashes with
+    # WinError 32 before any download starts.
+    os.makedirs(config.DATA, exist_ok=True)
+    new = os.path.join(config.DATA, "ACECM-update.new")
     try:
+        if os.path.isfile(new):
+            try:
+                os.remove(new)
+            except OSError:
+                new = os.path.join(config.DATA, f"ACECM-update-{uuid.uuid4().hex[:8]}.new")
         req = urllib.request.Request(url, headers={
             **_headers(),
             # asset downloads need the octet-stream Accept, not the JSON one
@@ -289,13 +339,21 @@ def apply(url=None, sha256=None):
     # that gets moved into place leaves the user with a broken install and no
     # obvious way back.
     if sha256 and got.lower() != sha256.lower():
-        os.remove(new)
+        try:
+            os.remove(new)
+        except OSError:
+            pass
         return {"ok": False,
                 "error": f"checksum mismatch (got {got[:12]}, "
                          f"expected {sha256[:12]})"}
 
     bat, blog = _write_swap_script(exe, new, os.getpid(),
                                    ver=info.get("latest") or VERSION)
+    try:
+        with open(pending_path(), "w", encoding="utf-8") as f:
+            f.write(info.get("latest") or VERSION)
+    except OSError:
+        pass
     # ⚠ CREATE_NO_WINDOW, not DETACHED_PROCESS. Detached leaves the batch with
     # no console at all, and the commands it needs (timeout, and reliable
     # redirection) fail outright there - the first version scheduled a swap
