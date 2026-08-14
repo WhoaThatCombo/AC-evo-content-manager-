@@ -401,11 +401,13 @@ def open_track(folder):
             loose = cand
     except Exception:
         pass
+    pkg = package()
     if loose:
         cmd = [exe, loose, "--track"]
+        if pkg:
+            cmd += ["--base", pkg]
         src = loose
     else:
-        pkg = package()
         if not pkg:
             raise RuntimeError("game install not found")
         cmd = [exe, pkg, "--track", folder]
