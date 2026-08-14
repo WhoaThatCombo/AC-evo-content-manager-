@@ -63,8 +63,10 @@ def _install_content(body):
     def run():
         try:
             contentsync.install_files(need, _INSTALL)
+            extra = _INSTALL.get("warning")
             _INSTALL.update({"state": "done",
-                             "detail": f"{len(need)} file(s) installed"})
+                             "detail": (f"{len(need)} file(s) installed"
+                                        + (f" — {extra}" if extra else ""))})
         except Exception as ex:
             logs.LOG.exception("content install failed")
             _INSTALL.update({"state": "error", "detail": str(ex)})

@@ -495,6 +495,96 @@ def _client_name(folder):
     return ""
 
 
+def client_kspkg():
+    from . import viewer
+    return viewer.package() or ""
+
+
+def pack_meta(folder):
+    """Sidecar the joiner needs to register this track in THEIR tables."""
+    display = _client_name(folder) or folder.replace("_", " ").title()
+    layout, containers = "layout", {}
+    try:
+        from . import contentsync
+        src = read_track_folder(os.path.join(contentsync.tracks_dir(), folder),
+                                folder)
+        layout = src.get("layout") or layout
+        containers = src.get("containers") or {}
+        display = _client_name(folder) or src.get("display_name") or display
+    except Exception as ex:
+        logs.LOG.info("pack meta for %s: %s", folder, ex)
+    return {"folder": folder, "display_name": display,
+            "layout": layout, "containers": containers}
+
+
+def register_client_track(folder, meta=None):
+    """Write this track into the CLIENT's tracks.table + containers table.
+
+    Fetch used to drop only the art folder, so ACECM still said the track
+    was missing (track_map reads the table) and the game never listed it
+    like an EvoForge import. Same upsert as a native deploy, applied to
+    the client's content.kspkg, in-place so we do not copy 25 GB.
+    """
+    from . import winproc
+    folder = (folder or "").strip()
+    if not folder:
+        return {"ok": False, "error": "no folder"}
+    meta = dict(meta or {})
+    if not meta.get("display_name") or not meta.get("containers"):
+        try:
+            meta = {**pack_meta(folder), **{k: v for k, v in meta.items() if v}}
+        except Exception:
+            pass
+    display = (meta.get("display_name") or "").strip()
+    layout = (meta.get("layout") or "layout").strip()
+    containers = meta.get("containers") or {}
+    if not display:
+        display = folder.replace("_", " ").title()
+
+    pkg = client_kspkg()
+    if not pkg:
+        return {"ok": False, "error": "client content.kspkg not found"}
+    if winproc.pids_named("AssettoCorsaEVO"):
+        return {"ok": False, "needs_close": True,
+                "error": "close the game, then fetch again — content.kspkg "
+                         "is locked while it is running"}
+
+    tk = kspkg_write.read_entry(pkg, "system\\tracks.table")
+    tc = kspkg_write.read_entry(pkg, "system\\track_containers.table")
+    if tk is None or tc is None:
+        return {"ok": False, "error": "client archive has no system tables"}
+    try:
+        new_tk = tracktables.upsert_track_row(tk, display, folder,
+                                              TEMPLATE_TRACK)
+        new_tc, modes = tracktables.upsert_container_rows(
+            tc, display, folder, layout, containers or {"layout": "layout"},
+            TEMPLATE_TRACK)
+    except Exception as ex:
+        return {"ok": False, "error": f"table edit failed: {ex}"}
+
+    try:
+        written = kspkg_write.write_inplace(
+            pkg, {"system\\tracks.table": new_tk,
+                  "system\\track_containers.table": new_tc})
+        check = kspkg_write.verify(pkg)
+        if not check.get("ok"):
+            return {"ok": False, "error": "client archive failed verification "
+                    "after the table write", "detail": check}
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)}
+
+    cache = os.path.join(config.DATA, "track_map.json")
+    try:
+        if os.path.isfile(cache):
+            os.remove(cache)
+    except OSError:
+        pass
+    logs.LOG.info("registered client track %r as %r (modes=%s)",
+                  folder, display, modes)
+    return {"ok": True, "folder": folder, "display_name": display,
+            "layout": layout, "modes": modes, "written": written}
+
+
 def _publish(display, folder):
     """Add or refresh this track in the share registry, keeping it deduped."""
     from . import registry

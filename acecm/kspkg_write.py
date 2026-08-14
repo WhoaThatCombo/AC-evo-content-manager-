@@ -122,6 +122,65 @@ def repair_headers(records):
     return fixed
 
 
+def write_inplace(archive, changes):
+    """Replace or add entries by rewriting only the 64 MiB index tail.
+
+    The 25 GB client archive cannot be copied on every download. New
+    payloads go where the old table started; the previous 64 MiB tail is
+    saved as `<archive>.bak_tables` so a failed write can be undone
+    without a full backup. The data region is not touched.
+    """
+    table_start, records = read_records(archive)
+    repaired = repair_headers(records)
+    by_path = {record_path(r).lower(): r for r in records}
+    orig_size = os.path.getsize(archive)
+    with open(archive, "rb") as f:
+        f.seek(table_start)
+        tail = f.read()
+    bak = archive + ".bak_tables"
+    with open(bak, "wb") as f:
+        f.write(tail)
+
+    added, replaced = [], []
+    try:
+        with open(archive, "r+b") as f:
+            f.seek(table_start)
+            cursor = table_start
+            for path, blob in changes.items():
+                f.write(kspkg.decrypt(blob, 0))
+                rec = by_path.get(path.lower())
+                if rec is None:
+                    records.append(_bucket(path, len(blob), cursor))
+                    added.append(path)
+                else:
+                    struct.pack_into("<I", rec, 240, len(blob))
+                    struct.pack_into("<Q", rec, 248, cursor)
+                    replaced.append(path)
+                cursor += len(blob)
+            records.sort(key=lambda r: struct.unpack_from("<Q", r, 232)[0])
+            ids = [struct.unpack_from("<Q", r, 232)[0] for r in records]
+            if ids != sorted(ids) or len(set(ids)) != len(ids):
+                raise ValueError("record ids are not unique and ascending")
+            table = bytearray(kspkg.TABLE)
+            for i, rec in enumerate(records):
+                table[i * kspkg.BUCKET:(i + 1) * kspkg.BUCKET] = \
+                    kspkg.decrypt(bytes(rec), 0)
+            blank = kspkg.decrypt(bytes(kspkg.BUCKET), 0)
+            for i in range(len(records), kspkg.TABLE // kspkg.BUCKET):
+                table[i * kspkg.BUCKET:(i + 1) * kspkg.BUCKET] = blank
+            f.write(bytes(table))
+            f.truncate(cursor + kspkg.TABLE)
+    except Exception:
+        with open(archive, "r+b") as f:
+            f.seek(table_start)
+            f.write(tail)
+            f.truncate(orig_size)
+        raise
+    return {"added": added, "replaced": replaced, "repaired": repaired,
+            "records": len(records), "size": os.path.getsize(archive),
+            "backup": bak}
+
+
 def write_archive(src, dst, changes, progress=None):
     """Copy `src` to `dst`, adding or replacing entries.
 

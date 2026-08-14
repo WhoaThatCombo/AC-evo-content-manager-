@@ -463,6 +463,23 @@ def fetch_track_pack(base, sid, folder, files, progress=None):
     return dest_dir
 
 
+def _register_downloaded_track(folder, dest_dir=None):
+    """Put the downloaded track in the client's system tables."""
+    from . import tracks as trackmod
+    dest_dir = dest_dir or os.path.join(tracks_dir(), folder)
+    meta = {}
+    side = os.path.join(dest_dir, "acecm_track.json")
+    try:
+        meta = json.load(open(side, encoding="utf-8"))
+    except Exception:
+        pass
+    r = trackmod.register_client_track(folder, meta)
+    if not r.get("ok"):
+        logs.LOG.warning("could not register %s in client tables: %s",
+                         folder, r.get("error"))
+    return r
+
+
 def install_files(need, status):
     """Install a plan: one tar per track, then leftover files in parallel.
 
@@ -532,6 +549,14 @@ def install_files(need, status):
                     installed.append(entry["path"])
                     status["detail"] = f"{i}/{len(rest)} {entry['path']}"
 
+    warns = []
+    for folder in tracks:
+        status["detail"] = f"registering {folder} in client tables"
+        r = _register_downloaded_track(folder)
+        if not r.get("ok"):
+            warns.append(r.get("error") or folder)
+    if warns:
+        status["warning"] = "; ".join(warns)
     status["files"] = installed
     return installed
 
