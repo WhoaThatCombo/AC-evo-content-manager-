@@ -55,8 +55,23 @@ jobs:
           cd dist
           sha256sum ACECM.exe | tee ACECM.exe.sha256
 
-      - uses: softprops/action-gh-release@v2
+      - name: Skip upload if the release already has ACECM.exe
+        # Local tools/publish_release.py ships first. Re-uploading the same
+        # tag from CI replaces the blob and the in-app updater 404s.
+        id: already
         if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${GITHUB_REF_NAME}")
+          echo "http=$CODE"
+          if [ "$CODE" = "200" ]; then echo "exists=yes" >> "$GITHUB_OUTPUT"
+          else echo "exists=no" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') && steps.already.outputs.exists != 'yes'
         with:
           files: |
             dist/ACECM.exe

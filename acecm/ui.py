@@ -8,10 +8,10 @@ so nothing extra has to be installed or bundled.
 ⚠ A GUI event loop must own the MAIN thread. The HTTP server therefore runs on
 a background thread (see app.serve) and this blocks until the window closes.
 
-⚠ Closing the window stops ACECM, but NOT the dedicated servers or trackers it
-launched - those are separate processes on purpose, so a server keeps running
-when you close the manager. Stop them from the Servers tab if that is not what
-you want.
+⚠ Closing the window stops ACECM. Dedicated servers and trackers stay up on
+purpose. The lobby proxy is different: if Settings → auto_proxy is on (the
+default), the proxy starts with ACECM and is killed here when the window
+closes.
 """
 import os
 import shutil

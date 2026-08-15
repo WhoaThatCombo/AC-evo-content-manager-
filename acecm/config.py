@@ -71,6 +71,9 @@ DEFAULTS = {
     "listen": "0.0.0.0",
     "telemetry_port": 8091,
     "backend_port": 448,
+    # Start the lobby proxy with ACECM and kill it when the window closes.
+    # Dedicated servers are separate and are not touched.
+    "auto_proxy": True,
     # default server settings for new profiles
     "default_tcp_port": 9700,
     "default_http_port": 8080,

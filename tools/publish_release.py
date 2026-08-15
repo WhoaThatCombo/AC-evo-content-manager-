@@ -76,19 +76,32 @@ def main():
                      encoding="utf-8").read()
 
     tok = token()
-    # a re-run should replace the release, not fail or duplicate it
+    # ⚠ Do not DELETE the release. Recreating the same tag leaves
+    # github.com/.../releases/download/<tag>/ACECM.exe pointing at a
+    # dead blob ("The specified blob does not exist") until the CDN
+    # catches up — which is what the in-app updater was hitting.
+    rel = None
     try:
-        old = call("GET", f"{API}/repos/{REPO}/releases/tags/{tag}", tok)
-        print(f"{tag} already exists, replacing it")
-        call("DELETE", f"{API}/repos/{REPO}/releases/{old['id']}", tok)
+        rel = call("GET", f"{API}/repos/{REPO}/releases/tags/{tag}", tok)
+        print(f"{tag} already exists, replacing assets")
+        for a in rel.get("assets") or []:
+            call("DELETE",
+                 f"{API}/repos/{REPO}/releases/assets/{a['id']}", tok)
+            print(f"  removed old {a['name']}")
+        if notes:
+            call("PATCH", f"{API}/repos/{REPO}/releases/{rel['id']}", tok,
+                 {"body": notes, "name": tag})
     except SystemExit:
-        pass
+        rel = None
 
-    rel = call("POST", f"{API}/repos/{REPO}/releases", tok, {
-        "tag_name": tag, "name": tag, "body": notes,
-        "draft": False, "prerelease": False,
-    })
-    print(f"created {rel['html_url']}")
+    if not rel:
+        rel = call("POST", f"{API}/repos/{REPO}/releases", tok, {
+            "tag_name": tag, "name": tag, "body": notes,
+            "draft": False, "prerelease": False,
+        })
+        print(f"created {rel['html_url']}")
+    else:
+        print(f"updating {rel['html_url']}")
 
     upload = rel["upload_url"].split("{")[0]
     for path in (exe, sha):

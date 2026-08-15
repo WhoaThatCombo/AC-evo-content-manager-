@@ -620,11 +620,16 @@ def server_list():
         # everything you would DO with it - see which servers need content you
         # lack, and download it - is work you want to do with the game CLOSED,
         # so the mods are in place before it next starts.
-        try:
-            json.dump(got, open(cache, "w", encoding="utf-8"))
-        except OSError as ex:
-            logs.LOG.warning("could not cache the server list: %s", ex)
-        return got
+        # Do not clobber a good snapshot with an empty live reply (game closed
+        # or browser not opened this session).
+        live = got.get("servers") or []
+        if live:
+            try:
+                json.dump(got, open(cache, "w", encoding="utf-8"))
+            except OSError as ex:
+                logs.LOG.warning("could not cache the server list: %s", ex)
+            return got
+        raise OSError("proxy returned an empty server list")
     except Exception:
         pass
     try:
@@ -1015,6 +1020,18 @@ def launch_game(extra_args=None):
         env["FLAGS_ai_player_car"] = "true"
     if any("ai_enable_evo_next" in a for a in extra_args):
         env["FLAGS_ai_enable_evo_next"] = "true"
+    # Steam relaunches with Arguments: 1 and drops argv. gflags still
+    # reads FLAGS_* from the environment, so string flags like
+    # startup_gamemode have to live here, not only on the command line.
+    for a in extra_args:
+        if a.startswith("--"):
+            a = a[2:]
+        elif a.startswith("-"):
+            a = a[1:]
+        if "=" in a:
+            k, v = a.split("=", 1)
+            if k and v and k.isidentifier():
+                env["FLAGS_" + k] = v
     cwd = os.path.dirname(exe)
     flagfile = os.path.join(config.DATA, "evo.flags")
     try:
@@ -1023,18 +1040,29 @@ def launch_game(extra_args=None):
             lines.append("--ai_player_car")
         if env.get("FLAGS_ai_enable_evo_next"):
             lines.append("--ai_enable_evo_next")
+        for key, val in env.items():
+            if key.startswith("FLAGS_") and key not in (
+                    "FLAGS_backend", "FLAGS_ai_player_car",
+                    "FLAGS_ai_enable_evo_next"):
+                lines.append(f"--{key[6:]}={val}")
         open(flagfile, "w", encoding="ascii").write("\n".join(lines) + "\n")
         extra_args.append(f"--flagfile={flagfile}")
         extra_args.append(f"-flagfile={flagfile}")
+        extra_args.append("--fromenv=startup_gamemode,load_single_car,backend")
+        extra_args.append("--tryfromenv=startup_gamemode,load_single_car,backend")
     except OSError:
         pass
+    # steam -applaunch still relaunches as Arguments: 2 (exe + -no_intro).
+    # startup_gamemode never arrives. Always start the exe; Drive pokes Start
+    # once the menu exists.
     cmd = [exe, f"-backend={url}", f"--backend={url}"]
     cmd.extend(extra_args)
+    via = "exe"
     subprocess.Popen(cmd, cwd=cwd, env=env)
-    logs.launched("game client", cmd, None, backend=url,
+    logs.launched("game client", cmd, None, backend=url, via=via,
                   rdata_patched=probe_client_url().get("rdata_patched"),
                   flags_env={k: env[k] for k in env if k.startswith("FLAGS_")})
-    return {"ok": True, "via": "exe", "backend": url,
+    return {"ok": True, "via": via, "backend": url,
             "rdata_patched": probe_client_url().get("rdata_patched"),
             "patch": patch,
             "flags_env": {k: env[k] for k in env if k.startswith("FLAGS_")}}

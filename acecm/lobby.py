@@ -16,9 +16,22 @@ from . import netutil
 # have confirmed from a live Register/list exchange (the browser prints
 # GameModeType_NONE for 0). Unknown modes stay at PRACTICE rather than 0,
 # which greys the row out.
+# Numbers from ClientCommandsUtil.GameModeType. Anything unknown stays
+# PRACTICE (10) rather than 0, which greys the browser row out.
 GAME_MODE_TYPE = {
     "NONE": 0,
+    "RACE_WEEKEND": 1,
+    "SRO_RACE": 2,
+    "INSTANT_RACE": 3,
+    "SUPERPOLE": 4,
+    "FREEROAM": 5,
+    "DRIFT": 6,
+    "RALLY": 7,
+    "HOTSTINT": 8,
+    "HOTLAP": 9,
     "PRACTICE": 10,
+    "TEST_DRIVE": 11,
+    "A_TO_B": 12,
 }
 
 PATH = os.path.join(config.DATA, "lobby.json")
