@@ -26,10 +26,13 @@ ACECM.exe --headless   API only
 |---|---|
 | **Drive** | Pick a car. Start or join **My server**, or join a listed host. Join waits until TCP 9700 is actually open. |
 | **Servers** | Save profiles (track, slots, weather, cars) and Start / Stop. |
-| **Content** | Drop a car or track onto *any* page to install. Library: delete, export (MP tracks), clipboard. Same files again → confirm overwrite. |
+| **Cars** | What the *server* can load. Open a car in **evoview** (3D viewer shipped inside ACECM.exe). It reads the `.kspkg` in place — nothing is extracted. A source build without `tools/evoview.exe` needs that file, or `viewer_exe` in Settings. |
+| **Content** | Drop a car or track onto *any* page to install. Library: delete, export (including MP-format tracks), clipboard. Same files again → confirm overwrite. |
 | **Live** | `/live` — read-only map anyone can open. No admin. |
 | **Backend** | The lobby ACECM runs so the game can list and join your server. Leave **proxy** on to keep your real Kunos account. |
 | **Settings** | Game path, server path, ports. |
+
+**Modded tracks** install like cars (drop the archive). The dedicated server has no loose track path, so ACECM writes them into `content.kspkg` (native folder or a borrowed stock slot). **Stop the server first** — it holds that archive open — and ACECM takes a `.bak_pretrack` backup before the first write. Host the track from a server profile (custom track name, not a stock index). Export from the library in the same MP format you can drop back in. AI lines are copied next to the server when the client or the import has them (Barber, Highlands, stock layouts).
 
 Launch the game **from ACECM**. Steam “Verify integrity” undoes the lobby redirect and joining stops working until you Launch again.
 
