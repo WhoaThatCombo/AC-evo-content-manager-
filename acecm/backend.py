@@ -1010,8 +1010,6 @@ def launch_game(extra_args=None):
     url = netutil.backend_ws_url(config.CFG["backend_port"])
     env = dict(os.environ)
     appid = str(config.CFG.get("steam_appid") or "3058630")
-    env["SteamAppId"] = appid
-    env["SteamGameId"] = appid
     # Belt and braces: still pass the flag AND FLAGS_backend. They only
     # help if Steam does not relaunch the process; rdata is the real fix.
     env["FLAGS_backend"] = url
@@ -1052,13 +1050,21 @@ def launch_game(extra_args=None):
         extra_args.append("--tryfromenv=startup_gamemode,load_single_car,backend")
     except OSError:
         pass
-    # steam -applaunch still relaunches as Arguments: 2 (exe + -no_intro).
-    # startup_gamemode never arrives. Always start the exe; Drive pokes Start
-    # once the menu exists.
-    cmd = [exe, f"-backend={url}", f"--backend={url}"]
-    cmd.extend(extra_args)
-    via = "exe"
-    subprocess.Popen(cmd, cwd=cwd, env=env)
+    # Do NOT Popen the game exe from ACECM. steam_api then checks ownership
+    # on THIS process's token. If ACECM was run as admin to patch rdata, or
+    # the friend is on Family Share, Steam answers
+    # "User has not permission to run this product" and the game never
+    # opens. steam:// goes through the unelevated Steam client, which is
+    # the same path as the Play button. rdata already has our lobby URL;
+    # Steam still drops argv.
+    via, cmd = _start_via_steam(appid)
+    if not via:
+        env["SteamAppId"] = appid
+        env["SteamGameId"] = appid
+        cmd = [exe, f"-backend={url}", f"--backend={url}"]
+        cmd.extend(extra_args)
+        via = "exe"
+        subprocess.Popen(cmd, cwd=cwd, env=env)
     logs.launched("game client", cmd, None, backend=url, via=via,
                   rdata_patched=probe_client_url().get("rdata_patched"),
                   flags_env={k: env[k] for k in env if k.startswith("FLAGS_")})
@@ -1066,3 +1072,32 @@ def launch_game(extra_args=None):
             "rdata_patched": probe_client_url().get("rdata_patched"),
             "patch": patch,
             "flags_env": {k: env[k] for k in env if k.startswith("FLAGS_")}}
+
+
+def _start_via_steam(appid):
+    """Open the game as the logged-in Steam user, not as ACECM's token."""
+    url = f"steam://rungameid/{appid}"
+    # explorer.exe is not elevated even when ACECM is. That is what
+    # makes Family Share / "run as admin to patch" actually launch.
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    explorer = os.path.join(windir, "explorer.exe")
+    if os.path.isfile(explorer):
+        try:
+            subprocess.Popen([explorer, url])
+            return "steam-url", [explorer, url]
+        except OSError:
+            pass
+    try:
+        os.startfile(url)  # noqa: S606
+        return "steam-url", [url]
+    except OSError:
+        pass
+    root = detect.steam_root()
+    steam = os.path.join(root or "", "steam.exe")
+    if os.path.isfile(steam):
+        try:
+            subprocess.Popen([steam, "-applaunch", str(appid)])
+            return "steam", [steam, "-applaunch", str(appid)]
+        except OSError:
+            pass
+    return "", []
