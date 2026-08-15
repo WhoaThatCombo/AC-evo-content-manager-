@@ -58,6 +58,9 @@ Treat these as regression tests, not folklore.
 | `runtime.json` pid still “running” | Windows reused the PID; Drive skipped Start |
 | QuitGame JS only, then assume process gone if inspector died | Game window stayed up |
 | Pull launchers from `ACE_server_portable` if newer | Author’s old script overwrote the ship fix |
+| Drive cars from server `cars.json` only | New client mods never appeared in Drive |
+| Drive tracks from stock `events_*.json` only | Dropped / imported tracks never appeared |
+| `/api/thumb/car` launched evoview on every Drive keystroke | Console storm and focus stolen after one letter |
 
 The dedicated server is a **console-subsystem** binary. Give it
 `CREATE_NEW_CONSOLE` (hidden is fine) and a **log file this process keeps

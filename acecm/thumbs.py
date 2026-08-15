@@ -53,11 +53,20 @@ def track_path(folder):
 
 # ------------------------------------------------------------------- cars --
 
-def render_car(car_id, force=False, timeout=180):
-    """One car, rendered by evoview into the cache. Returns the path or None."""
+def render_car(car_id, force=False, timeout=180, make=True):
+    """One car, rendered by evoview into the cache. Returns the path or None.
+
+    make=False (the list GET) never launches evoview. Typing in Drive used
+    to rebuild every row and fire this on each key, which opened a console
+    per car and stole focus after one character.
+    """
+    if not car_id:
+        return None
     out = car_path(car_id)
     if os.path.isfile(out) and not force:
         return out
+    if not make:
+        return None
     exe = viewer.viewer_exe()
     if not exe:
         return None
@@ -70,9 +79,10 @@ def render_car(car_id, force=False, timeout=180):
     # a mod package holds only its own car; the base game supplies shared tyres
     if base and os.path.abspath(base) != os.path.abspath(pkg):
         cmd += ["--base", base]
+    from . import winproc
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           cwd=os.path.dirname(exe))
+        r = winproc.hidden_run(cmd, capture_output=True, text=True,
+                               timeout=timeout, cwd=os.path.dirname(exe))
     except subprocess.TimeoutExpired:
         logs.LOG.warning("thumb %s: timed out", car_id)
         return None

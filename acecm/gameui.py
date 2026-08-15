@@ -403,8 +403,10 @@ _REFRESH_LIST = """
 
 
 def refresh_server_list():
+    # Short: a hung MP page used to block 40s and take the inspector down,
+    # after which QuitGame could not run.
     page = menu_page()
-    return js_value(evaluate(_REFRESH_LIST, page=page, timeout=10,
+    return js_value(evaluate(_REFRESH_LIST, page=page, timeout=4, attempts=1,
                              user_gesture=False))
 
 
@@ -412,6 +414,8 @@ _QUIT = """
 (function(){
   if (!window.ksUI) return 'no-ksUI';
   try {
+    // MP / loading pages ignore QuitGame. Home first, then quit.
+    try { ksUI.goTo('menu.html', 'main/main'); } catch (e) {}
     ksUI.requestNoResponse('GameMode', 'QuitGame');
     return 'quit';
   } catch (e) {
@@ -422,8 +426,67 @@ _QUIT = """
 
 
 def quit_game():
+    if not listening():
+        return {"ok": False, "error": "inspector not listening"}
     page = menu_page()
-    return js_value(evaluate(_QUIT, page=page, timeout=6, user_gesture=True))
+    return js_value(evaluate(_QUIT, page=page, timeout=3, attempts=1,
+                             user_gesture=True))
+
+
+def close_window():
+    """WM_CLOSE the EVO window. Works when the inspector is already dead."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                    wintypes.WPARAM, wintypes.LPARAM]
+    WM_CLOSE = 0x0010
+    hwnd = user32.FindWindowW(None, "Assetto Corsa EVO")
+    if not hwnd:
+        found = wintypes.HWND()
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def each(h, _):
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(h, buf, 256)
+            if "assetto corsa evo" in buf.value.lower():
+                found.value = h
+                return False
+            return True
+        user32.EnumWindows(each, 0)
+        hwnd = found.value
+    if not hwnd:
+        return False
+    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    return True
+
+
+def window_open():
+    """True if an EVO window is still on screen."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    hwnd = user32.FindWindowW(None, "Assetto Corsa EVO")
+    if hwnd:
+        return True
+    found = ctypes.c_int(0)
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(h, _):
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(h, buf, 256)
+        if "assetto corsa evo" in buf.value.lower():
+            found.value = 1
+            return False
+        return True
+    user32.EnumWindows(each, 0)
+    return bool(found.value)
 
 
 def press_start():

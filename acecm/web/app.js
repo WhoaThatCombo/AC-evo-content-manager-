@@ -84,6 +84,7 @@ async function drivePage() {
     password: pick.password || '',
     car: pick.car || '',
     track_index: pick.track_index ?? 18,
+    custom_track: pick.custom_track || '',
     game_mode: pick.game_mode || 'PRACTICE',
     weather: pick.weather || 'CLEAR',
     tod_hour: pick.tod_hour ?? 13,
@@ -338,33 +339,52 @@ async function drivePage() {
   function paintCars() {
     const q = (carSearch.value || '').toLowerCase();
     driveFilter.car = carSearch.value;
-    carList.innerHTML = '';
     const allow = allowedCars();
-    const rows = (d.cars || []).filter(c => {
-      if (allow && !carAllowed(c, allow)) return false;
-      const blob = `${c.label} ${c.id} ${c.brand || ''}`.toLowerCase();
-      return !q || blob.includes(q);
-    });
-    if (!rows.length) {
-      carList.append(el('div', 'empty',
-        allow ? 'No cars allowed on this server' : 'No cars'));
-      return;
+    const allowKey = allow ? [...allow].sort().join('|') : '*';
+    if (carList.dataset.built !== '1' || carList.dataset.allow !== allowKey) {
+      carList.innerHTML = '';
+      carList.dataset.built = '1';
+      carList.dataset.allow = allowKey;
+      const pool = (d.cars || []).filter(c => !allow || carAllowed(c, allow));
+      if (!pool.length) {
+        carList.append(el('div', 'empty',
+          allow ? 'No cars allowed on this server' : 'No cars'));
+      } else {
+        pool.forEach(c => {
+          const r = el('div', 'drive-row' + (c.id === sel.car ? ' on' : ''));
+          r.dataset.id = c.id;
+          r.dataset.blob = `${c.label} ${c.id} ${c.brand || ''}`.toLowerCase();
+          const img = el('img');
+          img.loading = 'lazy';
+          img.alt = '';
+          img.src = 'api/thumb/car?id=' + encodeURIComponent(c.model || c.id);
+          img.onerror = () => { img.style.visibility = 'hidden'; };
+          const t = el('div', 'grow');
+          t.innerHTML = `<div class="name">${esc(c.label)}</div>`
+            + `<div class="tiny dim">${esc(c.id)}</div>`;
+          r.append(img, t);
+          if (c.mod) r.append(el('span', 'pill warn', 'mod'));
+          r.onclick = () => { sel.car = c.id; paintCars(); paintSelected(); };
+          carList.append(r);
+        });
+      }
     }
-    rows.forEach(c => {
-      const r = el('div', 'drive-row' + (c.id === sel.car ? ' on' : ''));
-      const img = el('img');
-      img.loading = 'lazy';
-      img.alt = '';
-      img.src = 'api/thumb/car?id=' + encodeURIComponent(c.model || c.id);
-      img.onerror = () => { img.style.visibility = 'hidden'; };
-      const t = el('div', 'grow');
-      t.innerHTML = `<div class="name">${esc(c.label)}</div>`
-        + `<div class="tiny dim">${esc(c.id)}</div>`;
-      r.append(img, t);
-      if (c.mod) r.append(el('span', 'pill warn', 'mod'));
-      r.onclick = () => { sel.car = c.id; paintCars(); paintSelected(); };
-      carList.append(r);
+    let vis = 0;
+    carList.querySelectorAll('.drive-row').forEach(r => {
+      const show = !q || (r.dataset.blob || '').includes(q);
+      r.style.display = show ? '' : 'none';
+      r.classList.toggle('on', r.dataset.id === sel.car);
+      if (show) vis++;
     });
+    let empty = carList.querySelector('.empty');
+    if (!vis && !empty) {
+      empty = el('div', 'empty', q ? 'No matching cars' : 'No cars');
+      carList.append(empty);
+    } else if (empty && vis) {
+      empty.remove();
+    } else if (empty && !vis && q) {
+      empty.textContent = 'No matching cars';
+    }
   }
 
   function ownTrack(s) {
@@ -443,6 +463,7 @@ async function drivePage() {
 
   function paintServers() {
     paintSrvFilters();
+    delete trkList.dataset.built;
     trkCol.querySelector('h2').textContent = 'Public servers';
     trkSearch.placeholder = 'Filter name, track, car…';
     const q = (trkSearch.value || '').toLowerCase();
@@ -538,6 +559,7 @@ async function drivePage() {
 
   function paintLocal() {
     srvFilters.style.display = 'none';
+    delete trkList.dataset.built;
     trkCol.querySelector('h2').textContent = 'My servers';
     trkSearch.placeholder = 'Filter your servers…';
     const q = (trkSearch.value || '').toLowerCase();
@@ -616,29 +638,56 @@ async function drivePage() {
     trkSearch.placeholder = 'Filter tracks…';
     const q = (trkSearch.value || '').toLowerCase();
     driveFilter.track = trkSearch.value;
-    trkList.innerHTML = '';
-    const rows = (d.tracks || []).filter(t => {
-      const blob = `${t.label} ${t.track} ${t.layout} ${t.name}`.toLowerCase();
-      return !q || blob.includes(q);
-    });
-    if (!rows.length) {
-      trkList.append(el('div', 'empty', d.tracks_error || 'No tracks'));
-      return;
+    if (trkList.dataset.built !== 'tracks') {
+      trkList.innerHTML = '';
+      trkList.dataset.built = 'tracks';
+      const pool = d.tracks || [];
+      if (!pool.length) {
+        trkList.append(el('div', 'empty', d.tracks_error || 'No tracks'));
+      } else {
+        pool.forEach(t => {
+          const r = el('div', 'drive-row');
+          r.dataset.index = String(t.index);
+          r.dataset.custom = t.custom_track || '';
+          r.dataset.blob = `${t.label} ${t.track} ${t.layout} ${t.name}`.toLowerCase();
+          const img = el('img');
+          img.loading = 'lazy';
+          img.alt = '';
+          img.src = 'api/thumb/track?folder=' + encodeURIComponent(t.track || '');
+          img.onerror = () => { img.style.visibility = 'hidden'; };
+          const cap = el('div', 'grow');
+          cap.innerHTML = `<div class="name">${esc(t.label || t.name)}</div>`
+            + `<div class="tiny dim">#${t.index} · ${esc(t.layout || '')}</div>`;
+          r.append(img, cap);
+          if (t.mod) r.append(el('span', 'pill warn', 'mod'));
+          r.onclick = () => {
+            sel.track_index = t.index;
+            sel.custom_track = t.custom_track || '';
+            paintTracks();
+            paintSelected();
+          };
+          trkList.append(r);
+        });
+      }
     }
-    rows.forEach(t => {
-      const r = el('div', 'drive-row' + (t.index === sel.track_index ? ' on' : ''));
-      const img = el('img');
-      img.loading = 'lazy';
-      img.alt = '';
-      img.src = 'api/thumb/track?folder=' + encodeURIComponent(t.track || '');
-      img.onerror = () => { img.style.visibility = 'hidden'; };
-      const cap = el('div', 'grow');
-      cap.innerHTML = `<div class="name">${esc(t.label || t.name)}</div>`
-        + `<div class="tiny dim">#${t.index} · ${esc(t.layout || '')}</div>`;
-      r.append(img, cap);
-      r.onclick = () => { sel.track_index = t.index; paintTracks(); paintSelected(); };
-      trkList.append(r);
+    let vis = 0;
+    trkList.querySelectorAll('.drive-row').forEach(r => {
+      const show = !q || (r.dataset.blob || '').includes(q);
+      r.style.display = show ? '' : 'none';
+      const on = (sel.custom_track && r.dataset.custom === sel.custom_track)
+        || (!sel.custom_track && Number(r.dataset.index) === sel.track_index);
+      r.classList.toggle('on', on);
+      if (show) vis++;
     });
+    let empty = trkList.querySelector('.empty');
+    if (!vis && !empty) {
+      empty = el('div', 'empty', q ? 'No matching tracks' : (d.tracks_error || 'No tracks'));
+      trkList.append(empty);
+    } else if (empty && vis) {
+      empty.remove();
+    } else if (empty && !vis && q) {
+      empty.textContent = 'No matching tracks';
+    }
   }
 
   function paintSelected() {
@@ -711,8 +760,15 @@ async function drivePage() {
     paintSelected();
   }
 
-  carSearch.oninput = paintCars;
-  trkSearch.oninput = paintTracks;
+  let carSearchT = 0, trkSearchT = 0;
+  carSearch.oninput = () => {
+    clearTimeout(carSearchT);
+    carSearchT = setTimeout(paintCars, 80);
+  };
+  trkSearch.oninput = () => {
+    clearTimeout(trkSearchT);
+    trkSearchT = setTimeout(paintTracks, 80);
+  };
   mode.onchange = () => { sel.game_mode = mode.value; paintExtras(); };
   weather.onchange = () => { sel.weather = weather.value; };
   hour.onchange = () => { sel.tod_hour = Number(hour.value); };
@@ -792,6 +848,7 @@ async function drivePage() {
       password: sel.password,
       car: sel.car,
       track_index: sel.track_index,
+      custom_track: sel.custom_track || '',
       game_mode: sel.game_mode,
       weather: sel.weather,
       tod_hour: sel.tod_hour,
@@ -2615,6 +2672,14 @@ function collectDropped(dt) {
   });
 }
 
+function refreshOpenPage() {
+  if (_page === 'drive') drivePage();
+  else if (_page === 'content') contentPage();
+  else if (_page === 'cars') carsPage();
+  else if (_page === 'tracks') tracksPage();
+  else if (_page === 'servers') serversPage();
+}
+
 function ingestToast(r) {
   if (r && r.cancelled) return;
   if (r && r.need_confirm) return;
@@ -2626,10 +2691,12 @@ function ingestToast(r) {
     toast(r.warning
       ? `Installed ${r.display_name || r.folder} — ${r.warning}`
       : `Installed track ${r.display_name || r.folder}`, !!r.warning);
+    refreshOpenPage();
     return;
   }
   const n = (r.installed || []).length;
   toast(r.warning || `Installed ${n} file(s) on client and server`, !!r.warning);
+  refreshOpenPage();
 }
 
 function bindDropAnywhere() {

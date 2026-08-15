@@ -54,4 +54,4 @@ python build.py            # -> dist/ACECM.exe
 python -m acecm            # run from this checkout
 ```
 
-Tag must match `VERSION` in `acecm/version.py` (`git tag v0.7.6 && git push origin v0.7.6`).
+Tag must match `VERSION` in `acecm/version.py` (`git tag v0.7.7 && git push origin v0.7.7`).

@@ -153,9 +153,51 @@ def working_set(pid):
 def kill(pid):
     import subprocess
     subprocess.run(
-        ["taskkill", "/PID", str(int(pid)), "/F"],
+        ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
         capture_output=True, timeout=20,
         creationflags=CREATE_NO_WINDOW)
+
+
+def kill_named(*names):
+    """Force-kill every process whose exe matches, plus its children.
+
+    /T is required: Steam starts a wrapper, and killing only the parent
+    leaf leaves AssettoCorsaEVO.exe on screen.
+    """
+    import subprocess
+    out = []
+    for name in names:
+        n = _norm(name)
+        r = subprocess.run(
+            ["taskkill", "/IM", n, "/T", "/F"],
+            capture_output=True, timeout=20,
+            creationflags=CREATE_NO_WINDOW)
+        out.append((n, r.returncode))
+    return out
+
+
+def pids_named_prefix(*prefixes):
+    """PIDs whose exe name starts with any of `prefixes` (case-insensitive)."""
+    want = [p.lower() if p.lower().endswith(".exe") else p.lower()
+            for p in prefixes]
+    snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap == wintypes.HANDLE(-1).value or snap == 0xFFFFFFFFFFFFFFFF:
+        return []
+    out = []
+    try:
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if not _k32.Process32FirstW(snap, ctypes.byref(pe)):
+            return []
+        while True:
+            n = pe.szExeFile.lower()
+            if any(n.startswith(p) for p in want):
+                out.append(int(pe.th32ProcessID))
+            if not _k32.Process32NextW(snap, ctypes.byref(pe)):
+                break
+    finally:
+        _k32.CloseHandle(snap)
+    return out
 
 
 def hidden_run(cmd, **kw):

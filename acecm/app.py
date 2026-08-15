@@ -219,8 +219,10 @@ class Handler(BaseHTTPRequestHandler):
                     (q.get("base") or [""])[0], (q.get("id") or [""])[0]))
             # --- pictures for the car and track lists --------------------
             if path == "/api/thumb/car":
+                # Cached PNG only. Rendering here blocked the UI and spawned
+                # evoview consoles on every Drive search keystroke.
                 return self._send_png(thumbs.render_car(
-                    (q.get("id") or [""])[0]))
+                    (q.get("id") or [""])[0], make=False))
             if path == "/api/thumb/track":
                 return self._send_png(thumbs.track_cover(
                     (q.get("folder") or [""])[0]))

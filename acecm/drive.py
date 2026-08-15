@@ -35,6 +35,7 @@ _DEFAULT = {
     "password": "",
     "car": "",
     "track_index": 18,
+    "custom_track": "",
     "game_mode": "PRACTICE",
     "weather": "CLEAR",
     "tod_hour": 13,
@@ -179,12 +180,19 @@ def _apply_mode_fields(obj, pick, mode):
 
 
 def _event(pick):
-    idx = int(pick.get("track_index") or 0)
     tracks = []
     try:
         tracks = content.tracks().get("tracks") or []
     except Exception:
         pass
+    name = (pick.get("custom_track") or "").strip()
+    if name:
+        hit = next((t for t in tracks
+                    if (t.get("custom_track") or t.get("track") or "") == name),
+                   None)
+        if hit:
+            return hit
+    idx = int(pick.get("track_index") or 0)
     return next((t for t in tracks if t.get("index") == idx), None)
 
 
@@ -1015,6 +1023,9 @@ def start(body=None):
         "track_index": int(body.get("track_index")
                            if body.get("track_index") is not None
                            else prev["track_index"]),
+        "custom_track": (body.get("custom_track")
+                         if "custom_track" in body
+                         else prev.get("custom_track") or "").strip(),
         "game_mode": (body.get("game_mode") or "PRACTICE").strip().upper(),
         "weather": (body.get("weather") or "CLEAR").strip().upper(),
         "tod_hour": int(body.get("tod_hour")
@@ -1105,26 +1116,55 @@ def start(body=None):
             "hint": "writing the session, launching, then pressing Start"}
 
 
+def _game_still_up():
+    """Process table OR the window — inspector dying is not the game exiting."""
+    if backend._game_running():
+        return True
+    try:
+        return bool(gameui.window_open())
+    except Exception:
+        return False
+
+
 def _close_game():
-    """Ask the menu to quit, then force-kill if it hangs."""
+    """Ask the menu to quit, close the window, then force-kill the tree.
+
+    QuitGame from the multiplayer page often only returns 'quit' and leaves
+    the window up (or a confirm dialog). The inspector can also be dead
+    after a hung refresh, so JS is not enough — WM_CLOSE then taskkill /T.
+    """
+    from . import winproc
     try:
         logs.LOG.info("drive quit: %s", gameui.quit_game())
     except Exception as ex:
         logs.LOG.warning("drive quit js: %s", ex)
-    deadline = time.time() + 8
+    try:
+        if gameui.close_window():
+            logs.LOG.info("drive quit: posted WM_CLOSE")
+    except Exception as ex:
+        logs.LOG.warning("drive quit wm_close: %s", ex)
+    deadline = time.time() + 5
     while time.time() < deadline:
-        if not backend._game_running():
+        if not _game_still_up():
             return True
-        time.sleep(0.35)
-    from . import winproc
-    for pid in winproc.pids_named("AssettoCorsaEVO"):
+        time.sleep(0.3)
+    try:
+        logs.LOG.info("drive quit: taskkill %s",
+                      winproc.kill_named("AssettoCorsaEVO.exe"))
+    except Exception as ex:
+        logs.LOG.warning("drive quit taskkill: %s", ex)
+    for pid in (winproc.pids_named("AssettoCorsaEVO")
+                + winproc.pids_named_prefix("assettocorsaevo")):
         try:
             winproc.kill(pid)
             logs.LOG.info("drive killed leftover EVO pid %s", pid)
         except Exception as ex:
             logs.LOG.warning("drive kill %s: %s", pid, ex)
-    time.sleep(0.4)
-    return not backend._game_running()
+    time.sleep(0.5)
+    up = _game_still_up()
+    if up:
+        logs.LOG.warning("drive quit: game still running after force-kill")
+    return not up
 
 
 def _fresh_list(since):
