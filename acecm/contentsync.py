@@ -432,17 +432,33 @@ def plan(base, server_id):
 
     need, have = [], []
     for f in man.get("files", []):
-        dest = destination(f["path"])
+        try:
+            dest = destination(f["path"])
+            url = _registry_file_url(base, server_id, f["path"])
+        except ValueError:
+            continue
         if os.path.isfile(dest) and os.path.getsize(dest) == f.get("size") \
                 and (not f.get("sha256")
                      or registry.file_digest(dest) == f["sha256"]):
             have.append(f["path"])
         else:
-            need.append({**f, "dest": dest})
+            need.append({**f, "dest": dest, "url": url})
     return {"ok": True, "server": man.get("server", {}),
             "need": need, "have": len(have),
             "bytes": sum(f.get("size", 0) for f in need),
             "missing_on_host": man.get("missing_locally") or []}
+
+
+def _under(root, *parts):
+    """Absolute path inside root, or ValueError if it would escape."""
+    root = os.path.abspath(root)
+    dest = os.path.abspath(os.path.join(root, *parts))
+    try:
+        if os.path.commonpath([root, dest]) != root:
+            raise ValueError("path escapes content folder")
+    except ValueError:
+        raise ValueError("path escapes content folder")
+    return dest
 
 
 def destination(rel):
@@ -452,12 +468,31 @@ def destination(rel):
     content, and a track landing anywhere but the game's tracks folder is
     invisible to it.
     """
-    rel = rel.replace("\\", "/")
-    if rel.startswith("mods/"):
-        return os.path.join(install.client_mods_dir(), os.path.basename(rel))
-    if rel.startswith("tracks/"):
-        return os.path.join(tracks_dir(), *rel[len("tracks/"):].split("/"))
-    return os.path.join(tracks_dir(), os.path.basename(rel))
+    rel = (rel or "").replace("\\", "/").lstrip("/")
+    parts = [p for p in rel.split("/") if p and p != "."]
+    if not parts or ".." in parts:
+        raise ValueError("bad content path")
+    if parts[0] == "mods":
+        if len(parts) != 2:
+            raise ValueError("bad mod path")
+        return _under(install.client_mods_dir(), parts[1])
+    if parts[0] == "tracks":
+        if len(parts) < 2:
+            raise ValueError("bad track path")
+        return _under(tracks_dir(), *parts[1:])
+    return _under(tracks_dir(), parts[-1])
+
+
+def _registry_file_url(base, server_id, rel):
+    """Only fetch share files from the ACECM we already discovered."""
+    u = urllib.parse.urlparse(base or "")
+    if u.scheme not in ("http", "https") or not u.netloc or u.username:
+        raise ValueError("bad content host")
+    host = (u.hostname or "").lower()
+    if host in ("", "0.0.0.0", "[::]"):
+        raise ValueError("bad content host")
+    q = urllib.parse.urlencode({"id": server_id, "path": rel})
+    return f"{u.scheme}://{u.netloc}/api/registry/file?{q}"
 
 
 def _entry_sid(entry):
@@ -475,9 +510,15 @@ def _entry_base(entry):
 def fetch_track_pack(base, sid, folder, files, progress=None):
     """Pull one tar and unpack it. Falls back to the caller on 404."""
     import tarfile
-    url = f"{base}/api/registry/pack?id={urllib.parse.quote(sid)}" \
+    folder = (folder or "").replace("\\", "/").strip("/")
+    if not folder or "/" in folder or folder in (".", ".."):
+        raise ValueError("bad track folder")
+    u = urllib.parse.urlparse(base or "")
+    if u.scheme not in ("http", "https") or not u.netloc or u.username:
+        raise ValueError("bad content host")
+    url = f"{u.scheme}://{u.netloc}/api/registry/pack?id={urllib.parse.quote(sid)}" \
           f"&track={urllib.parse.quote(folder)}"
-    dest_dir = os.path.join(tracks_dir(), folder)
+    dest_dir = _under(tracks_dir(), folder)
     os.makedirs(dest_dir, exist_ok=True)
     tmp = dest_dir.rstrip("\\/") + ".tar.part"
     done = 0
@@ -629,11 +670,15 @@ def fetch(entry, progress=None):
     missing-content rejection or a crash on load.
     """
     dest = entry.get("dest") or destination(entry["path"])
+    dest = os.path.abspath(dest)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     tmp = dest + ".part"
     size = entry.get("size") or 0
     done = 0
-    req = urllib.request.Request(entry["url"], headers={"User-Agent": "ACECM"})
+    url = entry.get("url") or ""
+    if "/api/registry/file" not in url:
+        raise ValueError("refusing a content URL that is not this host's share")
+    req = urllib.request.Request(url, headers={"User-Agent": "ACECM"})
     with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as fh:
         while True:
             chunk = r.read(1 << 20)

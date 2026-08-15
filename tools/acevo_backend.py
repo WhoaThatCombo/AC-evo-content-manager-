@@ -256,7 +256,11 @@ def fill_entry(entry, peer=None):
     except Exception as ex:
         print(f"  (could not fill players: {ex})")
     setif("max_players", int(lb.get("max_players") or 90))
-    setif("current_session", "Practice")
+    mode = (lb.get("game_mode") or "PRACTICE").replace("GameModeType_", "")
+    pretty = mode.replace("_", " ").title()
+    if pretty == "Practice":
+        pretty = "Practice"
+    setif("current_session", pretty)
     setif("time_of_day", lb.get("time_of_day") or TIME_OF_DAY)
     setif("is_car_eligible", True)
 
@@ -420,7 +424,8 @@ async def main():
     print(f"loaded {len(ap.loaded)} descriptors")
     lb = _lobby()
     lan = _lan_ip()
-    print(f"listening on wss://0.0.0.0:{PORT}/  (any path)")
+    listen = (os.environ.get("BACKEND_LISTEN") or "127.0.0.1").strip() or "127.0.0.1"
+    print(f"listening on wss://{listen}:{PORT}/  (any path)")
     print(f"lobby.json: {LOBBY_JSON or '(none)'}")
     print(f"advertising {lb.get('server_name') or SERVER_NAME}  "
           f"track={lb.get('track') or '?'}  cars={len(lb.get('cars') or [])}")
@@ -428,7 +433,7 @@ async def main():
           f"lan {lan or '(none)'}")
     print("launch the game with:")
     print(f"  -backend=wss://127.0.0.1:{PORT}/communicationNode/dev\n")
-    async with websockets.serve(handle, "0.0.0.0", PORT, ssl=ctx,
+    async with websockets.serve(handle, listen, PORT, ssl=ctx,
                                 max_size=None, ping_interval=None):
         await asyncio.Future()
 

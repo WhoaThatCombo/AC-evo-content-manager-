@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.7.1"
+VERSION = "0.7.6"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -405,13 +405,18 @@ def apply(url=None, sha256=None):
         return {"ok": False,
                 "error": "running from source - update with git, not this"}
     info = check()
-    sha256 = sha256 or info.get("sha256")
+    # Ignore caller url/sha256. Those used to come from the POST body, so
+    # anyone who could reach the API could feed a binary of their own.
+    sha256 = info.get("sha256") or ""
     urls = []
-    for u in (url, info.get("url"), info.get("browser_url")):
+    for u in (info.get("url"), info.get("browser_url")):
         if u and u not in urls:
             urls.append(u)
     if not urls:
         return {"ok": False, "error": "no download url"}
+    if not sha256 or len(str(sha256)) != 64:
+        return {"ok": False,
+                "error": "that release has no checksum — refusing to install"}
 
     exe = sys.executable
     # ⚠ Do not write ACECM.exe.new next to the running exe. A previous

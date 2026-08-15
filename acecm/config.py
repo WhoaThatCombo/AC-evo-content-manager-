@@ -71,6 +71,9 @@ DEFAULTS = {
     "listen": "0.0.0.0",
     "telemetry_port": 8091,
     "backend_port": 448,
+    # Lobby TLS. 127.0.0.1 is the game on this PC. 0.0.0.0 would put a
+    # Kunos session MITM on the LAN — only set that if you know you need it.
+    "backend_listen": "127.0.0.1",
     # Start the lobby proxy with ACECM and kill it when the window closes.
     # Dedicated servers are separate and are not touched.
     "auto_proxy": True,
@@ -110,11 +113,26 @@ CFG = _load()
 def save(patch):
     """Persist a settings change (only keys we know about)."""
     cfg = _load()
-    cfg.update({k: v for k, v in patch.items() if k in DEFAULTS})
+    for k, v in (patch or {}).items():
+        if k not in DEFAULTS:
+            continue
+        # Empty token from the form means "leave the stored one".
+        if k == "update_token" and not str(v or "").strip():
+            continue
+        cfg[k] = v
     path = config_path()
     json.dump(cfg, open(path, "w", encoding="utf-8"), indent=2)
     CFG.update(cfg)
-    return cfg
+    return public_cfg()
+
+
+def public_cfg():
+    """Settings for the UI. Never echo the GitHub token."""
+    out = dict(CFG)
+    tok = str(out.get("update_token") or "").strip()
+    out["update_token"] = ""
+    out["update_token_set"] = bool(tok)
+    return out
 
 
 def find_server_dir():
@@ -140,6 +158,23 @@ def server_dir():
     if found:
         save({"server_dir": found})
     return found
+
+
+def catalog_path(name):
+    """cars.json / events_*.json: the server folder, else the bundled copy.
+
+    A stock Steam dedicated server does not ship those catalogues. Older
+    ACECM required the portable extras next to the exe, which a fresh
+    install does not have. The copies in tools/ are the stock lists.
+    """
+    n = os.path.basename(name)
+    for base in (server_dir(), BUNDLED_TOOLS):
+        if not base:
+            continue
+        p = os.path.join(base, n)
+        if os.path.isfile(p):
+            return p
+    return ""
 
 
 def server_exe():
@@ -183,18 +218,41 @@ def tool_cmd(name, args):
     """
     if FROZEN:
         return [sys.executable, "--tool", name] + list(args)
-    return [sys.executable, "-u", tool_script(name + ".py")] + list(args)
+    exe = sys.executable
+    # pythonw cannot be the parent of AssettoCorsaEVOServer.exe: the
+    # launcher returns and the server dies with it, so 9700 never stays
+    # open. python.exe + CREATE_NO_WINDOW (hidden_popen) is the same
+    # on every machine that started ACECM via pythonw / run.bat.
+    if name == "start_vai_server" and exe.lower().endswith("pythonw.exe"):
+        cand = exe[:-5] + ".exe"  # pythonw.exe -> python.exe
+        if os.path.isfile(cand):
+            exe = cand
+    return [exe, "-u", tool_script(name + ".py")] + list(args)
+
+
+# Scripts this build owns. A leftover copy next to the dedicated server
+# used to win, so a fix in ACECM never ran on machines that already had
+# an older start_vai_server.py in the server folder.
+_OWNED_TOOLS = (
+    "start_vai_server.py",
+    "acevo_proxy.py",
+    "acevo_backend.py",
+    "server_telemetry.py",
+)
 
 
 def tool_script(name):
     """Absolute path to one of our scripts, wherever it actually lives.
 
-    Prefer a copy in the user's server folder (they may have edited it), fall
-    back to the copy shipped inside the build. Without this a frozen exe looks
-    for `server_telemetry.py` next to a server install that has never seen it.
+    ACECM-owned launchers always use the copy shipped with this build, so
+    every machine gets the same start/hide/bind behaviour. Other helpers
+    still prefer a file next to the dedicated server (parse_spline etc.).
     """
-    for base in (server_dir(), BUNDLED_TOOLS,
-                 os.path.join(BUNDLED_TOOLS, "backend"), tools_dir()):
+    ours = [BUNDLED_TOOLS, os.path.join(BUNDLED_TOOLS, "backend"),
+            tools_dir()]
+    if name not in _OWNED_TOOLS:
+        ours.insert(0, server_dir())
+    for base in ours:
         if not base:
             continue
         p = os.path.join(base, name)

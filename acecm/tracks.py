@@ -479,8 +479,32 @@ def deploy_native(pkg_dir, dry_run=False, folder=None, display_name=None):
     except Exception as ex:
         logs.LOG.warning("could not publish %s for download: %s", folder, ex)
 
+    # Loose AI lines. The archive cannot see a brand-new .aisplinedata
+    # path, but the VFS will load one from disk. Barber already has both
+    # files in its import folder; copy them next to the server.
+    shipped = None
+    try:
+        from . import splines
+        src_layouts = os.path.join(pkg_dir, "layouts")
+        if os.path.isdir(src_layouts):
+            n = 0
+            for f in os.listdir(src_layouts):
+                if not f.endswith(".aisplinedata"):
+                    continue
+                dest = splines.dest_path(folder, f)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(os.path.join(src_layouts, f), dest)
+                n += 1
+            shipped = {"copied": n, "from": src_layouts}
+        else:
+            shipped = splines.ship(folder)
+    except Exception as ex:
+        logs.LOG.warning("deploy spline copy %s: %s", folder, ex)
+        shipped = {"ok": False, "error": str(ex)}
+
     return {**plan, "seconds": round(time.time() - t0, 1),
-            "written": res, "verified": check, "published": published, **bak}
+            "written": res, "verified": check, "published": published,
+            "splines": shipped, **bak}
 
 
 def _client_name(folder):

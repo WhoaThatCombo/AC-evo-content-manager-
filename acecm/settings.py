@@ -112,11 +112,29 @@ def discover():
             "decodable": sum(1 for f in order if f["decodable"])}
 
 
+def _safe_settings_path(rel):
+    """A file under Saved Games\\ACE, or None if the path walks out."""
+    rel = (rel or "").replace("\\", "/").lstrip("/")
+    parts = [p for p in rel.split("/") if p and p != "."]
+    if not parts or ".." in parts:
+        return None
+    root = os.path.abspath(settings_dir() or "")
+    if not root:
+        return None
+    path = os.path.abspath(os.path.join(root, *parts))
+    try:
+        if os.path.commonpath([root, path]) != root:
+            return None
+    except ValueError:
+        return None
+    return path
+
+
 def read(rel):
     """Decode one settings file to plain JSON."""
     from google.protobuf import json_format
-    path = os.path.join(settings_dir(), rel.replace("/", os.sep))
-    if not os.path.isfile(path):
+    path = _safe_settings_path(rel)
+    if not path or not os.path.isfile(path):
         return {"ok": False, "error": "not found"}
     msg_name = message_for(path)
     ap = _proto()
@@ -145,7 +163,9 @@ def read(rel):
 def write(rel, values):
     """Encode JSON back into the settings file, with a backup."""
     from google.protobuf import json_format
-    path = os.path.join(settings_dir(), rel.replace("/", os.sep))
+    path = _safe_settings_path(rel)
+    if not path:
+        return {"ok": False, "error": "bad settings path"}
     msg_name = message_for(path)
     ap = _proto()
     if not msg_name or not ap.has(msg_name):
@@ -256,7 +276,9 @@ def import_bundle(bundle, only=None, include_devices=False):
 
 def backups(rel):
     """Every timestamped copy we have taken of one settings file."""
-    path = os.path.join(settings_dir(), rel.replace("/", os.sep))
+    path = _safe_settings_path(rel)
+    if not path:
+        return {"ok": False, "file": rel, "backups": []}
     d, base = os.path.dirname(path), os.path.basename(path)
     out = []
     if os.path.isdir(d):
@@ -270,7 +292,9 @@ def backups(rel):
 
 def restore_backup(rel, name):
     """Put a specific timestamped backup back."""
-    path = os.path.join(settings_dir(), rel.replace("/", os.sep))
+    path = _safe_settings_path(rel)
+    if not path:
+        return {"ok": False, "error": "bad settings path"}
     src = os.path.join(os.path.dirname(path), os.path.basename(name))
     if not os.path.isfile(src):
         return {"ok": False, "error": "no such backup"}
@@ -284,7 +308,9 @@ def restore_backup(rel, name):
 
 
 def restore(rel):
-    path = os.path.join(settings_dir(), rel.replace("/", os.sep))
+    path = _safe_settings_path(rel)
+    if not path:
+        return {"ok": False, "error": "bad settings path"}
     bak = f"{path}.bak_acecm"
     if not os.path.isfile(bak):
         return {"ok": False, "error": "no ACECM backup for this file"}

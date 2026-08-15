@@ -29,6 +29,7 @@ AGGRO = ("Safe", "Normal", "Competitive")
 _DEFAULT = {
     "via": "sp",
     "server_id": "",
+    "local_id": "",
     "server_ip": "",
     "server_tcp_port": 0,
     "password": "",
@@ -364,6 +365,197 @@ def _car_allowed(sv, car_id):
     return any(a and a in blob or blob.find(a) >= 0 for a in allow)
 
 
+def _local_briefs():
+    """ACECM profiles as Drive can start / join them."""
+    from . import lobby
+    out = []
+    for p in servers.load():
+        st = servers.status(p)
+        try:
+            ev = lobby._event(p)
+        except Exception:
+            ev = {}
+        cars = []
+        try:
+            cars = servers.allowed_car_ids(p)
+        except Exception:
+            cars = []
+        out.append({
+            "id": p.get("id"),
+            "name": p.get("name") or "(unnamed)",
+            "running": bool(st.get("running")),
+            "clients": st.get("clients"),
+            "track": ev.get("track") or p.get("custom_track") or "",
+            "layout": ev.get("layout") or "",
+            "custom_track": (p.get("custom_track") or "").strip(),
+            "tcp_port": int(p.get("tcp_port") or 9700),
+            "udp_port": int(p.get("tcp_port") or 9700),
+            "http_port": int(p.get("http_port") or 8080),
+            "max_players": int(p.get("max_players") or 90),
+            "cars": cars,
+            "no_lobby": bool(p.get("no_lobby")),
+            "listed": not bool(p.get("no_lobby")),
+            "locked": bool(p.get("driver_password")),
+            "game_mode": p.get("game_mode") or "PRACTICE",
+        })
+    return out
+
+
+def _find_local(pick):
+    lid = (pick.get("local_id") or pick.get("server_id") or "").strip()
+    if not lid:
+        return None
+    return next((p for p in servers.load() if p.get("id") == lid), None)
+
+
+def publish_local(profile_id):
+    """Make this profile list in the in-game browser with truthful ads.
+
+    Starts the lobby proxy, writes lobby.json from the profile (custom
+    track + cars + name), and turns off Private if it was on. Does not
+    start the dedicated server — Join does that.
+    """
+    from . import lobby
+    prof = next((p for p in servers.load() if p.get("id") == profile_id), None)
+    if not prof:
+        return {"ok": False, "error": "no such server profile"}
+    changed = False
+    if prof.get("no_lobby"):
+        prof["no_lobby"] = False
+        servers.upsert(prof)
+        changed = True
+    ad = lobby.write(prof)
+    be = _ensure_backend()
+    st = backend.state()
+    return {
+        "ok": bool(st.get("listening") or (be and be.get("ok"))),
+        "listed": True,
+        "cleared_private": changed,
+        "ad": {
+            "name": ad.get("server_name"),
+            "track": ad.get("track"),
+            "layout": ad.get("layout"),
+            "tcp_port": ad.get("tcp_port"),
+            "cars": ad.get("cars") or [],
+            "lan_ip": ad.get("lan_ip"),
+        },
+        "backend": bool(st.get("listening")),
+        "hint": ("Open Multiplayer in-game — the row is tagged [ACECM]. "
+                 "Friends on the LAN see the same name at your LAN IP."),
+    }
+
+
+def _port_open(port, host="127.0.0.1"):
+    import socket
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return False
+    s = socket.socket()
+    s.settimeout(0.4)
+    try:
+        return s.connect_ex((host, port)) == 0
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _wait_server(prof, seconds=50):
+    """HTTP answering is not enough — join uses TCP 9700."""
+    tcp = int(prof.get("tcp_port") or 9700)
+    until = time.time() + seconds
+    last = {}
+    while time.time() < until:
+        last = servers.status(prof)
+        last["tcp_open"] = _port_open(tcp)
+        if last.get("tcp_open"):
+            return last
+        time.sleep(0.8)
+    last["tcp_open"] = _port_open(tcp)
+    return last
+
+
+def _run_local(pick):
+    from . import lobby
+    prof = _find_local(pick)
+    if not prof:
+        _set(phase="failed", fault="pick one of your ACECM servers first")
+        return
+    if not _car_allowed(
+            {"cars": servers.allowed_car_ids(prof)}, pick.get("car")):
+        _set(phase="failed",
+             fault="that car is not on this server's allowed list")
+        return
+    if prof.get("no_lobby"):
+        prof["no_lobby"] = False
+        servers.upsert(prof)
+    _set(phase="starting_backend", hint="starting the lobby so it lists")
+    _ensure_backend()
+    lobby.write(prof)
+    st = servers.status(prof)
+    if not st.get("running"):
+        _set(phase="starting_server",
+             hint="starting " + (prof.get("name") or "the server"))
+        started = servers.start(prof)
+        if not started.get("ok"):
+            _set(phase="failed",
+                 fault=started.get("error") or "could not start the server")
+            return
+        _set(phase="starting_server", hint="waiting for the dedicated server")
+        st = _wait_server(prof)
+        if not st.get("tcp_open"):
+            _set(phase="failed",
+                 fault="the dedicated server process started but never "
+                       "opened TCP " + str(prof.get("tcp_port") or 9700)
+                       + " — Join would fail with 'socket did not respond'. "
+                       "Stop the server and start it again from Servers; "
+                       "check Logs if it dies on season/track load")
+            return
+    else:
+        st = _wait_server(prof, seconds=12)
+        if not st.get("tcp_open"):
+            _set(phase="failed",
+                 fault="ACECM thinks that server is running, but nothing "
+                       "is listening on 127.0.0.1:"
+                       + str(prof.get("tcp_port") or 9700)
+                       + " — Stop it and Start & Join again")
+            return
+    lobby.write(prof)
+    try:
+        lobby.refresh()
+    except Exception:
+        pass
+    sv = {
+        "server_id": prof.get("id") or "",
+        "server_name": prof.get("name") or "ACECM",
+        "server_ip": "127.0.0.1",
+        "server_tcp_port": int(prof.get("tcp_port") or 9700),
+        "server_udp_port": int(prof.get("tcp_port") or 9700),
+        "cars": servers.allowed_car_ids(prof),
+    }
+    if not backend._game_running():
+        _set(phase="launching_game", hint="launching the game")
+        launched = backend.launch_game(extra_args=["-no_intro"])
+        _JOB["launch"] = {k: launched.get(k)
+                          for k in ("ok", "error", "via", "backend",
+                                    "inspector_patched", "needs_admin")
+                          if k in launched}
+        if not launched.get("ok"):
+            _set(phase="failed",
+                 fault=launched.get("error") or "could not launch")
+            return
+    poked = _enter_and_join(pick, sv)
+    _JOB["join"] = {k: poked.get(k) for k in
+                    ("ok", "error", "note", "connected") if k in poked}
+    if not poked.get("ok"):
+        _set(phase="failed",
+             fault=poked.get("error") or "could not join the local server")
+        return
+    _set(phase="launched",
+         hint=poked.get("note") or "joining your server — pit menu next")
+
+
 def _find_public(pick):
     sid = (pick.get("server_id") or "").strip()
     ip = (pick.get("server_ip") or "").strip()
@@ -382,8 +574,28 @@ def _find_public(pick):
     return None
 
 
+def _wait_page(want, seconds=20):
+    """Wait until boot_state is this page (sp / mp / home). No extra goTo."""
+    until = time.time() + seconds
+    last = ""
+    while time.time() < until:
+        if not backend._game_running():
+            return ""
+        boot = gameui.boot_state()
+        if boot and boot != last:
+            logs.LOG.info("drive boot %s", boot)
+            last = boot
+        page = gameui.boot_page(boot)
+        if page == want and not gameui.paintshop_up(boot):
+            return boot
+        if gameui.session_loading(boot) or gameui.in_pits(boot):
+            return boot
+        time.sleep(0.3)
+    return last
+
+
 def _enter_and_join(pick, sv):
-    """Home screen, set an allowed car, then go_to_server."""
+    """Home screen, set an allowed car, then Connect once on the list."""
     deadline = time.time() + 90
     _set(phase="waiting_for_menu", hint="waiting for the menu")
     state = _wait_ready(deadline)
@@ -392,7 +604,7 @@ def _enter_and_join(pick, sv):
     if state == "live":
         return {"ok": True, "started": "already"}
     if state != "ready":
-        return {"ok": False, "error": "the menu never became ready"}
+        return {"ok": False, "error": _menu_not_ready_error("join")}
     model = _car_model(pick.get("car"))
     have = gameui.current_car_name()
     if model and have != model:
@@ -415,10 +627,15 @@ def _enter_and_join(pick, sv):
               + (sv.get("server_name") or host))
     gameui.focus_game()
     try:
-        went = gameui.enter_multiplayer(host, tcp, pw)
+        went = gameui.enter_multiplayer()
         logs.LOG.info("drive ui multiplayer: %s", went)
     except OSError as ex:
         logs.LOG.warning("drive multiplayer goto lost: %s", ex)
+    on = _wait_page("mp", 20)
+    if gameui.boot_page(on) != "mp" and not gameui.session_loading(on):
+        return {"ok": False,
+                "error": "Multiplayer never stayed open (last "
+                         + (on or "-") + ")"}
     # Let the page fetch the list once. Do not refresh it — overlapping
     # ServerList replies while connecting crash the physics thread.
     time.sleep(2.5)
@@ -489,7 +706,9 @@ def _run_server(pick):
         _set(phase="launching_game", hint="launching the game")
         launched = backend.launch_game(extra_args=["-no_intro"])
         _JOB["launch"] = {k: launched.get(k)
-                          for k in ("ok", "error", "via", "backend")}
+                          for k in ("ok", "error", "via", "backend",
+                                    "inspector_patched", "needs_admin")
+                          if k in launched}
         if not launched.get("ok"):
             _set(phase="failed",
                  fault=launched.get("error") or "could not launch")
@@ -509,6 +728,9 @@ def _run(pick):
     try:
         if (pick.get("via") or "sp") == "server":
             _run_server(pick)
+            return
+        if (pick.get("via") or "") == "local":
+            _run_local(pick)
             return
         _stop_leftover_server()
         if backend._game_running():
@@ -544,7 +766,9 @@ def _run(pick):
              hint=f"launching {wrote['mode']} at {wrote['track']}")
         launched = backend.launch_game(extra_args=extra)
         _JOB["launch"] = {k: launched.get(k)
-                          for k in ("ok", "error", "via", "backend")}
+                          for k in ("ok", "error", "via", "backend",
+                                    "inspector_patched", "needs_admin")
+                          if k in launched}
         if not launched.get("ok"):
             _set(phase="failed",
                  fault=launched.get("error") or "could not launch")
@@ -628,6 +852,20 @@ def _session_live(txt=None):
     return "Game Started!" in (txt if txt is not None else _this_boot_log())
 
 
+def _menu_not_ready_error(action="Start"):
+    """Friend-facing reason the home screen never became Driveable."""
+    if not gameui.listening():
+        return (
+            "the game launched but its menu inspector never came up on :"
+            + str(gameui.PORT)
+            + ". Drive cannot press " + action + " without it. Close EVO, "
+            "then Drive again — ACECM will enable the inspector. If that "
+            "write is refused, run ACECM as administrator once"
+        )
+    return ("the menu never became ready — open the game and press "
+            + action + " once")
+
+
 def _wait_ready(deadline):
     """Last live gate: menu.html + CurrentCar (or already on SP / pits).
 
@@ -665,8 +903,13 @@ def _wait_ready(deadline):
 
 
 def _enter_and_start(pick=None):
-    """Same path that worked at 17:58: set car, go to Single Player,
-    GAMEMODESELECTION.start(). Steam drops startup_gamemode."""
+    """Set car / conditions once, open SP once, press Start once.
+
+    The old loop called goTo + Start again whenever the session had not
+    begun. The game answers a Start from home (or during paintshop) with
+    `goto menu.html main/main`, so that retry is exactly the bounce both
+    machines were seeing.
+    """
     deadline = time.time() + 90
     _set(phase="waiting_for_menu", hint="waiting for the menu")
     state = _wait_ready(deadline)
@@ -677,91 +920,75 @@ def _enter_and_start(pick=None):
         gameui.focus_game()
         return {"ok": True, "started": "already"}
     if state != "ready":
-        return {"ok": False,
-                "error": "the menu never became ready — open Single Player "
-                         "and press Start once"}
+        return {"ok": False, "error": _menu_not_ready_error("Start")}
     pick = pick or {}
     model = _car_model(pick.get("car"))
-    last_err = None
-    while time.time() < deadline:
+    if not backend._game_running():
+        return {"ok": False, "error": "the game closed before Start"}
+    if _session_live():
+        gameui.focus_game()
+        return {"ok": True, "started": "already"}
+    gameui.focus_game()
+    have = gameui.current_car_name()
+    if model and have != model:
+        _set(phase="selecting_car", hint="setting " + model)
+        try:
+            chosen = gameui.select_car(model, pick.get("car") or "")
+        except OSError as ex:
+            return {"ok": False, "error": "could not set car: " + str(ex)}
+        logs.LOG.info("drive set car: %s", chosen)
+    elif model:
+        logs.LOG.info("drive car already %s", have)
+    _set(phase="starting_session", hint="setting weather, time and mode")
+    try:
+        cond = gameui.apply_conditions(pick)
+        logs.LOG.info("drive conditions: %s", cond)
+    except OSError as ex:
+        return {"ok": False, "error": "could not set conditions: " + str(ex)}
+    _set(phase="starting_session", hint="opening Single Player")
+    try:
+        went = gameui.enter_singleplayer()
+        logs.LOG.info("drive ui goto: %s", went)
+    except OSError as ex:
+        return {"ok": False, "error": "could not open Single Player: " + str(ex)}
+    on = _wait_page("sp", 20)
+    if gameui.boot_page(on) != "sp":
+        return {"ok": False,
+                "error": "Single Player never stayed open — the game "
+                         "kept returning to the home menu (last "
+                         + (on or "-") + ")"}
+    _set(phase="starting_session", hint="starting the session")
+    try:
+        started = gameui.press_start()
+    except OSError as ex:
+        return {"ok": False, "error": "Start failed: " + str(ex)}
+    logs.LOG.info("drive ui start: %s", started)
+    gameui.focus_game()
+    val = str((started or {}).get("value") or "")
+    if not (started and started.get("ok")):
+        return {"ok": False, "error": "Start failed: "
+                + str((started or {}).get("error") or "no reply")}
+    if val.startswith("fail:") or val.startswith("no-") or val in (
+            "not-on-sp", "paintshop"):
+        return {"ok": False, "error": "Start failed: " + val}
+    until = time.time() + 25
+    last_boot = on
+    while time.time() < until:
         if not backend._game_running():
-            return {"ok": False, "error": "the game closed before Start"}
-        if _session_live():
+            return {"ok": False, "error": "the game closed after Start"}
+        boot = gameui.boot_state()
+        if boot and boot != last_boot:
+            logs.LOG.info("drive boot %s", boot)
+            last_boot = boot
+        if (gameui.session_loading(boot) or gameui.in_pits(boot)
+                or _session_live()):
+            logs.LOG.info("drive session loading (%s)", boot)
             gameui.focus_game()
-            return {"ok": True, "started": "already"}
-        if not gameui.listening():
-            _set(phase="waiting_for_menu",
-                 hint="game relaunched — waiting for the menu inspector")
-            logs.LOG.info("drive inspector down; waiting for :%s", gameui.PORT)
-            time.sleep(0.4)
-            continue
-        if not gameui.ready():
-            time.sleep(0.25)
-            continue
-        here = (gameui.where() or "").lower()
-        if "ingame.html" in here:
-            gameui.focus_game()
-            return {"ok": True, "started": "already"}
-        gameui.focus_game()
-        have = gameui.current_car_name()
-        if model and have != model:
-            _set(phase="selecting_car", hint="setting " + model)
-            try:
-                chosen = gameui.select_car(model, pick.get("car") or "")
-            except OSError as ex:
-                last_err = ex
-                logs.LOG.warning("drive set-car inspector lost: %s", ex)
-                time.sleep(0.4)
-                continue
-            logs.LOG.info("drive set car: %s", chosen)
-            gameui.focus_game()
-        elif model:
-            logs.LOG.info("drive car already %s", have)
-        _set(phase="starting_session", hint="setting weather, time and mode")
-        try:
-            cond = gameui.apply_conditions(pick)
-            logs.LOG.info("drive conditions: %s", cond)
-        except OSError as ex:
-            last_err = ex
-            logs.LOG.warning("drive conditions inspector lost: %s", ex)
-            time.sleep(0.4)
-            continue
-        _set(phase="starting_session", hint="starting the session")
-        try:
-            went = gameui.enter_singleplayer()
-            logs.LOG.info("drive ui goto: %s", went)
-            time.sleep(0.4)
-            started = gameui.press_start()
-        except OSError as ex:
-            last_err = ex
-            logs.LOG.warning("drive start inspector lost: %s", ex)
-            time.sleep(0.5)
-            continue
-        logs.LOG.info("drive ui start: %s", started)
-        gameui.focus_game()
-        if not (started and started.get("ok")):
-            last_err = (started or {}).get("error")
-            time.sleep(0.5)
-            continue
-        val = str(started.get("value") or "")
-        if val.startswith("fail:") or val.startswith("no-"):
-            last_err = val
-            time.sleep(0.5)
-            continue
-        until = time.time() + 15
-        while time.time() < until:
-            boot = gameui.boot_state()
-            if (gameui.session_loading(boot) or gameui.in_pits(boot)
-                    or _session_live()):
-                logs.LOG.info("drive session loading (%s)", boot)
-                gameui.focus_game()
-                return {"ok": True, "start": started}
-            time.sleep(0.4)
-        last_err = "Start returned ok but still on the menu"
-        logs.LOG.warning("drive %s", last_err)
-        time.sleep(0.5)
+            return {"ok": True, "start": started}
+        time.sleep(0.4)
     return {"ok": False,
-            "error": "Start failed: " + str(last_err or "inspector never came back")}
+            "error": "Start was pressed once but the session never "
+                     "loaded (still " + (last_boot or "on the menu") + ")"}
 
 
 def start(body=None):
@@ -769,10 +996,11 @@ def start(body=None):
     body = body or {}
     prev = _load_pick()
     via = (body.get("via") or prev.get("via") or "sp").strip().lower()
-    if via not in ("sp", "server"):
+    if via not in ("sp", "server", "local"):
         via = "sp"
     pick = _save_pick({
         "via": via,
+        "local_id": (body.get("local_id") or prev.get("local_id") or "").strip(),
         "server_id": (body.get("server_id") or prev.get("server_id") or "").strip(),
         "server_ip": (body.get("server_ip") or prev.get("server_ip") or "").strip(),
         "server_tcp_port": int(body.get("server_tcp_port")
@@ -834,6 +1062,14 @@ def start(body=None):
         if not _car_allowed(sv, pick.get("car")):
             return {"ok": False,
                     "error": "that car is not allowed on this server"}
+    elif pick.get("via") == "local":
+        prof = _find_local(pick)
+        if not prof:
+            return {"ok": False, "error": "pick one of your ACECM servers"}
+        if not _car_allowed({"cars": servers.allowed_car_ids(prof)},
+                            pick.get("car")):
+            return {"ok": False,
+                    "error": "that car is not allowed on this server"}
     elif pick["game_mode"] not in SP_MODES:
         return {"ok": False, "error": f"{pick['game_mode']} is not a "
                                       "single-player mode"}
@@ -853,10 +1089,8 @@ def start(body=None):
                          "in Settings"}
     running = backend._game_running()
     if running and not gameui.listening():
-        return {"ok": False,
-                "error": "the game is running and its menu inspector is "
-                         "not up. Close EVO, then Drive."}
-    if pick.get("via") == "server":
+        return {"ok": False, "error": _menu_not_ready_error("Start")}
+    if pick.get("via") in ("server", "local"):
         _set(phase="entering" if running else "launching_game",
              hint="joining…" if running else "launching the game…",
              fault="", started=int(time.time()),
@@ -914,16 +1148,16 @@ def _run_capture():
                      fault=r.get("error") or "could not start the proxy")
                 return
         if backend._game_running() and not gameui.listening():
-            _set(phase="failed",
-                 fault="the game is running and its menu inspector is "
-                       "not up. Close EVO, then try again.")
+            _set(phase="failed", fault=_menu_not_ready_error("capture"))
             return
         if not backend._game_running():
             _set(phase="launching_game",
                  hint="launching the game to pull the public list")
             launched = backend.launch_game(extra_args=["-no_intro"])
             _JOB["launch"] = {k: launched.get(k)
-                              for k in ("ok", "error", "via", "backend")}
+                              for k in ("ok", "error", "via", "backend",
+                                        "inspector_patched", "needs_admin")
+                              if k in launched}
             if not launched.get("ok"):
                 _set(phase="failed",
                      fault=launched.get("error") or "could not launch")
@@ -938,7 +1172,7 @@ def _run_capture():
             if launched_us:
                 _close_game()
             _set(phase="failed",
-                 fault="the menu never became ready — open Multiplayer once")
+                 fault=_menu_not_ready_error("capture"))
             return
         _set(phase="capturing_list", hint="opening the in-game server list")
         gameui.focus_game()
@@ -1009,9 +1243,7 @@ def capture_list():
                  "capturing_list", "quitting_game"):
         return {"ok": False, "error": "Drive is already running — wait for it"}
     if backend._game_running() and not gameui.listening():
-        return {"ok": False,
-                "error": "the game is running and its menu inspector is "
-                         "not up. Close EVO, then try again."}
+        return {"ok": False, "error": _menu_not_ready_error("capture")}
     _set(phase="capturing_list", hint="preparing to pull the public list",
          fault="", started=int(time.time()), join=None, launch=None,
          wrote=None, captured=0)
@@ -1054,6 +1286,7 @@ def options():
     tracks = content.tracks()
     cars = content.cars()
     pub = _public_briefs()
+    be = backend.state()
     return {
         "ok": True,
         "pick": _load_pick(),
@@ -1068,6 +1301,11 @@ def options():
         "servers": pub["servers"],
         "servers_meta": {k: pub[k] for k in
                          ("count", "captured_at", "cached", "error", "hint")},
+        "local_servers": _local_briefs(),
+        "backend": {
+            "listening": bool(be.get("listening")),
+            "client_patched": bool(be.get("client_patched")),
+        },
     }
 
 

@@ -43,7 +43,7 @@ def _pretty(name):
 
 def cars():
     """Every car the server knows about, annotated."""
-    path = os.path.join(config.server_dir(), "cars.json")
+    path = config.catalog_path("cars.json")
     try:
         raw = json.load(open(path, encoding="utf-8"))["cars"]
     except Exception as ex:
@@ -139,7 +139,7 @@ def cars():
 
 def tracks():
     """Track/layout list, indexed exactly as the launcher's EVENT_IDX."""
-    path = os.path.join(config.server_dir(), "events_practice.json")
+    path = config.catalog_path("events_practice.json")
     try:
         evs = json.load(open(path, encoding="utf-8"))["events"]
     except Exception as ex:

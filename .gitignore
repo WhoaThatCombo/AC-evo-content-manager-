@@ -26,6 +26,7 @@ AssettoCorsaEVO.exe
 dist/
 build_tmp/
 *.spec
+ACECM.version
 __pycache__/
 *.pyc
 

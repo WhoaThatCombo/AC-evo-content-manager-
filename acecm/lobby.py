@@ -9,7 +9,7 @@ backend restart.
 import json
 import os
 
-from . import config, content, install, logs
+from . import config, content, logs
 from . import netutil
 
 # GameModeType as the client enum numbers it. PRACTICE is the only value we
@@ -44,27 +44,8 @@ def _mode_type(name):
 
 
 def _cars_for(profile):
-    chosen = [c for c in (profile.get("cars") or []) if c]
-    if chosen:
-        return chosen
-    # Same union ACECM already passes as CARS_OVERRIDE when launching:
-    # every Kunos preset plus every installed mod id. An empty list here
-    # is what greys out DRIVE.
-    try:
-        kunos = [c["id"] for c in content.cars()["cars"] if c.get("kunos")]
-    except Exception:
-        kunos = []
-    try:
-        mods = list(install.car_names())
-    except Exception:
-        mods = []
-    # preserve order, drop dupes
-    seen, out = set(), []
-    for c in kunos + mods:
-        if c and c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
+    from . import servers as srv
+    return srv.allowed_car_ids(profile)
 
 
 def _event(profile):

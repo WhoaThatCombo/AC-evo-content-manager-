@@ -48,8 +48,10 @@ def _events():
         _EVENTS = []
         for name in ("events_practice.json", "events_race_weekend.json"):
             try:
-                d = json.load(open(os.path.join(config.server_dir(), name),
-                                   encoding="utf-8"))
+                p = config.catalog_path(name)
+                if not p:
+                    continue
+                d = json.load(open(p, encoding="utf-8"))
                 _EVENTS = d.get("events") or []
                 break
             except Exception:

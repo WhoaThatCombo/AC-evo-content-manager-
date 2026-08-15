@@ -55,7 +55,13 @@ TEMPLATE = {
     "spectator_password": "",
     "admin_password": "",
     # content + extras
-    "cars": [],                   # empty = every Kunos car + installed mods
+    # extras / whitelist. Combined with allow_kunos — see allowed_car_ids().
+    "cars": [],
+    # True = every stock Kunos car is allowed, plus whatever is in cars
+    # (usually mods). False = only the ids in cars. Missing on old
+    # profiles is inferred: a list of only mods meant "add these", not
+    # "ban every Kunos car".
+    "allow_kunos": True,
     "entry_list_path": "",
     "results_path": "",
     "entry_list_url": "",
@@ -114,6 +120,93 @@ OPTIONS = {
 }
 
 
+def _looks_mod(cid, catalog=None):
+    if catalog is None:
+        try:
+            from . import content
+            catalog = content.cars().get("cars") or []
+        except Exception:
+            catalog = []
+    hit = next((c for c in catalog if c.get("id") == cid), None)
+    if hit is not None:
+        return bool(hit.get("mod"))
+    try:
+        from . import install
+        if cid in install.car_names():
+            return True
+    except Exception:
+        pass
+    return True
+
+
+def infer_allow_kunos(profile):
+    if "allow_kunos" in profile and profile.get("allow_kunos") is not None:
+        return bool(profile.get("allow_kunos"))
+    chosen = [c for c in (profile.get("cars") or []) if c]
+    if not chosen:
+        return True
+    return all(_looks_mod(c) for c in chosen)
+
+
+def allowed_car_ids(profile):
+    """What the dedicated server should actually accept.
+
+    allow_kunos + empty extras  -> every Kunos car and every installed mod
+    allow_kunos + extras        -> every Kunos car plus those extras
+    not allow_kunos + extras    -> only those extras
+    not allow_kunos + empty     -> every Kunos car (no mods)
+    """
+    from . import content, install
+    try:
+        catalog = content.cars().get("cars") or []
+    except Exception:
+        catalog = []
+    kunos = [c["id"] for c in catalog if c.get("kunos") and c.get("id")]
+    try:
+        mods_all = list(install.car_names())
+    except Exception:
+        mods_all = []
+    chosen = [c for c in (profile.get("cars") or []) if c]
+    allow_kunos = infer_allow_kunos(profile)
+    seen, out = set(), []
+
+    def add(cid):
+        if cid and cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+
+    if allow_kunos:
+        for c in kunos:
+            add(c)
+        extras = chosen if chosen else mods_all
+        for c in extras:
+            add(c)
+    else:
+        if chosen:
+            for c in chosen:
+                add(c)
+        else:
+            for c in kunos:
+                add(c)
+    return out
+
+
+def car_policy(profile):
+    allow_kunos = infer_allow_kunos(profile)
+    extras = [c for c in (profile.get("cars") or []) if c]
+    if allow_kunos and not extras:
+        kind, label = "all", "all cars"
+    elif allow_kunos:
+        kind, label = "kunos_plus", "all Kunos + " + str(len(extras))
+    elif extras:
+        kind, label = "only", str(len(extras)) + (
+            " car only" if len(extras) == 1 else " cars only")
+    else:
+        kind, label = "kunos_only", "all Kunos"
+    return {"kind": kind, "label": label, "allow_kunos": allow_kunos,
+            "extras": extras, "count": len(allowed_car_ids(profile))}
+
+
 def load():
     try:
         return json.load(open(PROFILES, encoding="utf-8"))
@@ -133,6 +226,9 @@ def upsert(profile):
     # setting - name, track, ports - back to defaults.
     current = next((p for p in items if p["id"] == profile.get("id")), {})
     profile = {**TEMPLATE, **current, **profile}
+    profile["tod_year"] = _sane_year(profile.get("tod_year", 2024))
+    profile["tod_month"] = _sane_month(profile.get("tod_month", 8))
+    profile["tod_day"] = _sane_day(profile.get("tod_day", 15))
     if not profile.get("id"):
         # ⚠ int(time.time()) collides for anything created in the same
         # second - two profiles made together got the SAME id and one
@@ -189,6 +285,31 @@ def _server_pids():
                                   "AssettoCorsaEVOServer.stock"):
         res[pid] = "AssettoCorsaEVOServer"
     return res
+
+
+def _sane_year(value):
+    """This exe aborts with 0xC0000409 if the season year is 1948 etc."""
+    try:
+        y = int(value)
+    except (TypeError, ValueError):
+        return 2024
+    return y if 2020 <= y <= 2035 else 2024
+
+
+def _sane_month(value):
+    try:
+        m = int(value)
+    except (TypeError, ValueError):
+        return 8
+    return m if 1 <= m <= 12 else 8
+
+
+def _sane_day(value):
+    try:
+        d = int(value)
+    except (TypeError, ValueError):
+        return 15
+    return d if 1 <= d <= 31 else 15
 
 
 def _custom_event(profile):
@@ -261,8 +382,16 @@ def status(profile):
     rec = runtime().get(profile.get("id") or "", {})
     pid = rec.get("pid")
     http_port = int(profile.get("http_port") or 8080)
-    if pid and _alive(pid):
+    live = _server_pids()
+    # A leftover pid in runtime.json is not enough. Windows reuses PIDs, and
+    # a dead server left "running" so My server skipped Start and Join
+    # waited on a port that would never open.
+    if pid and pid in live:
         st["running"], st["pid"] = True, pid
+    elif pid and not _alive(pid):
+        r = runtime()
+        r.pop(profile.get("id") or "", None)
+        _save_runtime(r)
     elif not _port_shared(profile):
         # Fall back to the HTTP port - but ONLY when this profile alone uses
         # it. Two profiles sharing 8080 both reported running whenever either
@@ -400,6 +529,14 @@ def start(profile):
     if bad:
         return {"ok": False, "error": bad}
 
+    # AI + telemetry need loose .aisplinedata next to the server. Stock
+    # lines come from the client archive; Barber etc. from the import.
+    try:
+        from . import splines
+        splines.ship_for_profile(profile)
+    except Exception as ex:
+        logs.LOG.warning("spline ship before start: %s", ex)
+
     tcp = profile.get("tcp_port", 9700)
     http = profile.get("http_port", 8080)
 
@@ -510,63 +647,72 @@ def start(profile):
         "WARNING_TRIGGER_COUNTDOWN":
             str(profile.get("warning_trigger_countdown", 3)),
         "TIME_PENALTY_MS": str(profile.get("time_penalty_ms", 5000)),
-        "TOD_YEAR": str(profile.get("tod_year", 2024)),
-        "TOD_MONTH": str(profile.get("tod_month", 8)),
-        "TOD_DAY": str(profile.get("tod_day", 15)),
+        "TOD_YEAR": str(_sane_year(profile.get("tod_year", 2024))),
+        "TOD_MONTH": str(_sane_month(profile.get("tod_month", 8))),
+        "TOD_DAY": str(_sane_day(profile.get("tod_day", 15))),
         "TOD_SECOND": str(profile.get("tod_second", 0)),
         "NO_LOBBY": "1" if profile.get("no_lobby") else "0",
         "WRITE_RESULTS": "1" if profile.get("write_results") else "0",
         "EXPORT_JSON": "1" if profile.get("export_json") else "0",
         "CAR_HANDICAPS": profile.get("car_handicaps", "") or "",
     })
-    if profile.get("cars"):
-        env["CARS_OVERRIDE"] = ",".join(profile["cars"])
-    else:
-        # The launcher defaults to the Kunos cars in cars.json, which does NOT
-        # contain cars shipped by installed mods - so without this an installed
-        # mod is never selectable. Pass the union explicitly.
-        try:
-            mod_ids = list(install.car_names())
-            if mod_ids:
-                kunos = [c["id"] for c in content.cars()["cars"] if c["kunos"]]
-                env["CARS_OVERRIDE"] = ",".join(kunos + mod_ids)
-        except Exception as ex:
-            print(f"car list merge skipped: {ex}")
+    ids = allowed_car_ids(profile)
+    if ids:
+        env["CARS_OVERRIDE"] = ",".join(ids)
     if profile.get("telemetry"):
         env["TELEMETRY"] = "1"
     before = set(_server_pids())
     log_path = os.path.join(config.DATA, "last_start.log")
     out = open(log_path, "w", encoding="utf-8", errors="replace")
     cmd = config.tool_cmd("start_vai_server", [])
-    proc = subprocess.Popen(cmd, env=env, cwd=config.server_dir(),
-                            stdout=out, stderr=subprocess.STDOUT)
+    from . import winproc
+    # hidden_popen is CREATE_NO_WINDOW. That is fatal for the dedicated
+    # server if it inherits this process, and the launcher must stay
+    # alive in p.wait() with a real console. hidden_console_popen
+    # allocates a hidden console instead.
+    proc = winproc.hidden_console_popen(
+        cmd, env=env, cwd=config.server_dir(),
+        stdout=out, stderr=subprocess.STDOUT)
     logs.launched(f"server {profile.get('name')!r}", cmd, proc.pid,
                   tcp=profile.get("tcp_port"), http=profile.get("http_port"),
                   track=profile.get("track_index"), ai=profile.get("ai"),
                   log=log_path, exe=resolved_exe)
-    # The launcher starts the exe and exits. A crash is also an exit, so
-    # wait just long enough to see a non-zero code. Success used to look
-    # identical to "Access Denied" in the UI, then the 45s grace lock
-    # refused every retry.
-    for _ in range(16):
+    # The launcher stays alive with the exe (p.wait). A CRT crash
+    # (0xC0000409) shows up in about 3 s, so wait long enough to see it.
+    # Success used to look identical to "Access Denied" in the UI, then
+    # the 45s grace lock refused every retry.
+    for _ in range(24):
         rc = proc.poll()
         if rc is not None:
             break
         time.sleep(0.25)
     rc = proc.poll()
+    try:
+        out.flush()
+    except OSError:
+        pass
     if rc not in (None, 0):
         _LAUNCHING.pop(tcp, None)
         _LAUNCHING.pop(http, None)
         try:
-            out.flush()
+            out.close()
+        except OSError:
+            pass
+        try:
             detail = open(log_path, encoding="utf-8",
                           errors="replace").read().strip()
         except OSError:
             detail = ""
-        logs.LOG.error("server launcher exited %s: %s", rc, detail[-400:])
+        hint = ""
+        if int(rc) in (3221226505, -1073740791):  # 0xC0000409
+            hint = (" (dedicated server CRT abort — it needs a console "
+                    "and a log file that stays open, not a hidden "
+                    "window with discarded stdout)")
+        logs.LOG.error("server launcher exited %s%s: %s", rc, hint,
+                       detail[-400:])
         return {"ok": False,
-                "error": "the server launcher died before the exe started "
-                         f"(exit {rc})",
+                "error": "the dedicated server died right after start "
+                         f"(exit {rc}){hint}",
                 "detail": detail[-800:]}
     try:
         from . import lobby
@@ -578,20 +724,25 @@ def start(profile):
         # The launcher spawns the exe, so its own pid is not the server's.
         # Watch for a NEW dedicated-server process and record it.
         import threading, time as _t
-        for _ in range(30):
-            _t.sleep(1.0)
-            new = set(_server_pids()) - before
-            if new:
-                pid = sorted(new)[0]
-                bind_pid({profile["id"]: {"pid": pid,
-                                          "started": int(_t.time()),
-                                          "http_port": profile.get("http_port")}})
-                threading.Thread(target=_watch_memory, args=(pid,),
-                                 daemon=True).start()
-                # It exists now, so the normal checks can take over.
-                _LAUNCHING.pop(profile.get("tcp_port", 9700), None)
-                _LAUNCHING.pop(profile.get("http_port", 8080), None)
-                return
+        try:
+            for _ in range(30):
+                _t.sleep(1.0)
+                new = set(_server_pids()) - before
+                if new:
+                    pid = sorted(new)[0]
+                    bind_pid({profile["id"]: {"pid": pid,
+                                              "started": int(_t.time()),
+                                              "http_port": profile.get("http_port")}})
+                    threading.Thread(target=_watch_memory, args=(pid,),
+                                     daemon=True).start()
+                    return
+        finally:
+            _LAUNCHING.pop(profile.get("tcp_port", 9700), None)
+            _LAUNCHING.pop(profile.get("http_port", 8080), None)
+            try:
+                out.close()
+            except OSError:
+                pass
     import threading
     threading.Thread(target=_capture, daemon=True).start()
     return {"ok": True}

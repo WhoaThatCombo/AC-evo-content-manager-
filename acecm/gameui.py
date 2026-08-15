@@ -1,9 +1,10 @@
 """Talk to the game's Gameface inspector (Chrome DevTools on :9444).
 
-The UI is cohtml. The exe on this machine already has the inspector
-port patched on. Steam drops every launch flag except what is in Steam
-Launch Options, so Drive cannot start a session from argv — it has to
-press Start the same way the menu does:
+The UI is cohtml. Stock EVO leaves the inspector off (DebuggerPort
+0xFFFFFFFF, enable flag 0). backend.launch_game enables it in the exe
+before Steam starts the game. Steam still drops every launch flag
+except Launch Options, so Drive cannot start a session from argv — it
+has to press Start the same way the menu does:
 
     ksUI.goTo('singleplayer.html', 'singleplayer/main')
     GAMEMODESELECTION.start()
@@ -210,14 +211,34 @@ _BOOT = """
   var car = !!(window.CurrentCar && CurrentCar.model && CurrentCar.model.name);
   var dest = '';
   try { dest = localStorage.getItem('loadingDestination') || ''; } catch (e) {}
+  var cls = '';
+  try { cls = String(document.body.className || ''); } catch (e) {}
+  var paint = /(?:^|\\s)paintshop(?:\\s|$)/.test(cls) ? 'paint' : 'nopaint';
+  var locked = cls.indexOf('ui-locked') >= 0 ? 'locked' : 'open';
   var page = 'other';
   if (href.indexOf('ingame.html') >= 0) page = 'ingame';
   else if (href.indexOf('singleplayer') >= 0) page = 'sp';
+  else if (href.indexOf('multiplayer') >= 0) page = 'mp';
   else if (href.indexOf('menu.html') >= 0) page = car ? 'home' : 'menu-nocar';
   else if (href.indexOf('intro') >= 0) page = 'intro';
-  return [page, path, car ? 'car' : 'nocar', dest].join('|');
+  return [page, path, car ? 'car' : 'nocar', dest, paint, locked].join('|');
 })()
 """
+
+
+def boot_parts(hint=None):
+    s = hint if hint is not None else boot_state()
+    return str(s or "").lower().split("|")
+
+
+def boot_page(hint=None):
+    p = boot_parts(hint)
+    return p[0] if p else ""
+
+
+def paintshop_up(hint=None):
+    p = boot_parts(hint)
+    return len(p) > 4 and p[4] == "paint"
 
 
 def boot_state():
@@ -235,9 +256,16 @@ def boot_state():
 
 
 def home_ready(hint=None):
-    """True on the home or single-player page with a current car."""
-    s = (hint if hint is not None else boot_state()).lower()
-    return s.startswith("home|") or s.startswith("sp|")
+    """True on the home or single-player page with a current car.
+
+    Paintshop still overlaying home is NOT ready: Start from there is
+    what the game answers with `goto menu.html main/main override`.
+    """
+    s = hint if hint is not None else boot_state()
+    if paintshop_up(s):
+        return False
+    page = boot_page(s)
+    return page in ("home", "sp")
 
 
 def session_loading(hint=None):
@@ -256,7 +284,14 @@ _GOTO = """
 
 _START = """
 (async function(){
+  if ((location.href||'').indexOf('singleplayer') < 0) return 'not-on-sp';
+  if (document.body && document.body.classList
+      && document.body.classList.contains('paintshop')) return 'paintshop';
   if (!window.GAMEMODESELECTION) return 'no-GAMEMODESELECTION';
+  try {
+    if (window.ksUI && typeof ksUI.setOriginAsReturnPage === 'function')
+      ksUI.setOriginAsReturnPage();
+  } catch (e) {}
   try {
     await GAMEMODESELECTION.start();
     return 'started';
@@ -292,18 +327,14 @@ _GOTO_MP = """
 
 
 def enter_multiplayer(ip="", tcp=0, password=""):
-    """Open the public list. If ip/tcp are set, the page treats that as
-    the targeted server (same as a clipboard join path)."""
+    """Open the in-game public list once.
+
+    Do not stuff ip:port into the path. That is not a real submenu, so
+    the router rejects it and snaps back to main/main — which is the
+    bounce both machines were seeing. Join picks the row after the
+    list is up.
+    """
     page = menu_page()
-    if ip and tcp:
-        path = "main/serverlist/%s:%s" % (ip, int(tcp))
-        if password:
-            path += "|" + password
-        expr = ("(function(){ if (!window.ksUI) return 'no-ksUI'; "
-                "ksUI.goTo('multiplayer.html', %s); return 'goto-target'; })()"
-                % json.dumps(path))
-        return js_value(evaluate(expr, page=page, timeout=10,
-                                 user_gesture=False))
     return js_value(evaluate(_GOTO_MP, page=page, timeout=10,
                              user_gesture=False))
 

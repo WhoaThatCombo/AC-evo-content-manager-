@@ -121,6 +121,102 @@ def status_all():
     return out
 
 
+def live_link():
+    """The URL anyone on the LAN (or a forwarded 8092) can open."""
+    from . import contentsync
+    info = contentsync.share_info()
+    lan = info.get("lan_url") or ""
+    loc = info.get("localhost_url") or ""
+    return {
+        "ok": True,
+        "url": (lan + "/live") if lan else "",
+        "local_url": (loc + "/live") if loc else "/live",
+        "port": info.get("port"),
+        "hint": ("Same network: send the link. Different internet: forward "
+                 "TCP " + str(info.get("port") or 8092) + " and put your "
+                 "public IP in place of the LAN address. ACECM stays open."),
+    }
+
+
+def _public_label(car):
+    """Never put a Steam id on the public board."""
+    disp = (car.get("display") or "").strip()
+    if disp:
+        return disp
+    name = str(car.get("name") or "")
+    if name.isdigit() or (name.isdecimal()):
+        return "driver"
+    if name:
+        return name
+    return ""
+
+
+def public_cars(profile_id=None):
+    """Read-only snapshot for the shared /live page."""
+    d = cars(profile_id)
+    if not d.get("ok"):
+        return {"ok": False, "error": d.get("error") or "telemetry is off",
+                "hint": d.get("hint")}
+    out = []
+    for c in d.get("cars") or []:
+        label = _public_label(c)
+        out.append({
+            "id": c.get("id"),
+            "label": label or "unidentified",
+            "named": bool(label),
+            "inferred": bool(c.get("inferred")),
+            "ai": bool(c.get("ai")),
+            "x": c.get("x"), "y": c.get("y"), "z": c.get("z"),
+            "kmh": c.get("kmh"), "t": c.get("t"),
+            "trail": c.get("trail") or [],
+            "model": c.get("model"),
+            "lap_pct": c.get("lap_pct"),
+            "predicted": c.get("predicted"),
+            "gap_leader": c.get("gap_leader"),
+        })
+    return {
+        "ok": True,
+        "server": d.get("server"),
+        "profile_id": d.get("profile_id"),
+        "cars": out,
+        "counts": d.get("counts"),
+        "link": live_link(),
+    }
+
+
+def public_board(profile_id=None):
+    lb = leaderboard(profile_id)
+    if not lb.get("ok"):
+        return lb
+    rows = []
+    for r in lb.get("rows") or []:
+        rows.append({
+            "pos": r.get("pos"),
+            "label": (r.get("display") or "").strip() or "driver",
+            "model": r.get("model"),
+            "laps": r.get("laps"),
+            "best": r.get("best"),
+            "last": r.get("last"),
+            "on_track": r.get("on_track"),
+            "carid": r.get("carid"),
+        })
+    return {"ok": True, "server": lb.get("server"), "rows": rows}
+
+
+def public_track(profile_id=None):
+    t = track(profile_id)
+    if not t.get("ok"):
+        return t
+    return {
+        "ok": True,
+        "track": t.get("track"),
+        "layout": t.get("layout"),
+        "folder": t.get("folder"),
+        "points": t.get("points"),
+        "edges": t.get("edges"),
+    }
+
+
 # ------------------------------------------------------------------ start --
 def start(profile_id, baseline_ai=False):
     """Start a tracker bound to ONE profile's server process."""
@@ -166,13 +262,21 @@ def start(profile_id, baseline_ai=False):
     # The centreline too: the box alone lets origin junk through on any track
     # near (0,0), which is how Barber reported phantom cars at (0,0,0).
     try:
+        from . import splines
+        splines.ship_for_profile(prof)
+    except Exception as ex:
+        logs.LOG.warning("spline ship before telemetry: %s", ex)
+    try:
         t = track(profile_id)
         if t.get("ok") and t.get("points"):
             pts = list(t["points"])
             # Include the PIT LANE, which can be well over 30 m from the racing
             # line - without it a car driving through the pits is filtered out
             # as off-track junk.
-            pts += _pitlane_points(t.get("spline"))
+            if t.get("pitlane_points"):
+                pts += t["pitlane_points"]
+            else:
+                pts += _pitlane_points(t.get("spline"))
             tp = os.path.join(config.DATA, f"track_{profile_id}.json")
             json.dump(pts, open(tp, "w", encoding="utf-8"))
             env["TELEM_TRACK"] = tp
@@ -185,8 +289,9 @@ def start(profile_id, baseline_ai=False):
     args = config.tool_cmd("server_telemetry", targs)
     log = open(os.path.join(config.DATA, f"telemetry_{profile_id}.log"), "w",
                encoding="utf-8", errors="replace")
-    p = subprocess.Popen(args, cwd=config.server_dir(), env=env,
-                         stdout=log, stderr=subprocess.STDOUT)
+    from . import winproc
+    p = winproc.hidden_popen(args, cwd=config.server_dir(), env=env,
+                             stdout=log, stderr=subprocess.STDOUT)
     logs.launched(f"tracker for {prof.get('name')!r}", args, p.pid,
                   port=port, server_pid=server_pid,
                   bbox=env.get("TELEM_BBOX"), log=log.name)
@@ -562,61 +667,75 @@ def _pitlane_points(ideal_name):
 
 
 def track(profile_id=None, _with_y=False):
-    """Centreline for the map, from the spline that profile's server loads."""
+    """Centreline for the map, from the spline that profile's server loads.
+
+    Custom tracks (Barber, Highlands) are not in events_practice.json. Those
+    use `custom_track` + the import folder. Stock tracks come from the
+    event index. Either way `splines.resolve` finds the file — loose on
+    the server, in the EvoForge import, or inside the client archive.
+    """
     try:
         if config.server_dir() not in sys.path:
             sys.path.insert(0, config.server_dir())
         import parse_spline
+        from . import splines
         profs = servers.load()
         if not profile_id:
             profile_id = default_profile()
         prof = next((p for p in profs if p["id"] == profile_id), None)
-        idx = (prof or {}).get("track_index", 18)
-        evs = json.load(open(os.path.join(config.server_dir(),
-                                          "events_practice.json"),
-                             encoding="utf-8"))["events"]
-        ev = evs[idx]
-        # ⚠ events_practice.json holds DISPLAY names ("Nurburgring",
-        # "Touristenfahrten"); files on disk use folder ids ("nurburgring",
-        # "layout_nordschleife_touristenfahrten"). Resolve by searching the
-        # layouts folder - do not construct the filename.
-        folder = ev["track"].lower().replace(" ", "_")
-        ldir = os.path.join(config.server_dir(), "content", "tracks", folder,
-                            "layouts")
-        want = ev["layout"].lower().replace(" ", "_")
-        base = None
-        if os.path.isdir(ldir):
-            cands = [f for f in os.listdir(ldir)
-                     if f.endswith(".ideal_line.aisplinedata")]
-            match = [f for f in cands if want in f.lower()]
-            pick = (match or cands or [None])[0]
-            if pick:
-                base = os.path.join(ldir, pick)
-        if not base:
-            return {"ok": False,
-                    "error": f"no ideal-line spline for {ev['track']} / "
-                             f"{ev['layout']} under {ldir}"}
+        custom = ((prof or {}).get("custom_track") or "").strip()
+        label = ((prof or {}).get("track_label") or "").strip()
+        folder = layout = display = ""
+        ev_track = ""
+        if custom:
+            display = custom
+            folders = splines.folders_for(custom)
+            folder = folders[0] if folders else ""
+            try:
+                from . import contentsync, tracks as trackmod
+                src = os.path.join(contentsync.tracks_dir(), folder)
+                layout = trackmod.read_track_folder(src).get("layout") or ""
+            except Exception:
+                layout = ""
+        else:
+            idx = int((prof or {}).get("track_index") or 18)
+            evs = json.load(open(config.catalog_path("events_practice.json"),
+                                 encoding="utf-8"))["events"]
+            ev = evs[idx]
+            ev_track = ev.get("track") or ""
+            display = label or ev_track
+            folder = ev_track.lower().replace(" ", "_")
+            layout = ev.get("layout") or ""
+
+        hit = splines.resolve(folder, layout, display=display or folder)
+        if not hit.get("ok"):
+            return {"ok": False, "error": hit.get("error")
+                    or f"no ideal-line spline for {display or folder}"}
+        base = hit["ideal"]
         pts = parse_spline.points(base)
         if not pts:
             return {"ok": False, "error": "spline parsed to no points"}
-        # A custom track borrows a host track's slots, so the event name is the
-        # HOST's. Show what is really deployed there when the profile says so.
-        label = (prof or {}).get("track_label") or ""
-        # The racing line is not the centreline - it hugs the inside of
-        # corners - so cars sit several metres off it and the map looks
-        # miscalibrated when it is not. Draw the real edges where we can.
         left = right = None
         try:
             import parse_edges
             left, right = parse_edges.edges(base)
         except Exception:
             left = right = None
-        out = {"ok": True, "track": label or ev["track"],
+        pit_pts = []
+        if hit.get("pitlane") and os.path.isfile(hit["pitlane"]):
+            try:
+                pit_pts = [[p[0], p[2]] for p in parse_spline.points(hit["pitlane"])]
+            except Exception:
+                pit_pts = []
+        out = {"ok": True, "track": display or ev_track or hit["folder"],
                "edges": ({"left": left, "right": right}
                          if left and right else None),
-               "layout": ev["layout"],
-               "host_track": ev["track"] if label else None,
+               "layout": hit.get("layout") or layout,
+               "host_track": ev_track if label and not custom else None,
+               "folder": hit.get("folder"),
                "spline": os.path.basename(base),
+               "source": hit.get("source"),
+               "pitlane_points": pit_pts,
                "points": [[p[0], p[2]] for p in pts]}
         if _with_y:
             out["points3"] = pts

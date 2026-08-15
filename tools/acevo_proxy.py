@@ -203,7 +203,17 @@ def add_local_entry(raw, peer=None):
     except Exception as ex:
         print(f"  (server-list capture failed: {ex})")
     try:
+        # Put ours FIRST. Appended it sat after ~800 public rows, so the
+        # browser looked empty of "our" server (and of anything on page 1
+        # if a filter hid the rest).
         fill_entry(msg.entry.add(), peer=peer)
+        blobs = [e.SerializeToString() for e in msg.entry]
+        del msg.entry[:]
+        first = msg.entry.add()
+        first.ParseFromString(blobs[-1])
+        for b in blobs[:-1]:
+            e = msg.entry.add()
+            e.ParseFromString(b)
         stats["injected"] += 1
         return wrap(msg, name), name
     except Exception as ex:
@@ -331,7 +341,9 @@ async def main():
     # ACECM used to health-check this port with a raw TCP connect, which
     # produced exactly that "CONNECTING forever" line and sent us chasing
     # a TLS bug that was our own probe.
-    async with websockets.serve(handle, "0.0.0.0", PORT, **serve_kw):
+    listen = (os.environ.get("BACKEND_LISTEN") or "127.0.0.1").strip() or "127.0.0.1"
+    print(f"proxy bind {listen}:{PORT}")
+    async with websockets.serve(handle, listen, PORT, **serve_kw):
         await asyncio.Future()
 
 
