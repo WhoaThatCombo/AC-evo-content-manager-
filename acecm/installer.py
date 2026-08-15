@@ -203,16 +203,15 @@ def _shortcuts(target, desktop=True):
 
 
 def restart(delay=0.8):
-    """Quit this process. Relaunch unless an update swap is already waiting.
+    """Quit this process. Relaunch after this PID is gone.
 
-    ⚠ DETACHED_PROCESS is what made Restart look like it closed ACECM and
-    never came back: the child has no console and often no visible window.
-    `cmd /c start` is how the update script launches us and it does show.
+    ⚠ Never start a second ACECM.exe while this one is still alive. The
+    child cannot bind port 8092, exits immediately, then this window
+    closes — Restart looks like it shut ACECM down and never came back.
 
-    ⚠ After Download & install the swap batch is already waiting for this
-    PID. Launching another ACECM.exe here holds the file and port 8092, so
-    the new build never writes --okflag and the script rolls back. Just
-    exit and let the batch swap + start.
+    After Download & install the swap batch is already waiting for this
+    PID, so we only exit. Otherwise a small wait-then-start script does
+    the same job without fighting for the port.
     """
     exe = running_exe()
     if not exe:
@@ -221,22 +220,16 @@ def restart(delay=0.8):
                          "started it"}
     pending = version.swap_pending()
     if not pending:
-        inst = os.path.dirname(exe)
         try:
-            # start's first quoted token is the window TITLE, not the exe.
-            subprocess.Popen(
-                ["cmd", "/c", "start", "ACECM", "/d", inst, exe],
-                close_fds=True,
-                creationflags=0x00000200,  # CREATE_NEW_PROCESS_GROUP
-                cwd=inst)
+            version.schedule_relaunch(exe, os.getpid())
         except Exception as ex:
-            return {"ok": False, "error": f"could not relaunch: {ex}"}
+            return {"ok": False, "error": f"could not schedule relaunch: {ex}"}
 
     def bye():
         import time
-        time.sleep(0.3 if pending else delay)
+        time.sleep(0.3 if pending else max(0.3, delay))
         logs.LOG.info("restarting - %s",
-                      "swap will relaunch" if pending else "new instance launched")
+                      "swap will relaunch" if pending else "relaunch after exit")
         os._exit(0)                      # noqa: SLF001 - immediate, no cleanup
 
     import threading

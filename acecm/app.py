@@ -16,7 +16,8 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-from . import (backend, config, content, contentsync, detect, hooking, install,
+from . import (backend, config, content, contentsync, detect, drive,
+               hooking, install,
                installer,
                logs, lobby, netutil, overview, patching, realai, version,
                registry, servers, settings as gamesettings,
@@ -121,6 +122,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "lan_ip": netutil.lan_ipv4()})
             if path == "/api/game/worker":
                 return _json(self, realai.worker_status())
+            if path == "/api/drive":
+                return _json(self, drive.options())
+            if path == "/api/drive/status":
+                return _json(self, drive.status())
             # 3D viewer: which cars can be shown, and how a pending
             # extraction is getting on
             # --- joining someone else's server ---------------------------
@@ -458,6 +463,10 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, realai.attach_worker(
                     body.get("id") or "",
                     body.get("ai_player", True)))
+            if path == "/api/drive":
+                return _json(self, drive.start(body))
+            if path == "/api/drive/capture":
+                return _json(self, drive.capture_list())
             if path == "/api/config":
                 return _json(self, config.save(body))
             return _json(self, {"error": "unknown endpoint"}, 404)
@@ -677,6 +686,45 @@ def _rescan_content():
         logs.LOG.info("content caches cleared (%d) - rescanning on demand", gone)
 
 
+def _auto_proxy():
+    return bool(config.CFG.get("auto_proxy", True))
+
+
+def _autostart_proxy():
+    """Background: start the lobby proxy if Settings says so."""
+    if not _auto_proxy():
+        return
+    def go():
+        try:
+            from . import backend
+            st = backend.state()
+            if st.get("listening"):
+                logs.LOG.info("auto proxy: already listening")
+                return
+            r = backend.start("proxy")
+            if r.get("ok"):
+                logs.LOG.info("auto proxy started on :%s pid=%s",
+                              r.get("port"), r.get("pid"))
+            else:
+                logs.LOG.warning("auto proxy failed: %s",
+                                 r.get("error") or r)
+        except Exception as ex:
+            logs.exception("auto proxy", ex)
+    threading.Thread(target=go, daemon=True, name="auto-proxy").start()
+
+
+def _autostop_proxy():
+    """Kill the lobby proxy only when ACECM itself is going away."""
+    if not _auto_proxy():
+        return
+    try:
+        from . import backend
+        backend.stop()
+        logs.LOG.info("auto proxy stopped with ACECM")
+    except Exception as ex:
+        logs.LOG.warning("auto proxy stop: %s", ex)
+
+
 def serve():
     """Bind and start the HTTP server on a background thread; return its URL.
 
@@ -723,20 +771,24 @@ def main(mode="window", okflag=None):
     # later window close is not mistaken for a failed update.
     from . import version
     version.confirm_update(okflag)
-    if mode == "window":
-        from . import ui
-        if not ui.available():
-            raise SystemExit(
-                "no native window (WebView2 missing) - ACECM is a desktop app")
-        ui.run(url)              # blocks until the window is closed
-        return
-    if mode == "browser":
-        threading.Timer(0.6, lambda: os.startfile(url)).start()   # noqa: S606
+    _autostart_proxy()
     try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        pass
+        if mode == "window":
+            from . import ui
+            if not ui.available():
+                raise SystemExit(
+                    "no native window (WebView2 missing) - ACECM is a desktop app")
+            ui.run(url)              # blocks until the window is closed
+            return
+        if mode == "browser":
+            threading.Timer(0.6, lambda: os.startfile(url)).start()   # noqa: S606
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
+    finally:
+        _autostop_proxy()
 
 
 if __name__ == "__main__":

@@ -140,7 +140,17 @@ def upsert(profile):
         profile["id"] = f"srv{int(time.time())}{uuid.uuid4().hex[:4]}"
         items.append(profile)
     else:
-        items = [profile if p["id"] == profile["id"] else p for p in items]
+        found = False
+        out = []
+        for p in items:
+            if p["id"] == profile["id"]:
+                out.append(profile)
+                found = True
+            else:
+                out.append(p)
+        if not found:
+            out.append(profile)
+        items = out
     save_all(items)
     return profile
 

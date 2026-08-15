@@ -19,15 +19,43 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import config, logs
 
-VERSION = "0.6.36"
+VERSION = "0.7.0"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
+
+
+class _DropAuthOnHop(urllib.request.HTTPRedirectHandler):
+    """Do not forward the GitHub API token onto the asset CDN.
+
+    A signed release-asset URL answers 404 "The specified blob does not
+    exist" if the API Authorization header is still attached. urllib
+    forwards it by default.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        old = urllib.parse.urlparse(req.full_url).netloc.lower()
+        hop = urllib.parse.urlparse(new.full_url).netloc.lower()
+        if hop != old:
+            try:
+                new.remove_header("Authorization")
+            except Exception:
+                pass
+        return new
+
+
+def _opener():
+    return urllib.request.build_opener(_DropAuthOnHop)
 
 
 def _newer(a, b):
@@ -60,8 +88,50 @@ def _headers():
 
 def _get_json(url, timeout=20):
     req = urllib.request.Request(url, headers=_headers())
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _opener().open(req, timeout=timeout) as r:
         return json.loads(r.read())
+
+
+def _open_download(url, timeout=300):
+    """GET a release asset. API asset URLs need octet-stream Accept."""
+    req = urllib.request.Request(url, headers={
+        **_headers(),
+        "Accept": "application/octet-stream",
+    })
+    return _opener().open(req, timeout=timeout)
+
+
+def _download_file(urls, dest, timeout=300, retries=4):
+    """Write the first URL that works. 404s are retried: GitHub's CDN
+    lags behind a just-replaced release and answers 'blob does not exist'."""
+    if isinstance(urls, str):
+        urls = [urls]
+    urls = [u for u in urls if u]
+    if not urls:
+        raise RuntimeError("no download url")
+    last = None
+    for url in urls:
+        for attempt in range(retries):
+            try:
+                with _open_download(url, timeout=timeout) as r, open(dest, "wb") as f:
+                    h = hashlib.sha256()
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+                        f.write(chunk)
+                return h.hexdigest()
+            except urllib.error.HTTPError as ex:
+                last = ex
+                if ex.code in (404, 502, 503) and attempt + 1 < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                break
+            except Exception as ex:
+                last = ex
+                break
+    raise last
 
 
 def check():
@@ -94,25 +164,30 @@ def check():
             sum_asset = next((a for a in assets
                               if a.get("name", "").lower()
                               == "acecm.exe.sha256"), None)
-            if sum_asset and sum_asset.get("browser_download_url"):
-                try:
-                    txt = urllib.request.urlopen(
-                        urllib.request.Request(
-                            sum_asset["browser_download_url"],
-                            headers={**_headers(),
-                                     "Accept": "application/octet-stream"}),
-                        timeout=20).read().decode("ascii", "replace")
-                    hexpart = txt.strip().split()[0]
-                    if len(hexpart) == 64:
-                        sha = hexpart
-                except Exception:
-                    pass
+            if sum_asset:
+                sum_url = (sum_asset.get("url")
+                           or sum_asset.get("browser_download_url"))
+                if sum_url:
+                    try:
+                        with _open_download(sum_url, timeout=20) as r:
+                            txt = r.read().decode("ascii", "replace")
+                        hexpart = txt.strip().split()[0]
+                        if len(hexpart) == 64:
+                            sha = hexpart
+                    except Exception:
+                        pass
+            # Prefer the API asset URL. browser_download_url 404s after a
+            # tag is deleted and recreated — the CDN keeps the old path
+            # and answers "The specified blob does not exist".
+            api_url = (asset or {}).get("url") or ""
+            cdn_url = (asset or {}).get("browser_download_url") or ""
             return {"ok": True, "current": VERSION, "checked": True,
                     "source": f"github:{repo}",
                     "latest": latest, "available": _newer(latest, VERSION),
                     "notes": (rel.get("body") or "")[:4000],
                     "published": rel.get("published_at"),
-                    "url": (asset or {}).get("browser_download_url", ""),
+                    "url": api_url or cdn_url,
+                    "browser_url": cdn_url,
                     "sha256": sha,
                     "error": None if asset else
                              "that release has no ACECM.exe asset attached"}
@@ -150,6 +225,34 @@ def pending_path():
 def swap_pending():
     """True when a downloaded exe is waiting for this process to exit."""
     return os.path.isfile(pending_path())
+
+
+def schedule_relaunch(exe, pid, bat=None):
+    """Start ACECM again only after this PID is gone.
+
+    Launching a second copy first fights for port 8092; the child dies
+    with 'port in use' and Restart looks like it closed and never came back.
+    """
+    bat = bat or os.path.join(config.DATA, "_relaunch.bat")
+    inst = os.path.dirname(exe)
+    os.makedirs(config.DATA, exist_ok=True)
+    lines = [
+        "@echo off\r\n",
+        ":wait\r\n",
+        f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n',
+        "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)\r\n",
+        "ping -n 2 127.0.0.1 >nul\r\n",
+        f'start "ACECM" /d "{inst}" "{exe}"\r\n',
+        'del "%~f0"\r\n',
+    ]
+    with open(bat, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    CREATE_NO_WINDOW = 0x08000000
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+    subprocess.Popen(["cmd", "/c", bat],
+                     creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                     close_fds=True, cwd=config.DATA)
+    return bat
 
 
 def last_rollback():
@@ -302,9 +405,12 @@ def apply(url=None, sha256=None):
         return {"ok": False,
                 "error": "running from source - update with git, not this"}
     info = check()
-    url = url or info.get("url")
     sha256 = sha256 or info.get("sha256")
-    if not url:
+    urls = []
+    for u in (url, info.get("url"), info.get("browser_url")):
+        if u and u not in urls:
+            urls.append(u)
+    if not urls:
         return {"ok": False, "error": "no download url"}
 
     exe = sys.executable
@@ -319,20 +425,15 @@ def apply(url=None, sha256=None):
                 os.remove(new)
             except OSError:
                 new = os.path.join(config.DATA, f"ACECM-update-{uuid.uuid4().hex[:8]}.new")
-        req = urllib.request.Request(url, headers={
-            **_headers(),
-            # asset downloads need the octet-stream Accept, not the JSON one
-            "Accept": "application/octet-stream"})
-        with urllib.request.urlopen(req, timeout=300) as r, open(new, "wb") as f:
-            h = hashlib.sha256()
-            while True:
-                chunk = r.read(1 << 20)
-                if not chunk:
-                    break
-                h.update(chunk)
-                f.write(chunk)
-        got = h.hexdigest()
+        got = _download_file(urls, new, timeout=300)
     except Exception as ex:
+        msg = str(ex)
+        if "404" in msg or "blob does not exist" in msg.lower():
+            return {"ok": False,
+                    "error": "download failed: GitHub is still publishing "
+                             "the file (404). Wait a minute and try again, "
+                             "or close ACECM and run the new ACECM.exe from "
+                             "the GitHub release."}
         return {"ok": False, "error": f"download failed: {ex}"}
 
     # ⚠ Verify BEFORE scheduling the swap. A truncated or tampered download

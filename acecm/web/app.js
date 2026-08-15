@@ -33,6 +33,627 @@ function toast(msg, bad) {
   toastT = setTimeout(() => t.classList.remove('show'), 3200);
 }
 
+/* --------------------------------------------------------------- drive -- */
+/* Content Manager's home: pick car + track + mode, then Drive walks the
+   client into a dedicated session. EVO has no -car/-track launch flags. */
+let driveTimer = null;
+let driveFilter = {
+  car: '', track: '',
+  sort: 'players',
+  hideFull: true,
+  hideLocked: false,
+  hasPlayers: false,
+  haveTrack: false,
+  haveCar: false,
+  acecmOnly: false,
+};
+let driveLocal = null;
+
+async function drivePage() {
+  if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
+  const d = await api('drive');
+  if (d && d.error && !d.cars) {
+    $('#page').innerHTML = `<div class="err">${esc(d.error)}</div>`;
+    return;
+  }
+  const pick = d.pick || {};
+  const p = $('#page');
+  p.innerHTML = '';
+
+  const viaBar = el('div', 'drive-via');
+  const wrap = el('div', 'drive');
+  const carCol = el('div', 'card drive-col');
+  const trkCol = el('div', 'card drive-col');
+  const goCol = el('div', 'card drive-col drive-go');
+  wrap.append(carCol, trkCol, goCol);
+  p.append(viaBar, wrap);
+
+  const sel = {
+    via: pick.via === 'server' ? 'server' : 'sp',
+    server_id: pick.server_id || '',
+    server_ip: pick.server_ip || '',
+    server_tcp_port: pick.server_tcp_port || 0,
+    server_udp_port: pick.server_udp_port || 0,
+    password: pick.password || '',
+    car: pick.car || '',
+    track_index: pick.track_index ?? 18,
+    game_mode: pick.game_mode || 'PRACTICE',
+    weather: pick.weather || 'CLEAR',
+    tod_hour: pick.tod_hour ?? 13,
+    num_opponents: pick.num_opponents ?? 10,
+    skill_min: pick.skill_min ?? 80,
+    skill_max: pick.skill_max ?? 95,
+    aggressiveness: pick.aggressiveness || 'Safe',
+    single_make: pick.single_make !== false,
+    duration_min: pick.duration_min ?? 90,
+    practice_min: pick.practice_min ?? 10,
+    quali_min: pick.quali_min ?? 15,
+    warmup_min: pick.warmup_min ?? 10,
+    race_laps: pick.race_laps ?? 10,
+    starting_position: pick.starting_position ?? 0,
+  };
+  if (sel.via === 'server' && !sel.server_id && !sel.server_ip && (d.servers || [])[0]) {
+    const s0 = d.servers[0];
+    sel.server_id = s0.id;
+    sel.server_ip = s0.server_ip;
+    sel.server_tcp_port = s0.server_tcp_port;
+    sel.server_udp_port = s0.server_udp_port;
+  }
+  const aiModes = d.ai_modes || ['INSTANT_RACE', 'RACE_WEEKEND'];
+
+  function carOf(id) {
+    return (d.cars || []).find(c => c.id === id) || null;
+  }
+  function trackOf(idx) {
+    return (d.tracks || []).find(t => t.index === idx) || null;
+  }
+  function serverOf() {
+    return (d.servers || []).find(s =>
+      (sel.server_id && s.id === sel.server_id)
+      || (sel.server_ip && s.server_ip === sel.server_ip
+          && Number(s.server_tcp_port) === Number(sel.server_tcp_port))
+    ) || null;
+  }
+  function allowedCars() {
+    const sv = serverOf();
+    if (sel.via !== 'server' || !sv || !(sv.cars || []).length) return null;
+    return new Set(sv.cars);
+  }
+
+  [['sp', 'Single player'], ['server', 'Public servers']].forEach(([v, lab]) => {
+    const b = el('button', 'sm' + (sel.via === v ? ' primary' : ''), lab);
+    b.dataset.via = v;
+    b.onclick = () => {
+      sel.via = v;
+      viaBar.querySelectorAll('button[data-via]').forEach(x => {
+        x.classList.toggle('primary', x.dataset.via === v);
+      });
+      paintVia();
+    };
+    viaBar.append(b);
+  });
+  const manage = el('button', 'sm', 'Full browser');
+  manage.onclick = () => go('browser');
+  const pull = el('button', 'sm', 'Refresh list');
+  pull.title = 'Launch the game, open Multiplayer, save the public list, then quit';
+  pull.onclick = async () => {
+    const r = await api('drive/capture', {});
+    if (!r.ok) { toast(r.error || 'Could not start', true); return; }
+    if (driveTimer) clearInterval(driveTimer);
+    driveTimer = setInterval(poll, 1200);
+    poll();
+  };
+  viaBar.append(manage, pull);
+
+  carCol.innerHTML = '<h2>Car</h2>';
+  const carHead = el('div', 'drive-pick');
+  const carSearch = el('input');
+  carSearch.placeholder = 'Filter cars…';
+  carSearch.value = driveFilter.car;
+  const carList = el('div', 'list drive-list');
+  carCol.append(carHead, carSearch, carList);
+
+  trkCol.innerHTML = '<h2>Track</h2>';
+  const trkHead = el('div', 'drive-pick');
+  const trkSearch = el('input');
+  trkSearch.placeholder = 'Filter tracks…';
+  trkSearch.value = driveFilter.track;
+  const srvFilters = el('div', 'drive-srv-filters');
+  srvFilters.style.display = 'none';
+  const trkList = el('div', 'list drive-list');
+  trkCol.append(trkHead, trkSearch, srvFilters, trkList);
+
+  goCol.innerHTML = '<h2>Session</h2>';
+  const mode = el('select');
+  (d.game_modes || []).forEach(m => {
+    const o = el('option', null, m.replace(/_/g, ' '));
+    o.value = m;
+    if (m === sel.game_mode) o.selected = true;
+    mode.append(o);
+  });
+  const weather = el('select');
+  (d.weather || []).forEach(m => {
+    const o = el('option', null, m.replace(/_/g, ' '));
+    o.value = m;
+    if (m === sel.weather) o.selected = true;
+    weather.append(o);
+  });
+  const hour = el('select');
+  for (let h = 0; h < 24; h++) {
+    const o = el('option', null, String(h).padStart(2, '0') + ':00');
+    o.value = String(h);
+    if (h === Number(sel.tod_hour)) o.selected = true;
+    hour.append(o);
+  }
+  const mkf = (label, node) => {
+    const l = el('label', 'f');
+    l.append(el('span', null, label), node);
+    return l;
+  };
+  const extras = el('div', 'drive-fields');
+  goCol.append(mkf('Game mode', mode), mkf('Weather', weather), mkf('Time', hour), extras);
+  const driveBtn = el('button', 'primary go-btn', 'Drive');
+  const st = el('div', 'drive-status tiny dim');
+  const pwField = el('label', 'f');
+  pwField.style.display = 'none';
+  const pwInp = el('input');
+  pwInp.type = 'password';
+  pwInp.placeholder = 'Server password';
+  pwInp.value = sel.password || '';
+  pwInp.oninput = () => { sel.password = pwInp.value; };
+  pwField.append(el('span', null, 'Password'), pwInp);
+  const hint = el('div', 'tiny dim',
+    'Writes the session, launches the game, and opens the pit menu '
+    + 'so you can change setup. Close the game first so the save sticks.');
+  goCol.append(pwField, driveBtn, st, hint);
+  const spFields = goCol.querySelectorAll(':scope > label.f');
+
+  function numInp(key, min, max) {
+    const n = el('input');
+    n.type = 'number';
+    n.min = String(min);
+    n.max = String(max);
+    n.value = String(sel[key]);
+    n.oninput = () => {
+      const v = Number(n.value);
+      if (!Number.isNaN(v)) sel[key] = v;
+    };
+    return n;
+  }
+  function paintExtras() {
+    extras.innerHTML = '';
+    const m = sel.game_mode;
+    const span = (label, node) => {
+      const l = mkf(label, node);
+      l.classList.add('span2');
+      return l;
+    };
+    if (m === 'PRACTICE' || m === 'HOTLAP' || m === 'HOTSTINT' || m === 'TEST_DRIVE') {
+      extras.append(span('Duration (minutes)', numInp('duration_min', 1, 600)));
+    }
+    if (aiModes.includes(m)) {
+      extras.append(
+        mkf('AI cars', numInp('num_opponents', 1, 40)),
+        mkf('Same car as you', (() => {
+          const c = el('select');
+          [['true', 'Yes'], ['false', 'No']].forEach(([v, lab]) => {
+            const o = el('option', null, lab);
+            o.value = v;
+            if (String(sel.single_make) === v) o.selected = true;
+            c.append(o);
+          });
+          c.onchange = () => { sel.single_make = c.value === 'true'; };
+          return c;
+        })()),
+        mkf('AI skill min', numInp('skill_min', 0, 100)),
+        mkf('AI skill max', numInp('skill_max', 0, 100)),
+      );
+      const agg = el('select');
+      (d.aggressiveness || ['Safe', 'Normal', 'Competitive']).forEach(a => {
+        const o = el('option', null, a);
+        o.value = a;
+        if (a === sel.aggressiveness) o.selected = true;
+        agg.append(o);
+      });
+      agg.onchange = () => { sel.aggressiveness = agg.value; };
+      extras.append(span('AI behaviour', agg));
+    }
+    if (m === 'RACE_WEEKEND') {
+      extras.append(
+        mkf('Practice (min)', numInp('practice_min', 1, 240)),
+        mkf('Qualifying (min)', numInp('quali_min', 1, 120)),
+        mkf('Warmup (min)', numInp('warmup_min', 0, 60)),
+        mkf('Race (laps)', numInp('race_laps', 1, 200)),
+      );
+    }
+    if (m === 'INSTANT_RACE') {
+      extras.append(
+        mkf('Race (laps)', numInp('race_laps', 1, 200)),
+        mkf('Start position (0=auto)', numInp('starting_position', 0, 40)),
+      );
+    }
+  }
+
+  function paintHead(box, imgSrc, title, sub) {
+    box.innerHTML = '';
+    const img = el('img');
+    img.alt = '';
+    img.src = imgSrc;
+    img.onerror = () => { img.style.visibility = 'hidden'; };
+    const t = el('div');
+    t.innerHTML = `<b>${esc(title || 'Nothing selected')}</b>`
+      + `<div class="tiny dim">${esc(sub || '')}</div>`;
+    box.append(img, t);
+  }
+
+  function paintCars() {
+    const q = (carSearch.value || '').toLowerCase();
+    driveFilter.car = carSearch.value;
+    carList.innerHTML = '';
+    const allow = allowedCars();
+    const rows = (d.cars || []).filter(c => {
+      if (allow && !allow.has(c.id)) return false;
+      const blob = `${c.label} ${c.id} ${c.brand || ''}`.toLowerCase();
+      return !q || blob.includes(q);
+    });
+    if (!rows.length) {
+      carList.append(el('div', 'empty',
+        allow ? 'No cars allowed on this server' : 'No cars'));
+      return;
+    }
+    rows.forEach(c => {
+      const r = el('div', 'drive-row' + (c.id === sel.car ? ' on' : ''));
+      const img = el('img');
+      img.loading = 'lazy';
+      img.alt = '';
+      img.src = 'api/thumb/car?id=' + encodeURIComponent(c.model || c.id);
+      img.onerror = () => { img.style.visibility = 'hidden'; };
+      const t = el('div', 'grow');
+      t.innerHTML = `<div class="name">${esc(c.label)}</div>`
+        + `<div class="tiny dim">${esc(c.id)}</div>`;
+      r.append(img, t);
+      if (c.mod) r.append(el('span', 'pill warn', 'mod'));
+      r.onclick = () => { sel.car = c.id; paintCars(); paintSelected(); };
+      carList.append(r);
+    });
+  }
+
+  function ownTrack(s) {
+    const map = (driveLocal && driveLocal.track_map) || {};
+    const name = String(s.track || '').trim();
+    return !name || !!map[name];
+  }
+  function ownCarOn(s) {
+    const ids = new Set((driveLocal && driveLocal.car_ids) || []);
+    const cars = s.cars || [];
+    if (!cars.length) return true;
+    return cars.some(c => ids.has(c));
+  }
+  function isAcecm(s) {
+    const ip = s.server_ip || '';
+    if (brTags[ip] && brTags[ip].hosted) return true;
+    return /\[ACECM\]/i.test(String(s.name || ''));
+  }
+  function tagDriveIps(rows) {
+    const ips = [...new Set(rows.map(s => s.server_ip).filter(Boolean))];
+    const need = ips.filter(ip => !brTags[ip]);
+    if (!need.length) return;
+    need.slice(0, 72).forEach(ip => { brTags[ip] = { pending: true }; });
+    (async () => {
+      const batch = need.slice(0, 72);
+      for (let i = 0; i < batch.length; i += 24) {
+        const chunk = batch.slice(i, i + 24);
+        try {
+          const qs = chunk.map(ip => 'ip=' + encodeURIComponent(ip)).join('&');
+          const r = await fetch('/api/browser/tag?' + qs).then(x => x.json());
+          Object.assign(brTags, (r && r.hosts) || {});
+        } catch (e) {}
+        if (sel.via === 'server') paintServers();
+      }
+    })();
+  }
+
+  function paintSrvFilters() {
+    srvFilters.style.display = sel.via === 'server' ? '' : 'none';
+    if (sel.via !== 'server' || srvFilters.dataset.ready) return;
+    srvFilters.dataset.ready = '1';
+    const sort = el('select');
+    [['players', 'Most players'], ['ping', 'Lowest ping'],
+     ['name', 'Name'], ['track', 'Track']].forEach(([v, lab]) => {
+      const o = el('option', null, lab);
+      o.value = v;
+      if (v === driveFilter.sort) o.selected = true;
+      sort.append(o);
+    });
+    sort.onchange = () => { driveFilter.sort = sort.value; paintServers(); };
+    const chk = (key, lab) => {
+      const l = el('label', 'ctl');
+      const c = el('input');
+      c.type = 'checkbox';
+      c.checked = !!driveFilter[key];
+      c.onchange = () => { driveFilter[key] = c.checked; paintServers(); };
+      l.append(c, el('span', null, lab));
+      return l;
+    };
+    srvFilters.append(sort,
+      chk('hideFull', 'Hide full'),
+      chk('hideLocked', 'Hide password'),
+      chk('hasPlayers', 'Has players'),
+      chk('haveTrack', 'Track I have'),
+      chk('haveCar', 'Car I have'),
+      chk('acecmOnly', 'ACECM only'));
+    if (!driveLocal) {
+      api('browser/local').then(l => { driveLocal = l || {}; paintServers(); });
+    }
+  }
+
+  function paintServers() {
+    paintSrvFilters();
+    trkCol.querySelector('h2').textContent = 'Public servers';
+    trkSearch.placeholder = 'Filter name, track, car…';
+    const q = (trkSearch.value || '').toLowerCase();
+    driveFilter.track = trkSearch.value;
+    trkList.innerHTML = '';
+    const meta = d.servers_meta || {};
+    if (!(d.servers || []).length) {
+      trkList.append(el('div', 'empty',
+        meta.hint || meta.error
+        || 'No public list yet. Use Refresh list, or open Multiplayer '
+          + 'in-game once.'));
+      return;
+    }
+    const num = v => (typeof v === 'number' ? v : 0);
+    let rows = (d.servers || []).filter(s => {
+      if (driveFilter.hideFull && num(s.players) >= num(s.max_players)
+          && num(s.max_players) > 0) return false;
+      if (driveFilter.hideLocked && s.locked) return false;
+      if (driveFilter.hasPlayers && num(s.players) < 1) return false;
+      if (driveFilter.haveTrack && !ownTrack(s)) return false;
+      if (driveFilter.haveCar && !ownCarOn(s)) return false;
+      if (driveFilter.acecmOnly && !isAcecm(s)) return false;
+      if (!q) return true;
+      const blob = [s.name, s.track, s.layout, s.game_mode, s.server_ip]
+        .concat(s.cars || []).join(' ').toLowerCase();
+      return blob.includes(q);
+    });
+    rows.sort((a, b) => {
+      if (driveFilter.sort === 'ping')
+        return (num(a.ping) || 9999) - (num(b.ping) || 9999);
+      if (driveFilter.sort === 'track')
+        return String(a.track || '').localeCompare(String(b.track || ''));
+      if (driveFilter.sort === 'name')
+        return String(a.name || '').localeCompare(String(b.name || ''));
+      return num(b.players) - num(a.players);
+    });
+    if (!rows.length) {
+      trkList.append(el('div', 'empty',
+        'No matches — loosen the filters above'));
+      return;
+    }
+    const shown = rows.slice(0, 250);
+    if (rows.length > shown.length) {
+      trkList.append(el('div', 'tiny dim',
+        `Showing ${shown.length} of ${rows.length}`));
+    }
+    shown.forEach(s => {
+      const on = (sel.server_id && s.id === sel.server_id)
+        || (sel.server_ip && s.server_ip === sel.server_ip
+            && Number(s.server_tcp_port) === Number(sel.server_tcp_port));
+      const r = el('div', 'drive-row' + (on ? ' on' : ''));
+      r.dataset.ip = s.server_ip || '';
+      const t = el('div', 'grow');
+      const name = el('div', 'name');
+      name.append(document.createTextNode(
+        (s.name || '(unnamed)') + (s.locked ? ' 🔒' : '')));
+      if (isAcecm(s)) {
+        name.append(el('span', 'pill acecm', '<i class="dot"></i>ACECM'));
+      }
+      const sub = el('div', 'tiny dim',
+        `${esc(s.track || '—')} · ${esc(s.layout || '')}`
+        + ` · ${s.players || 0}/${s.max_players || 0}`
+        + ` · ${s.cars && s.cars.length ? s.cars.length + ' cars' : 'all cars'}`
+        + (s.ping ? ` · ${s.ping}ms` : ''));
+      t.append(name, sub);
+      const get = el('button', 'sm', 'Get content');
+      get.title = 'Ask this host\'s ACECM for anything you are missing';
+      get.onclick = ev => {
+        ev.stopPropagation();
+        contentFrom({
+          server_ip: s.server_ip,
+          server_tcp_port: s.server_tcp_port,
+          track: s.track || '',
+        });
+      };
+      r.append(t, get);
+      r.onclick = () => {
+        sel.server_id = s.id;
+        sel.server_ip = s.server_ip;
+        sel.server_tcp_port = s.server_tcp_port;
+        sel.server_udp_port = s.server_udp_port;
+        const allow = allowedCars();
+        if (allow && sel.car && !allow.has(sel.car)) sel.car = '';
+        paintServers();
+        paintCars();
+        paintSelected();
+        paintVia();
+      };
+      trkList.append(r);
+    });
+    tagDriveIps(shown);
+  }
+
+  function paintTracks() {
+    if (sel.via === 'server') { paintServers(); return; }
+    srvFilters.style.display = 'none';
+    trkCol.querySelector('h2').textContent = 'Track';
+    trkSearch.placeholder = 'Filter tracks…';
+    const q = (trkSearch.value || '').toLowerCase();
+    driveFilter.track = trkSearch.value;
+    trkList.innerHTML = '';
+    const rows = (d.tracks || []).filter(t => {
+      const blob = `${t.label} ${t.track} ${t.layout} ${t.name}`.toLowerCase();
+      return !q || blob.includes(q);
+    });
+    if (!rows.length) {
+      trkList.append(el('div', 'empty', d.tracks_error || 'No tracks'));
+      return;
+    }
+    rows.forEach(t => {
+      const r = el('div', 'drive-row' + (t.index === sel.track_index ? ' on' : ''));
+      const img = el('img');
+      img.loading = 'lazy';
+      img.alt = '';
+      img.src = 'api/thumb/track?folder=' + encodeURIComponent(t.track || '');
+      img.onerror = () => { img.style.visibility = 'hidden'; };
+      const cap = el('div', 'grow');
+      cap.innerHTML = `<div class="name">${esc(t.label || t.name)}</div>`
+        + `<div class="tiny dim">#${t.index} · ${esc(t.layout || '')}</div>`;
+      r.append(img, cap);
+      r.onclick = () => { sel.track_index = t.index; paintTracks(); paintSelected(); };
+      trkList.append(r);
+    });
+  }
+
+  function paintSelected() {
+    const c = carOf(sel.car);
+    paintHead(carHead,
+      'api/thumb/car?id=' + encodeURIComponent((c && (c.model || c.id)) || ''),
+      c ? c.label : 'Pick a car',
+      c ? c.id : '');
+    if (sel.via === 'server') {
+      const s = serverOf();
+      paintHead(trkHead,
+        'api/thumb/track?folder=' + encodeURIComponent((s && s.track) || ''),
+        s ? s.name : 'Pick a public server',
+        s ? `${s.track || ''} · ${s.players || 0}/${s.max_players || 0}`
+          + (s.locked ? ' · password' : '') : '');
+      return;
+    }
+    const t = trackOf(sel.track_index);
+    paintHead(trkHead,
+      'api/thumb/track?folder=' + encodeURIComponent((t && t.track) || ''),
+      t ? (t.label || t.name) : 'Pick a track',
+      t ? `#${t.index} · ${t.layout || ''}` : '');
+  }
+
+  function paintVia() {
+    const on = sel.via === 'server';
+    spFields.forEach(n => { n.style.display = on ? 'none' : ''; });
+    extras.style.display = on ? 'none' : '';
+    if (on) {
+      const s = serverOf();
+      const meta = d.servers_meta || {};
+      hint.textContent = s
+        ? `Sets your car to one this server allows, then joins `
+          + `${s.server_ip}:${s.server_tcp_port}.`
+        : (meta.hint || 'Pick a public server. The list is captured when you '
+          + 'open Multiplayer in-game.');
+      driveBtn.textContent = 'Join';
+      pwField.style.display = (s && s.locked) ? '' : 'none';
+    } else {
+      pwField.style.display = 'none';
+      hint.textContent = 'Writes the session, launches the game, and opens '
+        + 'the pit menu so you can change setup. Close the game first so '
+        + 'the save sticks.';
+      driveBtn.textContent = 'Drive';
+      paintExtras();
+    }
+    paintTracks();
+    paintCars();
+    paintSelected();
+  }
+
+  carSearch.oninput = paintCars;
+  trkSearch.oninput = paintTracks;
+  mode.onchange = () => { sel.game_mode = mode.value; paintExtras(); };
+  weather.onchange = () => { sel.weather = weather.value; };
+  hour.onchange = () => { sel.tod_hour = Number(hour.value); };
+  paintVia();
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/drive/status').then(x => x.json());
+      const phase = r.phase || 'idle';
+      const busy = ['writing', 'launching_game', 'starting_backend',
+                    'waiting_for_menu', 'waiting_for_session',
+                    'entering', 'selecting_car', 'starting_session',
+                    'starting_server', 'joining',
+                    'capturing_list', 'quitting_game'].includes(phase);
+      driveBtn.disabled = busy;
+      pull.disabled = busy;
+      driveBtn.textContent = busy ? (r.hint || phase)
+        : (sel.via === 'server' ? 'Join' : 'Drive');
+      if (r.fault) {
+        st.innerHTML = `<b style="color:var(--red)">${esc(r.fault)}</b>`;
+      } else if (phase === 'launched') {
+        st.innerHTML = `<b style="color:var(--ok)">${esc(r.hint || 'Launched')}</b>`;
+        if ((r.captured || 0) > 0 && sel.via === 'server') {
+          clearInterval(driveTimer);
+          driveTimer = null;
+          setTimeout(() => drivePage(), 500);
+        }
+      } else if (busy) {
+        st.textContent = r.hint || phase;
+      } else if (r.game_running) {
+        st.textContent = sel.via === 'server'
+          ? 'Game is running — Join will set the car and push into the server.'
+          : 'Game is running. Close it, then Drive.';
+      } else {
+        st.textContent = sel.via === 'server'
+          ? 'Pick a public server and an allowed car, then Join.'
+          : 'Pick a car and track, then Drive.';
+      }
+      if (!busy && driveTimer) {
+        clearInterval(driveTimer);
+        driveTimer = null;
+      }
+    } catch (e) {}
+  }
+
+  driveBtn.onclick = async () => {
+    if (!sel.car) { toast('Pick a car first', true); return; }
+    if (sel.via === 'server' && !sel.server_ip && !sel.server_id) {
+      toast('Pick a public server first', true); return;
+    }
+    driveBtn.disabled = true;
+    driveBtn.textContent = 'Starting…';
+    const r = await api('drive', {
+      via: sel.via,
+      server_id: sel.server_id,
+      server_ip: sel.server_ip,
+      server_tcp_port: sel.server_tcp_port,
+      server_udp_port: sel.server_udp_port,
+      password: sel.password,
+      car: sel.car,
+      track_index: sel.track_index,
+      game_mode: sel.game_mode,
+      weather: sel.weather,
+      tod_hour: sel.tod_hour,
+      num_opponents: sel.num_opponents,
+      skill_min: sel.skill_min,
+      skill_max: sel.skill_max,
+      aggressiveness: sel.aggressiveness,
+      single_make: sel.single_make,
+      duration_min: sel.duration_min,
+      practice_min: sel.practice_min,
+      quali_min: sel.quali_min,
+      warmup_min: sel.warmup_min,
+      race_laps: sel.race_laps,
+      starting_position: sel.starting_position,
+    });
+    if (!r.ok) {
+      driveBtn.disabled = false;
+      driveBtn.textContent = sel.via === 'server' ? 'Join' : 'Drive';
+      st.innerHTML = `<b style="color:var(--red)">${esc(r.error || 'failed')}</b>`;
+      return;
+    }
+    if (driveTimer) clearInterval(driveTimer);
+    driveTimer = setInterval(poll, 1200);
+    poll();
+  };
+  poll();
+}
+
 /* ------------------------------------------------------------ dashboard -- */
 async function dashboard() {
   // ⚠ Fetch everything FIRST, then clear and build. Clearing early leaves the
@@ -163,6 +784,9 @@ async function dashboard() {
   // button did nothing a user could see. Join through the in-game browser -
   // the proxy injects local servers into that list. The API endpoints are
   // still there for when the push is understood.
+  const bDrive = el('button', 'primary', 'Drive');
+  bDrive.title = 'Pick car, track and mode — ACECM is the home menu';
+  bDrive.onclick = () => go('drive');
   const bGame = el('button', null, 'Launch game');
   bGame.onclick = async () => {
     const r = await api('game/launch', {});
@@ -178,7 +802,7 @@ async function dashboard() {
     toast(r.ok ? 'Client starting — Instant Race, then Start. Look for Creating AiDriverEvo.'
                : (r.error || 'Launch failed'), !r.ok);
   };
-  row.append(bStart, bStop, bGame, bAI);
+  row.append(bDrive, bStart, bStop, bGame, bAI);
   c.append(row);
   p.append(c);
 
@@ -1340,11 +1964,37 @@ async function settingsPage() {
   ic.append(irow);
   p.append(ic);
 
+  const pc = el('div', 'card');
+  pc.innerHTML = '<h2>Lobby proxy</h2>'
+    + '<div class="tiny dim" style="margin-bottom:8px">The game talks to Kunos '
+    + 'through this process. Drive\'s public server list and Join need it.</div>';
+  const pl = el('label', 'ctl');
+  const pbox = el('input');
+  pbox.type = 'checkbox';
+  pbox.checked = cfg.auto_proxy !== false;
+  pbox.onchange = async () => {
+    const on = pbox.checked;
+    await api('config', { auto_proxy: on });
+    if (on) {
+      const r = await api('backend/start', { mode: 'proxy' });
+      toast(r.ok
+        ? 'Proxy will start with ACECM and stop when you close the window'
+        : (r.error || 'Saved, but the proxy did not start'), !r.ok);
+    } else {
+      toast('Proxy is manual — it will not start or stop with ACECM');
+    }
+  };
+  pl.append(pbox, el('span', null,
+    'Start the lobby proxy when ACECM opens, and stop it when ACECM closes'));
+  pc.append(pl);
+  p.append(pc);
+
   const c = el('div', 'card');
   c.innerHTML = '<h2>Paths &amp; ports</h2>';
   const g = el('div', 'grid g2');
   const draft = {};
   Object.entries(cfg).forEach(([k, v]) => {
+    if (k === 'auto_proxy' || typeof v === 'boolean') return;
     const l = el('label', 'f', `<span>${esc(k)}</span>`);
     const i = el('input');
     i.value = v;
@@ -2214,6 +2864,9 @@ let brFilter = '', brSort = 'players';
 let brLocal = { tracks: [], cars: [] };
 let brTags = {};
 let brAcecmOnly = false;
+let brHideFull = true;
+let brHideLocked = false;
+let brHasPlayers = false;
 let brRenderT;
 
 /* Ask the host beside a game server for whatever we lack.
@@ -2357,7 +3010,37 @@ async function browserPage() {
                   'ACECM only');
   only.title = 'Servers whose ACECM is reachable on TCP 8092 and is sharing content';
   only.onclick = () => { brAcecmOnly = !brAcecmOnly; browserPage(); };
-  row.append(search, sort, only);
+  const mkTog = (flag, lab) => {
+    const b = el('button', flag.get() ? 'sm primary' : 'sm', lab);
+    b.onclick = () => { flag.set(!flag.get()); browserPage(); };
+    return b;
+  };
+  const pullList = el('button', 'sm primary', 'Refresh list');
+  pullList.title = 'Launch the game, open Multiplayer, save the list, then quit';
+  pullList.onclick = async () => {
+    const r = await api('drive/capture', {});
+    if (!r.ok) { toast(r.error || 'Could not start', true); return; }
+    pullList.disabled = true;
+    pullList.textContent = r.hint || 'pulling…';
+    const tick = setInterval(async () => {
+      const s = await api('drive/status');
+      const phase = (s && s.phase) || '';
+      pullList.textContent = (s && s.hint) || phase || 'pulling…';
+      if (phase === 'launched' || phase === 'failed' || phase === 'idle') {
+        clearInterval(tick);
+        pullList.disabled = false;
+        pullList.textContent = 'Refresh list';
+        if (s && s.fault) toast(s.fault, true);
+        else if (s && s.captured) toast('Captured ' + s.captured + ' servers');
+        browserPage();
+      }
+    }, 1200);
+  };
+  row.append(search, sort, only,
+    mkTog({ get: () => brHideFull, set: v => { brHideFull = v; } }, 'Hide full'),
+    mkTog({ get: () => brHideLocked, set: v => { brHideLocked = v; } }, 'Hide password'),
+    mkTog({ get: () => brHasPlayers, set: v => { brHasPlayers = v; } }, 'Has players'),
+    pullList);
   head.append(row);
   p.append(head);
 
@@ -2422,13 +3105,17 @@ async function browserPage() {
       if (brTags[ip] && brTags[ip].hosted) return true;
       return /\[ACECM\]/i.test(String(s.server_name || ''));
     };
+    const num = v => (typeof v === 'number' ? v : 0);
     let rows = (d.servers || []).filter(s => {
       if (brAcecmOnly && !acecmOf(s)) return false;
+      const npl = num(s.players), nmax = num(s.max_players);
+      if (brHideFull && nmax > 0 && npl >= nmax) return false;
+      if (brHideLocked && s.driver_password) return false;
+      if (brHasPlayers && npl < 1) return false;
       if (!brFilter) return true;
       return [s.server_name, s.track, s.layout, s.event_name]
         .some(x => String(x || '').toLowerCase().includes(brFilter));
     });
-    const num = v => (typeof v === 'number' ? v : 0);
     rows.sort((a, b) => {
       if (brSort === 'players') return num(b.players) - num(a.players);
       if (brSort === 'ping') return (num(a.ping) || 9999) - (num(b.ping) || 9999);
@@ -2936,6 +3623,7 @@ async function logsPage() {
 
 /* ----------------------------------------------------------------- nav --- */
 const PAGES = {
+  drive: ['Drive', 'Single player or a local server — same car picker', drivePage],
   dashboard: ['Dashboard', 'Everything at a glance', dashboard],
   servers: ['Servers', 'Create, configure and run dedicated servers', serversPage],
   cars: ['Cars', 'What the dedicated server can actually load', carsPage],
@@ -3003,6 +3691,9 @@ Object.entries(PAGES).forEach(([name, spec]) => {
 function go(name) {
   if (typeof telTimer !== 'undefined' && telTimer) { clearInterval(telTimer); telTimer = null; }
   if (typeof telRaf !== 'undefined' && telRaf) { cancelAnimationFrame(telRaf); telRaf = null; }
+  if (typeof driveTimer !== 'undefined' && driveTimer && name !== 'drive') {
+    clearInterval(driveTimer); driveTimer = null;
+  }
   const [title, sub, fn] = PAGES[name] || PAGES.dashboard;
   $('#ttl').textContent = title;
   $('#sub').textContent = sub;
@@ -3017,7 +3708,7 @@ function go(name) {
 }
 document.querySelectorAll('nav a').forEach(a =>
   a.onclick = () => go(a.dataset.page));
-go((location.hash || '#dashboard').slice(1));
+go((location.hash || '#drive').slice(1));
 api('state').then(s => {
   $('#navfoot').textContent = s.server_exe_ok ? 'server ready' : 'server not found';
 });
