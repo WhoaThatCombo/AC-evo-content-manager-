@@ -38,7 +38,7 @@ Launch the game **from ACECM**. Steam “Verify integrity” undoes the lobby re
 
 ## Do not
 
-- Set the in-game **year** outside **2020–2035**. Values like 1948 crash the dedicated server before it binds 9700.
+- Set the in-game **year** outside **2020–2035**. Values like 1970 crash the dedicated server before it binds 9700.
 - Expect a visible server console. It is hidden on purpose; the exe will not stay up without a console, so ACECM gives it a hidden one.
 - Expect AI bots on a stock server. New profiles start with 0 AI.
 - Put ACECM’s game, server, or TLS keys in this repo. They stay on your machine.
