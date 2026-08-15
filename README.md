@@ -43,6 +43,9 @@ Launch the game **from ACECM**. Steam “Verify integrity” undoes the lobby re
 - Expect AI bots on a stock server. New profiles start with 0 AI.
 - Put ACECM’s game, server, or TLS keys in this repo. They stay on your machine.
 
+Implementation rules so features work on a **fresh `ACECM.exe`**, not only this
+PC: [PORTABILITY.md](PORTABILITY.md).
+
 ## Build from source
 
 ```bash
