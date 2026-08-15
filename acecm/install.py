@@ -286,12 +286,17 @@ def car_names():
     This is the only truthful source for those ids: the mod that ships the car
     declares its own display name. Kunos presets are not covered - their names
     are not in any file we have.
+
+    Client AND server folders. Drive used to read only the server side, so a
+    mod that landed on the client (or whose server copy has no .json yet)
+    never appeared in the Drive picker even though Content listed it.
     """
     names = {}
-    for m in installed().get("mods", []):
-        for c in m["cars"]:
-            if c["id"]:
-                names[c["id"]] = c["label"]
+    for which in ("server", "client"):
+        for m in installed(which).get("mods", []):
+            for c in m["cars"]:
+                if c.get("id") and c["id"] not in names:
+                    names[c["id"]] = c["label"]
     return names
 
 
@@ -490,10 +495,19 @@ def install(path, only=None, overwrite=False):
         _refresh_lobby()
     except Exception:
         pass
+    _after_content_change()
     return {"ok": True, "kind": "car", "installed": done, "missing": skipped,
             "incomplete": [m["name"] for m in incomplete],
             "sides": _mod_dests(create=False),
             "warning": "; ".join(notes) or None}
+
+
+def _after_content_change():
+    try:
+        from . import content
+        content.forget_lists()
+    except Exception:
+        pass
 
 
 def remove(name, sides=None):
@@ -896,6 +910,7 @@ def install_track_pack(path, folder=None, overwrite=False):
                 shutil.move(dest, dest2)
                 dest, folder = dest2, want
     reg = trackmod.register_client_track(folder, meta)
+    _after_content_change()
     return {
         "ok": True,
         "kind": "track",
@@ -947,6 +962,7 @@ def install_track_folder(path, folder=None, overwrite=False):
         except OSError:
             pass
     reg = trackmod.register_client_track(folder, meta)
+    _after_content_change()
     return {
         "ok": True,
         "kind": "track",
@@ -1026,6 +1042,8 @@ def ingest_staging(did, overwrite=False):
         r["id"] = did
         return r
     drop_cleanup(did)
+    if r.get("ok"):
+        _after_content_change()
     return r
 
 

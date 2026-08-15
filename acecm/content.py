@@ -154,8 +154,59 @@ def tracks():
             "label": f"{_pretty(e.get('track',''))} - "
                      f"{_pretty(re.sub('^layout_', '', e.get('layout','')))}",
             "length_m": e.get("track_length"),
+            "mod": False,
         })
+    # Imported / dropped tracks are not in events_*.json. Drive used only
+    # that stock list, so a new track showed in Content and never in Drive.
+    seen = {(t.get("track") or "").lower() for t in out}
+    try:
+        from . import tracks as trackmod
+        extra = trackmod.importable() or []
+    except Exception:
+        extra = []
+    base = 10000
+    for n, t in enumerate(extra):
+        name = (t.get("display_name") or t.get("folder") or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        if not t.get("ok"):
+            continue
+        layout = t.get("layout") or ""
+        out.append({
+            "index": base + n,
+            "track": name,
+            "layout": layout,
+            "name": name,
+            "label": name + (f" - {_pretty(re.sub('^layout_', '', layout))}"
+                             if layout else ""),
+            "length_m": None,
+            "mod": True,
+            "custom_track": name,
+            "folder": t.get("folder") or "",
+        })
+        seen.add(name.lower())
     return {"tracks": out, "total": len(out)}
+
+
+def forget_lists():
+    """Drop cached inventories so the next Drive/Content load sees new files."""
+    stale = [
+        os.path.join(config.DATA, "track_map.json"),
+        os.path.join(config.DATA, "viewer", "index.json"),
+        os.path.join(config.DATA, "preset_map.json"),
+    ]
+    for f in stale:
+        try:
+            if os.path.isfile(f):
+                os.remove(f)
+        except OSError:
+            pass
+    try:
+        from . import carsmap
+        carsmap._mem["key"] = None
+        carsmap._mem["data"] = None
+    except Exception:
+        pass
 
 
 def models_seen():
