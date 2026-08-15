@@ -142,6 +142,21 @@ pre.log{
   transition:.18s;pointer-events:none;max-width:380px;
 }
 #toast.show{opacity:1;transform:none}
+#dropveil{
+  display:none;position:fixed;inset:0;z-index:80;
+  background:rgba(8,11,16,.78);
+  align-items:center;justify-content:center;
+  pointer-events:none;
+}
+#dropveil.on{display:flex}
+#dropveil div{
+  border:2px dashed var(--accent);color:var(--accent);
+  border-radius:16px;padding:28px 36px;font-size:16px;font-weight:600;
+  letter-spacing:.02em;background:rgba(12,20,24,.9);
+}
+.chk .lib-act{display:flex;gap:6px;flex:none;flex-wrap:wrap}
+.chk .lib-act button{white-space:nowrap}
+.lib-tabs{margin-bottom:10px}
 
 /* ---------------------------------------------------------- drive home -- */
 .drive{

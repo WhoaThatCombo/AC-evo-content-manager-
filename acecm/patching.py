@@ -282,8 +282,41 @@ def overview():
     return {"patches": out, "registry": REGISTRY}
 
 
+def _allowed_inspect_target(target):
+    """Only the configured game / dedicated-server binaries."""
+    target = os.path.abspath(target or "")
+    if not target or not os.path.isfile(target):
+        return False
+    allowed = []
+    for p in (config.server_exe(), config.CFG.get("game_exe"),
+              config.CFG.get("server_exe")):
+        if p:
+            allowed.append(os.path.abspath(p))
+    try:
+        from . import detect
+        for key in ("game_exe", "server_exe"):
+            found = detect.find(key)
+            if found:
+                allowed.append(os.path.abspath(found))
+    except Exception:
+        pass
+    roots = []
+    for p in allowed:
+        d = os.path.dirname(p)
+        if d:
+            roots.append(d)
+    try:
+        if target in allowed:
+            return True
+        return any(os.path.commonpath([r, target]) == r for r in roots)
+    except ValueError:
+        return False
+
+
 def inspect(target):
     """What a binary offers a patch author: caves, slack, identity."""
+    if not _allowed_inspect_target(target):
+        return {"ok": False, "error": "that file is not the game or server"}
     if not os.path.isfile(target):
         return {"ok": False, "error": "not found"}
     pe = PEInfo(target)

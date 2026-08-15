@@ -86,6 +86,26 @@ def _json(handler, obj, code=200):
     handler.wfile.write(body)
 
 
+# LAN/internet may only pull published content. Everything else is this
+# machine's admin console (Drive, patches, update, settings) and must not
+# answer on 0.0.0.0.
+_SHARE_GET = frozenset((
+    "/api/registry/list",
+    "/api/registry/manifest",
+    "/api/registry/file",
+    "/api/registry/pack",
+    # read-only live map. No start/stop, no admin.
+    "/live",
+    "/live.html",
+    "/live.js",
+    "/style.css",
+    "/api/live",
+    "/api/live/track",
+    "/api/live/board",
+    "/api/live/link",
+))
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ACECM"
     # Per-file track downloads used HTTP/1.0 (new TCP every file). 1.1
@@ -95,10 +115,22 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _peer_local(self):
+        ip = (self.client_address or ("",))[0]
+        return ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    def _deny_remote(self):
+        return _json(self, {
+            "ok": False,
+            "error": "that action is only allowed from this PC",
+        }, 403)
+
     # ---------------------------------------------------------------- GET --
     def do_GET(self):
         path, _, qs = self.path.partition("?")
         q = urllib.parse.parse_qs(qs)
+        if not self._peer_local() and path not in _SHARE_GET:
+            return self._deny_remote()
         try:
             if path == "/api/state":
                 return _json(self, self._state())
@@ -152,6 +184,21 @@ class Handler(BaseHTTPRequestHandler):
                     ports=(8092, 8093), timeout=to))
             if path == "/api/share":
                 return _json(self, contentsync.share_info())
+            if path in ("/live", "/live.html"):
+                return self._static("/live.html")
+            if path == "/live.js":
+                return self._static("/live.js")
+            if path == "/api/live":
+                return _json(self, telemetry.public_cars(
+                    (q.get("id") or [None])[0] or None))
+            if path == "/api/live/track":
+                return _json(self, telemetry.public_track(
+                    (q.get("id") or [None])[0] or None))
+            if path == "/api/live/board":
+                return _json(self, telemetry.public_board(
+                    (q.get("id") or [None])[0] or None))
+            if path == "/api/live/link":
+                return _json(self, telemetry.live_link())
             if path == "/api/browser/tag":
                 ips = q.get("ip") or []
                 if not ips and q.get("ips"):
@@ -202,6 +249,16 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, install.audit())
             if path == "/api/mods/scan":
                 return _json(self, install.scan_source((q.get("path") or [""])[0]))
+            if path == "/api/library":
+                return _json(self, install.library())
+            if path == "/api/library/clip":
+                return _json(self, install.clip_item(
+                    (q.get("kind") or [""])[0],
+                    (q.get("name") or [""])[0]))
+            if path == "/api/library/export":
+                return self._library_export(
+                    (q.get("kind") or [""])[0],
+                    (q.get("name") or [""])[0])
             if path == "/api/trackdeploy":
                 return _json(self, {**trackdeploy.state(),
                                     **trackdeploy.packages(
@@ -211,10 +268,17 @@ class Handler(BaseHTTPRequestHandler):
                                     "imported": trackdeploy.importable()})
             if path == "/api/tracks/installed":
                 return _json(self, install.tracks_installed())
+            if path == "/api/splines":
+                from . import splines
+                return _json(self, splines.status())
             if path == "/api/tracks":
                 return _json(self, content.tracks())
             if path == "/api/profiles":
                 items = servers.load()
+                for it in items:
+                    it["car_policy"] = servers.car_policy(it)
+                    if "allow_kunos" not in it:
+                        it["allow_kunos"] = servers.infer_allow_kunos(it)
                 return _json(self, {"profiles": items,
                                     "template": servers.TEMPLATE,
                                     "options": servers.OPTIONS,
@@ -260,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, patching.overview())
             if path == "/api/patches/inspect":
                 return _json(self, patching.inspect(
-                    (q.get("target") or [config.server_exe()])[0]))
+                    (q.get("target") or [config.server_exe() or ""])[0]))
             if path == "/api/backend":
                 return _json(self, backend.state())
             if path == "/api/telemetry":
@@ -298,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
                 mode = (q.get("mode") or ["proxy"])[0]
                 return _json(self, backend.log(mode))
             if path == "/api/config":
-                return _json(self, config.CFG)
+                return _json(self, config.public_cfg())
             return self._static(path)
         except Exception as ex:
             # ⚠ Log the TRACEBACK. This used to return a one-line message and
@@ -309,7 +373,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # --------------------------------------------------------------- POST --
     def do_POST(self):
-        path, _, _ = self.path.partition("?")
+        path, _, qs = self.path.partition("?")
+        if not self._peer_local():
+            return self._deny_remote()
+        # Drag-drop streams the file; do not parse it as JSON.
+        if path == "/api/drop/part":
+            return self._drop_part(urllib.parse.parse_qs(qs))
         n = int(self.headers.get("Content-Length") or 0)
         try:
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -329,7 +398,25 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, {"ok": True})
             if path == "/api/mods/install":
                 return _json(self, install.install(body.get("path"),
-                                                   body.get("only")))
+                                                   body.get("only"),
+                                                   overwrite=bool(body.get("overwrite"))))
+            if path == "/api/drop":
+                if body.get("cancel") and body.get("id"):
+                    install.drop_cleanup(body.get("id"))
+                    return _json(self, {"ok": True, "cancelled": True})
+                ow = bool(body.get("overwrite"))
+                if body.get("id"):
+                    return _json(self, install.ingest_staging(
+                        body.get("id"), overwrite=ow))
+                return _json(self, install.ingest(body.get("path"),
+                                                  overwrite=ow))
+            if path == "/api/library/remove":
+                return _json(self, install.remove_item(
+                    body.get("kind"), body.get("name")))
+            if path == "/api/library/export":
+                return _json(self, install.export_item(
+                    body.get("kind"), body.get("name"),
+                    body.get("dest") or None))
             if path == "/api/mods/fix":
                 return _json(self, install.apply_fix(body.get("name")))
             if path == "/api/mods/remove":
@@ -370,6 +457,12 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, trackdeploy.deploy(body.get("path")))
             if path == "/api/trackdeploy/restore":
                 return _json(self, trackdeploy.restore())
+            if path == "/api/splines/ship":
+                from . import splines
+                if body.get("all"):
+                    return _json(self, splines.ship_all())
+                return _json(self, splines.ship(
+                    body.get("folder"), body.get("layout")))
             if path == "/api/telemetry/start":
                 return _json(self, telemetry.start(
                     body.get("id"), bool(body.get("baseline_ai"))))
@@ -430,8 +523,7 @@ class Handler(BaseHTTPRequestHandler):
                 # stop all of them.
                 return _json(self, servers.stop(body.get("id")))
             if path == "/api/update/apply":
-                return _json(self, version.apply(body.get("url"),
-                                                 body.get("sha256")))
+                return _json(self, version.apply())
             if path == "/api/gamesettings/import":
                 return _json(self, gamesettings.import_bundle(
                     body.get("bundle") or {}, body.get("only"),
@@ -467,6 +559,9 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, drive.start(body))
             if path == "/api/drive/capture":
                 return _json(self, drive.capture_list())
+            if path == "/api/drive/list":
+                return _json(self, drive.publish_local(
+                    body.get("id") or body.get("local_id")))
             if path == "/api/config":
                 return _json(self, config.save(body))
             return _json(self, {"error": "unknown endpoint"}, 404)
@@ -507,6 +602,42 @@ class Handler(BaseHTTPRequestHandler):
     def _base(self):
         host = self.headers.get("Host") or f"127.0.0.1:{config.CFG['ui_port']}"
         return f"http://{host}"
+
+    def _drop_part(self, q):
+        """One file from a window drop, streamed to a staging folder."""
+        did = (q.get("id") or [""])[0]
+        name = (q.get("name") or [self.headers.get("X-Filename") or ""])[0]
+        n = int(self.headers.get("Content-Length") or 0)
+        r = install.drop_part(did, name, self.rfile, size=n)
+        return _json(self, r, 200 if r.get("ok") else 400)
+
+    def _library_export(self, kind, name):
+        """Build the pack and stream it (or JSON-error if it cannot)."""
+        r = install.export_item(kind, name)
+        if not r.get("ok"):
+            return _json(self, r, 400)
+        path = r.get("path")
+        if not path or not os.path.isfile(path):
+            return _json(self, {"error": "export file missing"}, 500)
+        filename = os.path.basename(path)
+        ctype = ("application/zip" if filename.lower().endswith(".zip")
+                 else "application/x-tar")
+        size = os.path.getsize(path)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="{filename}"')
+        self.end_headers()
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
     def _serve_pack(self, sid, folder):
         """One tar for a whole shared track — see registry.ensure_track_pack."""
@@ -571,7 +702,13 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path):
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.normpath(os.path.join(config.WEB, rel))
-        if not full.startswith(config.WEB) or not os.path.isfile(full):
+        web = os.path.abspath(config.WEB)
+        full = os.path.abspath(full)
+        try:
+            inside = os.path.commonpath([web, full]) == web
+        except ValueError:
+            inside = False
+        if not inside or not os.path.isfile(full):
             self.send_error(404)
             return
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
@@ -595,12 +732,19 @@ class Handler(BaseHTTPRequestHandler):
 def _allow_share_port(port):
     """Ask Windows Firewall to allow inbound TCP on the content port.
 
-    Without this, binding 0.0.0.0 still looks dead from another PC: the
-    packet arrives, the firewall drops it, discover() says the host is
-    not sharing. Best-effort - a non-admin start just logs and continues.
+    Friends need inbound TCP on this port for Get content. Admin routes
+    refuse non-loopback peers, so the hole is share GETs only. Best-effort
+    — a non-admin start just logs and continues.
     """
-    name = f"ACECM-content-{int(port)}"
+    name = f"ACECM-share-{int(port)}"
+    old = f"ACECM-content-{int(port)}"
     try:
+        # Drop the old any-profile rule if we created one. Public Wi‑Fi
+        # does not need this port open.
+        subprocess.run(
+            ["netsh", "advfirewall", "firewall", "delete", "rule",
+             f"name={old}"],
+            capture_output=True, text=True, timeout=8)
         r = subprocess.run(
             ["netsh", "advfirewall", "firewall", "show", "rule",
              f"name={name}"],
@@ -610,10 +754,11 @@ def _allow_share_port(port):
         r = subprocess.run(
             ["netsh", "advfirewall", "firewall", "add", "rule",
              f"name={name}", "dir=in", "action=allow", "protocol=TCP",
-             f"localport={int(port)}", "profile=any"],
+             f"localport={int(port)}", "profile=private"],
             capture_output=True, text=True, timeout=8)
         if r.returncode == 0:
-            logs.LOG.info("firewall: allowed inbound TCP %s", port)
+            logs.LOG.info("firewall: allowed inbound TCP %s on private networks",
+                          port)
         else:
             logs.LOG.warning("firewall: could not open TCP %s (need admin?): %s",
                              port, (r.stderr or r.stdout or "").strip()[:200])

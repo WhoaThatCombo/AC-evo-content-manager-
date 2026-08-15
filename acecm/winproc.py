@@ -163,3 +163,47 @@ def hidden_run(cmd, **kw):
     import subprocess
     kw.setdefault("creationflags", CREATE_NO_WINDOW)
     return subprocess.run(cmd, **kw)
+
+
+def hidden_popen(cmd, **kw):
+    """Start a helper (Python / ACECM --tool) without a visible console.
+
+    Do not use this for AssettoCorsaEVOServer.exe — that is a console
+    subsystem binary and CREATE_NO_WINDOW stops it binding ports. Use
+    hidden_console_popen for those.
+    """
+    import subprocess
+    import sys
+    if sys.platform == "win32":
+        kw.setdefault("creationflags", CREATE_NO_WINDOW)
+    return subprocess.Popen(cmd, **kw)
+
+
+def hidden_console_popen(cmd, **kw):
+    """Start a console exe hidden, but still give it a console.
+
+    CREATE_NO_WINDOW (0x08000000) creates no console at all. Console-subsystem
+    programs (the dedicated server) then never finish CRT startup and never
+    listen on TCP. CREATE_NEW_CONSOLE + SW_HIDE allocates a console and hides
+    the window — same on every Windows machine.
+    """
+    import subprocess
+    import sys
+    if sys.platform == "win32":
+        si = kw.get("startupinfo") or subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        kw["startupinfo"] = si
+        kw["creationflags"] = kw.get("creationflags", 0) | subprocess.CREATE_NEW_CONSOLE
+    return subprocess.Popen(cmd, **kw)
+
+
+def hide_console():
+    """Detach this process from its console so only the app window remains."""
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        _k32.FreeConsole()
+    except Exception:
+        pass

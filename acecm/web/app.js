@@ -37,6 +37,7 @@ function toast(msg, bad) {
 /* Content Manager's home: pick car + track + mode, then Drive walks the
    client into a dedicated session. EVO has no -car/-track launch flags. */
 let driveTimer = null;
+let driveReloadT = null;
 let driveFilter = {
   car: '', track: '',
   sort: 'players',
@@ -49,8 +50,13 @@ let driveFilter = {
 };
 let driveLocal = null;
 
-async function drivePage() {
+function stopDrivePoll() {
   if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
+  if (driveReloadT) { clearTimeout(driveReloadT); driveReloadT = null; }
+}
+
+async function drivePage() {
+  stopDrivePoll();
   const d = await api('drive');
   if (d && d.error && !d.cars) {
     $('#page').innerHTML = `<div class="err">${esc(d.error)}</div>`;
@@ -71,6 +77,7 @@ async function drivePage() {
   const sel = {
     via: pick.via === 'server' ? 'server' : 'sp',
     server_id: pick.server_id || '',
+    local_id: pick.local_id || '',
     server_ip: pick.server_ip || '',
     server_tcp_port: pick.server_tcp_port || 0,
     server_udp_port: pick.server_udp_port || 0,
@@ -114,13 +121,55 @@ async function drivePage() {
           && Number(s.server_tcp_port) === Number(sel.server_tcp_port))
     ) || null;
   }
+  function localOf() {
+    return (d.local_servers || []).find(s => s.id === sel.local_id) || null;
+  }
   function allowedCars() {
-    const sv = serverOf();
-    if (sel.via !== 'server' || !sv || !(sv.cars || []).length) return null;
+    const sv = sel.via === 'local' ? localOf() : serverOf();
+    if ((sel.via !== 'server' && sel.via !== 'local') || !sv || !(sv.cars || []).length)
+      return null;
     return new Set(sv.cars);
   }
+  function carLabel(id) {
+    const c = carOf(id);
+    if (c && c.label) return c.label;
+    return String(id || '')
+      .replace(/^preset_/, '')
+      .replace(/_mech_\d+$/, '')
+      .replace(/_/g, ' ');
+  }
+  function carIsMod(id) {
+    const c = carOf(id);
+    if (c) return !!c.mod;
+    return !/_mech_\d+$/.test(String(id || ''))
+      || String(id || '').indexOf('preset_modded') >= 0;
+  }
+  function carAllowed(c, allow) {
+    if (!allow) return true;
+    if (allow.has(c.id) || (c.model && allow.has(c.model))) return true;
+    for (const a of allow) {
+      if (c.id && (c.id === a || a.indexOf(c.id) >= 0 || c.id.indexOf(a) >= 0))
+        return true;
+      if (c.model && (a.indexOf(c.model) >= 0 || c.model.indexOf(a) >= 0))
+        return true;
+    }
+    return false;
+  }
+  function carsLine(s) {
+    const cars = s.cars || [];
+    if (!cars.length) return 'all cars';
+    const names = cars.slice(0, 3).map(carLabel);
+    let bit = names.join(', ');
+    if (cars.length > 3) bit += ' +' + (cars.length - 3);
+    const mods = cars.filter(carIsMod);
+    if (mods.length)
+      bit += mods.length === cars.length
+        ? ' · mods'
+        : ' · ' + mods.length + ' mod' + (mods.length === 1 ? '' : 's');
+    return bit;
+  }
 
-  [['sp', 'Single player'], ['server', 'Public servers']].forEach(([v, lab]) => {
+  [['sp', 'Single player'], ['local', 'My server'], ['server', 'Public servers']].forEach(([v, lab]) => {
     const b = el('button', 'sm' + (sel.via === v ? ' primary' : ''), lab);
     b.dataset.via = v;
     b.onclick = () => {
@@ -139,7 +188,7 @@ async function drivePage() {
   pull.onclick = async () => {
     const r = await api('drive/capture', {});
     if (!r.ok) { toast(r.error || 'Could not start', true); return; }
-    if (driveTimer) clearInterval(driveTimer);
+    stopDrivePoll();
     driveTimer = setInterval(poll, 1200);
     poll();
   };
@@ -292,7 +341,7 @@ async function drivePage() {
     carList.innerHTML = '';
     const allow = allowedCars();
     const rows = (d.cars || []).filter(c => {
-      if (allow && !allow.has(c.id)) return false;
+      if (allow && !carAllowed(c, allow)) return false;
       const blob = `${c.label} ${c.id} ${c.brand || ''}`.toLowerCase();
       return !q || blob.includes(q);
     });
@@ -327,7 +376,11 @@ async function drivePage() {
     const ids = new Set((driveLocal && driveLocal.car_ids) || []);
     const cars = s.cars || [];
     if (!cars.length) return true;
-    return cars.some(c => ids.has(c));
+    return cars.some(id => {
+      if (ids.has(id)) return true;
+      const c = carOf(id);
+      return !!(c && ((c.model && ids.has(c.model)) || ids.has(c.id)));
+    });
   }
   function isAcecm(s) {
     const ip = s.server_ip || '';
@@ -349,6 +402,7 @@ async function drivePage() {
           Object.assign(brTags, (r && r.hosts) || {});
         } catch (e) {}
         if (sel.via === 'server') paintServers();
+        if (sel.via === 'local') paintLocal();
       }
     })();
   }
@@ -451,7 +505,7 @@ async function drivePage() {
       const sub = el('div', 'tiny dim',
         `${esc(s.track || '—')} · ${esc(s.layout || '')}`
         + ` · ${s.players || 0}/${s.max_players || 0}`
-        + ` · ${s.cars && s.cars.length ? s.cars.length + ' cars' : 'all cars'}`
+        + ` · ${esc(carsLine(s))}`
         + (s.ping ? ` · ${s.ping}ms` : ''));
       t.append(name, sub);
       const get = el('button', 'sm', 'Get content');
@@ -482,8 +536,81 @@ async function drivePage() {
     tagDriveIps(shown);
   }
 
+  function paintLocal() {
+    srvFilters.style.display = 'none';
+    trkCol.querySelector('h2').textContent = 'My servers';
+    trkSearch.placeholder = 'Filter your servers…';
+    const q = (trkSearch.value || '').toLowerCase();
+    trkList.innerHTML = '';
+    const be = d.backend || {};
+    const rows = (d.local_servers || []).filter(s => {
+      if (!q) return true;
+      const blob = [s.name, s.track, s.layout, s.game_mode]
+        .concat(s.cars || []).join(' ').toLowerCase();
+      return blob.includes(q);
+    });
+    if (!rows.length) {
+      trkList.append(el('div', 'empty',
+        'No ACECM server profiles yet. Open Servers and create one, then come back.'));
+      return;
+    }
+    if (!sel.local_id && rows[0]) sel.local_id = (rows.find(s => s.running) || rows[0]).id;
+    const note = el('div', 'tiny dim');
+    note.style.padding = '6px 4px 10px';
+    note.innerHTML = 'Join starts the host if it is stopped, writes the lobby '
+      + 'row (track, cars, name), and opens Multiplayer so it shows as '
+      + '<b>[ACECM]</b>. '
+      + (be.listening
+        ? 'Lobby proxy is on.'
+        : 'Lobby proxy starts with Join.');
+    trkList.append(note);
+    rows.forEach(s => {
+      const on = s.id === sel.local_id;
+      const r = el('div', 'drive-row' + (on ? ' on' : ''));
+      const t = el('div', 'grow');
+      const name = el('div', 'name');
+      name.append(document.createTextNode(s.name || '(unnamed)'));
+      name.append(el('span', 'pill acecm', '<i class="dot"></i>ACECM'));
+      if (s.running) name.append(el('span', 'pill on', 'running'));
+      if (s.no_lobby) name.append(el('span', 'pill warn', 'private'));
+      const sub = el('div', 'tiny dim',
+        `${esc(s.track || '—')} · ${esc(s.layout || '')}`
+        + ` · :${s.tcp_port}`
+        + ` · ${s.clients != null ? s.clients + '/' + (s.max_players || 0) : '—'}`
+        + ` · ${esc(carsLine(s))}`);
+      t.append(name, sub);
+      const listB = el('button', 'sm' + (s.listed ? '' : ' primary'),
+                       s.listed ? 'Listed' : 'List in browser');
+      listB.title = 'Write the lobby advertisement and start the proxy so this '
+        + 'row appears in Multiplayer';
+      listB.onclick = async ev => {
+        ev.stopPropagation();
+        const r = await api('drive/list', { id: s.id });
+        toast(r.ok
+          ? ((r.ad && r.ad.track)
+            ? `Listed "${r.ad.name}" · ${r.ad.track}`
+            : 'Listed in the lobby')
+          : (r.error || 'Could not list'), !r.ok);
+        if (r.ok) drivePage();
+      };
+      r.append(t, listB);
+      r.onclick = () => {
+        sel.local_id = s.id;
+        const allow = allowedCars();
+        if (allow && sel.car && !carAllowed(carOf(sel.car) || {id: sel.car}, allow))
+          sel.car = '';
+        paintLocal();
+        paintCars();
+        paintSelected();
+        paintVia();
+      };
+      trkList.append(r);
+    });
+  }
+
   function paintTracks() {
     if (sel.via === 'server') { paintServers(); return; }
+    if (sel.via === 'local') { paintLocal(); return; }
     srvFilters.style.display = 'none';
     trkCol.querySelector('h2').textContent = 'Track';
     trkSearch.placeholder = 'Filter tracks…';
@@ -526,7 +653,19 @@ async function drivePage() {
         'api/thumb/track?folder=' + encodeURIComponent((s && s.track) || ''),
         s ? s.name : 'Pick a public server',
         s ? `${s.track || ''} · ${s.players || 0}/${s.max_players || 0}`
+          + ` · ${carsLine(s)}`
           + (s.locked ? ' · password' : '') : '');
+      return;
+    }
+    if (sel.via === 'local') {
+      const s = localOf();
+      paintHead(trkHead,
+        'api/thumb/track?folder=' + encodeURIComponent((s && s.track) || ''),
+        s ? s.name : 'Pick your server',
+        s ? `${s.track || ''} · :${s.tcp_port}`
+          + ` · ${carsLine(s)}`
+          + (s.running ? ' · running' : ' · stopped')
+          + (s.no_lobby ? ' · private' : '') : '');
       return;
     }
     const t = trackOf(sel.track_index);
@@ -537,10 +676,10 @@ async function drivePage() {
   }
 
   function paintVia() {
-    const on = sel.via === 'server';
+    const on = sel.via === 'server' || sel.via === 'local';
     spFields.forEach(n => { n.style.display = on ? 'none' : ''; });
     extras.style.display = on ? 'none' : '';
-    if (on) {
+    if (sel.via === 'server') {
       const s = serverOf();
       const meta = d.servers_meta || {};
       hint.textContent = s
@@ -549,6 +688,15 @@ async function drivePage() {
         : (meta.hint || 'Pick a public server. The list is captured when you '
           + 'open Multiplayer in-game.');
       driveBtn.textContent = 'Join';
+      pwField.style.display = (s && s.locked) ? '' : 'none';
+    } else if (sel.via === 'local') {
+      const s = localOf();
+      hint.textContent = s
+        ? ((s.running ? 'Joins ' : 'Starts then joins ')
+          + `127.0.0.1:${s.tcp_port} as [ACECM] ${s.name}. `
+          + 'The lobby row uses this profile\'s track and cars.')
+        : 'Create a server on the Servers tab, then pick it here.';
+      driveBtn.textContent = s && !s.running ? 'Start & Join' : 'Join';
       pwField.style.display = (s && s.locked) ? '' : 'none';
     } else {
       pwField.style.display = 'none';
@@ -571,8 +719,16 @@ async function drivePage() {
   paintVia();
 
   async function poll() {
+    if (_page !== 'drive') {
+      stopDrivePoll();
+      return;
+    }
     try {
       const r = await fetch('/api/drive/status').then(x => x.json());
+      if (_page !== 'drive') {
+        stopDrivePoll();
+        return;
+      }
       const phase = r.phase || 'idle';
       const busy = ['writing', 'launching_game', 'starting_backend',
                     'waiting_for_menu', 'waiting_for_session',
@@ -582,26 +738,32 @@ async function drivePage() {
       driveBtn.disabled = busy;
       pull.disabled = busy;
       driveBtn.textContent = busy ? (r.hint || phase)
-        : (sel.via === 'server' ? 'Join' : 'Drive');
+        : (sel.via === 'local'
+          ? ((localOf() && !localOf().running) ? 'Start & Join' : 'Join')
+          : (sel.via === 'server' ? 'Join' : 'Drive'));
       if (r.fault) {
         st.innerHTML = `<b style="color:var(--red)">${esc(r.fault)}</b>`;
       } else if (phase === 'launched') {
         st.innerHTML = `<b style="color:var(--ok)">${esc(r.hint || 'Launched')}</b>`;
         if ((r.captured || 0) > 0 && sel.via === 'server') {
-          clearInterval(driveTimer);
-          driveTimer = null;
-          setTimeout(() => drivePage(), 500);
+          stopDrivePoll();
+          driveReloadT = setTimeout(() => {
+            driveReloadT = null;
+            if (_page === 'drive') drivePage();
+          }, 500);
         }
       } else if (busy) {
         st.textContent = r.hint || phase;
       } else if (r.game_running) {
-        st.textContent = sel.via === 'server'
+        st.textContent = sel.via === 'server' || sel.via === 'local'
           ? 'Game is running — Join will set the car and push into the server.'
           : 'Game is running. Close it, then Drive.';
       } else {
-        st.textContent = sel.via === 'server'
-          ? 'Pick a public server and an allowed car, then Join.'
-          : 'Pick a car and track, then Drive.';
+        st.textContent = sel.via === 'local'
+          ? 'Pick your ACECM server and an allowed car, then Join.'
+          : (sel.via === 'server'
+            ? 'Pick a public server and an allowed car, then Join.'
+            : 'Pick a car and track, then Drive.');
       }
       if (!busy && driveTimer) {
         clearInterval(driveTimer);
@@ -615,10 +777,14 @@ async function drivePage() {
     if (sel.via === 'server' && !sel.server_ip && !sel.server_id) {
       toast('Pick a public server first', true); return;
     }
+    if (sel.via === 'local' && !sel.local_id) {
+      toast('Pick one of your ACECM servers first', true); return;
+    }
     driveBtn.disabled = true;
     driveBtn.textContent = 'Starting…';
     const r = await api('drive', {
       via: sel.via,
+      local_id: sel.local_id,
       server_id: sel.server_id,
       server_ip: sel.server_ip,
       server_tcp_port: sel.server_tcp_port,
@@ -647,7 +813,7 @@ async function drivePage() {
       st.innerHTML = `<b style="color:var(--red)">${esc(r.error || 'failed')}</b>`;
       return;
     }
-    if (driveTimer) clearInterval(driveTimer);
+    stopDrivePoll();
     driveTimer = setInterval(poll, 1200);
     poll();
   };
@@ -887,11 +1053,10 @@ async function serversPage() {
         <b>${esc(prof.name)}</b>
         <div class="tiny dim">${esc(shown)}
         &middot; ${esc(prof.game_mode || 'PRACTICE')}
-        &middot; ${prof.ai} AI &middot; ${prof.max_players} slots
-        &middot; ${esc(prof.weather || 'CLEAR')}
-        &middot; ${String(prof.tod_hour ?? 13).padStart(2,'0')}:${String(prof.tod_minute ?? 0).padStart(2,'0')}
+        &middot; ${esc((prof.car_policy && prof.car_policy.label) || 'all cars')}
+        &middot; ${prof.max_players} slots
         ${prof.driver_password ? '&middot; 🔒' : ''}
-        &middot; tcp ${prof.tcp_port}</div></div>
+        &middot; :${prof.tcp_port}</div></div>
         <span class="pill off" data-st="${prof.id}"><i class="dot"></i>checking</span>
       </div>`;
     const row = el('div', 'row wrap');
@@ -973,6 +1138,15 @@ async function serversPage() {
     const tView = el('button', 'sm primary', 'View map');
     tView.disabled = !ts.running;
     tView.onclick = () => { telProfile = prof.id; telTrack = null; go('telemetry'); };
+    const tLink = el('button', 'sm', 'Copy live link');
+    tLink.onclick = async () => {
+      const r = await api('live/link');
+      let url = (r && r.url) || (r && r.local_url) || '';
+      if (url && prof.id) url += (url.includes('?') ? '&' : '?') + 'id=' + encodeURIComponent(prof.id);
+      if (!url) { toast('No share address yet', true); return; }
+      try { await navigator.clipboard.writeText(url); } catch (e) {}
+      toast('Copied ' + url);
+    };
     const wAI = el('button', 'sm', 'Attach AI worker');
     wAI.title = 'One client joins this server with -ai_player_car (AiDriverEvo), not vAI ghosts';
     wAI.onclick = async () => {
@@ -980,8 +1154,15 @@ async function serversPage() {
       toast(r.ok ? (r.hint || 'Worker launching') : (r.error || 'Failed'), !r.ok);
       setTimeout(serversPage, 2000);
     };
-    row.append(start, stop, edit, logs, del, tOn, tOff, tView, wAI, tpill);
-    card.append(row, pre);
+    const more = el('details');
+    more.style.marginTop = '8px';
+    more.append(el('summary', 'tiny dim', 'More — logs, telemetry, AI worker, delete'));
+    const extra = el('div', 'row wrap');
+    extra.style.marginTop = '8px';
+    extra.append(logs, tOn, tOff, tView, tLink, wAI, tpill, del);
+    more.append(extra, pre);
+    row.append(start, stop, edit);
+    card.append(row, more);
     p.append(card);
 
     api('server/status?id=' + prof.id).then(s => {
@@ -1029,7 +1210,11 @@ function editor(prof, trk, opts, extra) {
     } else {
       inp = el('input');
       inp.type = kind === 'number' ? 'number' : (kind === 'password' ? 'password' : 'text');
-      if (kind === 'number' && extra) { inp.step = extra.step || 1; }
+      if (kind === 'number' && extra) {
+        inp.step = extra.step || 1;
+        if (extra.min != null) inp.min = extra.min;
+        if (extra.max != null) inp.max = extra.max;
+      }
       inp.value = prof[key] ?? '';
       inp.oninput = () => {
         prof[key] = kind === 'number' ? Number(inp.value) : inp.value;
@@ -1159,7 +1344,7 @@ function editor(prof, trk, opts, extra) {
   mk(g, 'max_players', 'Player slots', 'number');
   mk(g, 'cycle', 'Cycle sessions', 'bool');
 
-  g = section('AI', 'skill min/max spread the field — equal skill makes them clump');
+  g = section('AI', 'leave at 0 for a player-only server. Skill spread stops them clumping');
   mk(g, 'ai', 'AI cars', 'number');
   mk(g, 'skill_min', 'Skill min', 'number');
   mk(g, 'skill_max', 'Skill max', 'number');
@@ -1187,12 +1372,12 @@ function editor(prof, trk, opts, extra) {
   mk(g, 'max_wait_to_box', 'Max wait to box (s)', 'number');
 
   g = section('In-game date', 'the clock starts here; multiplier 0 freezes it', true);
-  mk(g, 'tod_year', 'Year', 'number');
+  mk(g, 'tod_year', 'Year', 'number', { min: 2020, max: 2035 });
   mk(g, 'tod_month', 'Month', 'number');
   mk(g, 'tod_day', 'Day', 'number');
   mk(g, 'tod_second', 'Second', 'number');
 
-  g = section('Visibility & output');
+  g = section('Visibility & output', 'private servers skip the public browser', true);
   mk(g, 'no_lobby', 'Private — do NOT list in the server browser', 'bool');
   mk(g, 'write_results', 'Write server results', 'bool');
   mk(g, 'export_json', 'Export season JSON', 'bool');
@@ -1210,20 +1395,61 @@ function editor(prof, trk, opts, extra) {
               (extra && extra.modTracks) || [],
               'Nothing borrowed — report the track as-is');
 
-  // Which cars this server accepts. Modded cars are the ones worth picking
-  // deliberately: a mod nobody else has is the usual reason a join is refused.
+  // Picking a mod used to start a whitelist of THAT car only, which banned
+  // every Kunos car. Default is: all stock cars stay allowed; tiles add mods.
+  if (prof.allow_kunos == null)
+    prof.allow_kunos = !((prof.cars || []).length) ||
+      (prof.cars || []).every(id => {
+        const m = ((extra && extra.cat && extra.cat.cars) || [])
+          .find(x => x.id === id);
+        return !m || m.mod;
+      });
   g = section('Cars allowed',
-    'Empty means every Kunos car plus every installed mod.');
+    'All Kunos stays on unless you switch to “only the cars I pick”.');
   const cars = ((extra && extra.cat && extra.cat.cars) || []);
   const chosen = new Set(prof.cars || []);
   const box = el('div');
   box.style.cssText = 'grid-column:1/-1';
+  const policy = el('div', 'row wrap');
+  policy.style.marginBottom = '8px';
   const chips = el('div', 'row wrap');
-  const redraw = () => {
-    chips.innerHTML = '';
-    if (!chosen.size) {
-      chips.append(el('span', 'tiny dim', 'Every car is allowed'));
+  const setPolicy = (kind) => {
+    if (kind === 'all') {
+      prof.allow_kunos = true;
+      chosen.clear();
+    } else if (kind === 'kunos_plus') {
+      prof.allow_kunos = true;
+      [...chosen].forEach(id => {
+        const m = cars.find(x => x.id === id);
+        if (m && !m.mod) chosen.delete(id);
+      });
     } else {
+      prof.allow_kunos = false;
+    }
+    prof.cars = [...chosen];
+    redraw();
+  };
+  const redraw = () => {
+    policy.innerHTML = '';
+    const kind = prof.allow_kunos
+      ? (chosen.size ? 'kunos_plus' : 'all')
+      : 'only';
+    [['all', 'All cars'],
+     ['kunos_plus', 'All Kunos + the mods I pick'],
+     ['only', 'Only the cars I pick']].forEach(([k, lab]) => {
+      const b = el('button', 'sm' + (kind === k ? ' primary' : ''), lab);
+      b.onclick = () => setPolicy(k);
+      policy.append(b);
+    });
+    chips.innerHTML = '';
+    if (kind === 'all') {
+      chips.append(el('span', 'tiny dim',
+        'Every stock car and every installed mod is allowed.'));
+    } else {
+      chips.append(el('span', 'tiny dim',
+        kind === 'kunos_plus'
+          ? 'Stock cars are allowed. Click mods below to add them.'
+          : 'Only the highlighted cars can join.'));
       [...chosen].forEach(id => {
         const meta = cars.find(x => x.id === id);
         const b = el('button', 'sm',
@@ -1232,10 +1458,8 @@ function editor(prof, trk, opts, extra) {
         b.onclick = () => { chosen.delete(id); prof.cars = [...chosen]; redraw(); };
         chips.append(b);
       });
-      const clr = el('button', 'sm danger', 'Allow every car');
-      clr.onclick = () => { chosen.clear(); prof.cars = []; redraw(); };
-      chips.append(clr);
     }
+    paints.forEach(fn => fn());
   };
   /* Pick cars by looking at them.
 
@@ -1246,6 +1470,7 @@ function editor(prof, trk, opts, extra) {
 
      Modded and Kunos are deliberately separate lists: mods are the ones you
      choose on purpose, and 11 of them were previously lost among 97. */
+  const paints = [];
   const panels = el('div');
   panels.style.cssText = 'grid-column:1/-1';
   const panel = (title, list, open) => {
@@ -1289,11 +1514,20 @@ function editor(prof, trk, opts, extra) {
       t.append(img, cap);
       t.title = x.model ? x.id : x.id + ' — no content installed for this car';
       t.onclick = () => {
-        if (on()) chosen.delete(x.id); else chosen.add(x.id);
+        const kind = prof.allow_kunos ? (chosen.size ? 'kunos_plus' : 'all') : 'only';
+        if (kind === 'all') {
+          prof.allow_kunos = !!x.mod;
+          chosen.clear();
+          chosen.add(x.id);
+        } else if (on()) {
+          chosen.delete(x.id);
+        } else {
+          chosen.add(x.id);
+        }
         prof.cars = [...chosen];
-        paint();
         redraw();
       };
+      paints.push(paint);
       paint();
       wrap.append(t);
     });
@@ -1481,20 +1715,35 @@ async function carGallery(p) {
   };
   row.append(psel);
 
-  async function saveAllowed(list) {
+  async function savePolicy(allowKunos, list) {
+    prof.allow_kunos = !!allowKunos;
     prof.cars = list;
     const r = await api('profiles/save', prof);
     if (r && r.error) { toast(r.error, true); return; }
-    toast(list.length ? `${list.length} preset(s) allowed`
-                      : 'Every car allowed');
+    toast(allowKunos
+      ? (list.length ? 'All Kunos + ' + list.length + ' extra' : 'Every car allowed')
+      : (list.length ? list.length + ' cars only' : 'All Kunos'));
     draw();
   }
-  const all = el('button', 'sm', 'Allow all');
-  all.onclick = () => prof && saveAllowed([]);
+  async function saveAllowed(list) {
+    return savePolicy(prof.allow_kunos !== false, list);
+  }
+  const all = el('button', 'sm', 'Allow all cars');
+  all.onclick = () => prof && savePolicy(true, []);
+  const plusKunos = el('button', 'sm', 'Allow all Kunos');
+  plusKunos.title = 'Stock cars stay allowed. Mods you already picked stay too.';
+  plusKunos.onclick = () => {
+    if (!prof) return;
+    const mods = (prof.cars || []).filter(id => {
+      const m = (cat.cars || []).find(x => x.id === id);
+      return !m || m.mod;
+    });
+    savePolicy(true, mods);
+  };
   const onlyMods = el('button', 'sm', 'Only mods');
-  onlyMods.onclick = () => prof && saveAllowed(
+  onlyMods.onclick = () => prof && savePolicy(false,
     (cat.cars || []).filter(x => x.mod).map(x => x.id));
-  row.append(all, onlyMods);
+  row.append(all, plusKunos, onlyMods);
   const build = el('button', 'sm primary',
     `Render missing (${cars.length - have.size})`);
   build.onclick = async () => {
@@ -1551,18 +1800,22 @@ async function carGallery(p) {
 
         if (prof && presets.length) {
           const cur = allowed();
-          const on = presets.every(q => cur.has(q.id));
+          const wideOpen = !cur.size && prof.allow_kunos !== false;
+          const on = wideOpen || presets.every(q => cur.has(q.id));
           const t = el('button', on ? 'sm primary' : 'sm',
                        on ? 'Allowed' : 'Allow');
-          t.title = cur.size ? '' :
-            'This profile allows every car — allowing one starts a whitelist';
+          t.title = wideOpen
+            ? 'Every car is allowed. Click a mod to keep all Kunos and add it.'
+            : '';
           t.onclick = () => {
+            if (wideOpen) {
+              const isMod = presets.some(q => q.mod);
+              savePolicy(!!isMod, presets.map(q => q.id));
+              return;
+            }
             const set = allowed();
-            // an empty list means "everything"; the first explicit pick has to
-            // start from every car, or one click would silently ban the rest
-            if (!set.size) (cat.cars || []).forEach(q => set.add(q.id));
             presets.forEach(q => on ? set.delete(q.id) : set.add(q.id));
-            saveAllowed([...set]);
+            savePolicy(prof.allow_kunos !== false, [...set]);
           };
           cap.append(t);
         }
@@ -1830,7 +2083,10 @@ async function backendPage() {
     + `<span class="pill ${b.have_cert ? 'on' : 'warn'}"><i class="dot"></i>`
     + `${b.have_cert ? 'TLS keypair present' : 'no TLS keypair — run backend/gencert.sh'}</span>`
     + `<span class="pill ${b.client_patched ? 'on' : 'off'}"><i class="dot"></i>`
-    + `${b.client_patched ? 'rdata → local backend' : 'rdata still Kunos'}</span>`));
+    + `${b.client_patched ? 'rdata → local backend' : 'rdata still Kunos'}</span>`
+    + `<span class="pill ${b.inspector_patched ? 'on' : 'off'}"><i class="dot"></i>`
+    + `${b.inspector_patched ? 'menu inspector :' + (b.inspector_port || 9444)
+                             : 'menu inspector off — Drive cannot Start'}</span>`));
 
   const seen = (b.game_backend || {}).url;
   if (seen) {
@@ -1847,10 +2103,12 @@ async function backendPage() {
   const red = el('div');
   red.style.marginTop = '12px';
   red.innerHTML = '<div class="tiny dim" style="margin-bottom:8px">'
-    + '<b>Required on a fresh install:</b> rewrite the lobby URL in the exe. '
-    + 'Steam relaunches the game with no arguments (<code>Arguments: 1</code>), '
-    + 'so <code>-backend=</code> never arrives. Launch from ACECM does the '
-    + 'rewrite automatically if the game is closed. Close the game first. '
+    + '<b>Required on a fresh install:</b> rewrite the lobby URL in the exe '
+    + 'and turn on the Gameface inspector. Steam relaunches the game with no '
+    + 'arguments (<code>Arguments: 1</code>), so <code>-backend=</code> never '
+    + 'arrives, and stock EVO leaves the inspector off — Drive then launches '
+    + 'and sits on the home menu. Launch from ACECM does both rewrites if the '
+    + 'game is closed, and starts Steam first if it is not already up. '
     + `Intended: <code>${esc(b.launch_backend || cu.intended || '')}</code>`
     + (cu.slot ? ` &middot; slot ${esc(cu.slot)}` : '')
     + '</div>';
@@ -1994,9 +2252,12 @@ async function settingsPage() {
   const g = el('div', 'grid g2');
   const draft = {};
   Object.entries(cfg).forEach(([k, v]) => {
-    if (k === 'auto_proxy' || typeof v === 'boolean') return;
+    if (k === 'auto_proxy' || k === 'update_token_set' || typeof v === 'boolean') return;
     const l = el('label', 'f', `<span>${esc(k)}</span>`);
     const i = el('input');
+    if (k === 'update_token' && cfg.update_token_set) {
+      i.placeholder = '(token saved — leave blank to keep it)';
+    }
     i.value = v;
     i.oninput = () => { draft[k] = typeof v === 'number' ? Number(i.value) : i.value; };
     l.append(i);
@@ -2244,14 +2505,328 @@ async function shareCard(p) {
   p.append(c);
 }
 
+async function copyText(text, label) {
+  const t = String(text || '');
+  if (!t) { toast('Nothing to copy', true); return; }
+  try {
+    await navigator.clipboard.writeText(t);
+    toast('Copied ' + (label || t));
+  } catch (e) {
+    toast('Could not copy', true);
+  }
+}
+
+async function apiLong(path, body, ms) {
+  const opt = body ? { method: 'POST', body: JSON.stringify(body) } : {};
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms || 30 * 60 * 1000);
+  try {
+    const r = await fetch('/api/' + path, { ...opt, signal: ctrl.signal });
+    const j = await r.json().catch(() => ({ error: 'bad response' }));
+    if (j && j.error && !j.need_confirm) toast(j.error, true);
+    return j;
+  } catch (e) {
+    const msg = (e && e.name === 'AbortError')
+      ? (path + ' timed out') : String(e && e.message || e);
+    return { error: msg };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function dropId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+function overwritePrompt(r) {
+  const name = (r && (r.label || r.name)) || 'this';
+  if (r && r.same) {
+    return confirm('"' + name + '" is already installed and these files '
+      + 'are the same.\n\nOverwrite it anyway?');
+  }
+  return confirm('"' + name + '" is already installed, but these files '
+    + 'are different.\n\nOverwrite the installed copy?');
+}
+
+async function finishIngest(payload) {
+  let r = await apiLong('drop', payload);
+  if (r && r.need_confirm) {
+    if (!overwritePrompt(r)) {
+      if (payload.id) await api('drop', { id: payload.id, cancel: true });
+      toast('Install cancelled');
+      return { ok: false, cancelled: true };
+    }
+    r = await apiLong('drop', { ...payload, overwrite: true });
+  }
+  return r;
+}
+
+async function uploadDropped(files) {
+  const id = dropId();
+  for (const f of files) {
+    const r = await fetch(
+      '/api/drop/part?id=' + encodeURIComponent(id)
+      + '&name=' + encodeURIComponent(f.name),
+      { method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: f });
+    const j = await r.json().catch(() => ({ error: 'upload failed' }));
+    if (!j.ok) return j;
+  }
+  return finishIngest({ id });
+}
+
+function collectDropped(dt) {
+  return new Promise(resolve => {
+    const items = dt && dt.items ? [...dt.items] : [];
+    const files = [];
+    let pending = 0;
+    const finish = () => { if (!pending) resolve(files); };
+    const walk = (entry) => {
+      if (!entry) return;
+      if (entry.isFile) {
+        pending++;
+        entry.file(f => { files.push(f); pending--; finish(); },
+                   () => { pending--; finish(); });
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        pending++;
+        reader.readEntries(ents => {
+          pending--;
+          if ((ents || []).length > 40) files.tooMany = true;
+          else (ents || []).forEach(walk);
+          finish();
+        }, () => { pending--; finish(); });
+      }
+    };
+    const entries = items
+      .map(i => i.webkitGetAsEntry && i.webkitGetAsEntry())
+      .filter(Boolean);
+    if (entries.length) {
+      entries.forEach(walk);
+      finish();
+    } else {
+      resolve([...(dt.files || [])]);
+    }
+  });
+}
+
+function ingestToast(r) {
+  if (r && r.cancelled) return;
+  if (r && r.need_confirm) return;
+  if (!r || r.error) {
+    toast((r && (r.error || r.warning)) || 'Install failed', true);
+    return;
+  }
+  if (r.kind === 'track') {
+    toast(r.warning
+      ? `Installed ${r.display_name || r.folder} — ${r.warning}`
+      : `Installed track ${r.display_name || r.folder}`, !!r.warning);
+    return;
+  }
+  const n = (r.installed || []).length;
+  toast(r.warning || `Installed ${n} file(s) on client and server`, !!r.warning);
+}
+
+function bindDropAnywhere() {
+  const veil = $('#dropveil');
+  if (!veil || veil.dataset.bound) return;
+  veil.dataset.bound = '1';
+  let depth = 0;
+  const hasFiles = (e) => {
+    const t = e.dataTransfer;
+    return !!(t && [...(t.types || [])].includes('Files'));
+  };
+  document.addEventListener('dragenter', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth++;
+    veil.classList.add('on');
+  });
+  document.addEventListener('dragover', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  document.addEventListener('dragleave', e => {
+    if (!hasFiles(e)) return;
+    depth = Math.max(0, depth - 1);
+    if (!depth) veil.classList.remove('on');
+  });
+  document.addEventListener('drop', async e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    depth = 0;
+    veil.classList.remove('on');
+    const files = await collectDropped(e.dataTransfer);
+    if (files.tooMany || files.length > 40) {
+      toast('Unpacked tracks are too large to drop as a folder — '
+        + 'export a .tar from Content and drop that', true);
+      return;
+    }
+    if (!files.length) { toast('Nothing to install', true); return; }
+    toast('Installing ' + files.map(f => f.name).join(', ') + '…');
+    const r = await uploadDropped(files);
+    ingestToast(r);
+    if (r && r.ok && _page === 'content') contentPage();
+  });
+}
+
+function libRow(item, shareUrl) {
+  const row = el('div', 'chk');
+  const cars = (item.cars || []).map(x => esc(x.label || x.id)).join(', ');
+  const sub = item.kind === 'car'
+    ? ((item.size_mb || 0) + ' MB'
+      + (cars ? ' · ' + cars : '')
+      + (item.client_ok ? '' : ' · not on client')
+      + (item.server_ok ? '' : ' · not on server'))
+    : ((item.size_mb ? item.size_mb + ' MB · ' : '')
+      + esc(item.folder || item.name)
+      + (item.layout ? ' · ' + esc(item.layout) : '')
+      + (item.files ? ' · ' + item.files + ' files' : ''));
+  const ready = item.kind === 'car' ? !!item.ok : !!item.ok;
+  row.innerHTML =
+    `<span class="name"><b>${esc(item.label || item.name)}</b>`
+    + ` <span class="pill ${item.kind === 'track' ? 'acecm' : 'off'}">`
+    + `${item.kind}</span>`
+    + (item.shared ? ' <span class="pill on">shared</span>' : '')
+    + `<div class="tiny dim">${sub}`
+    + (item.issues || []).map(i =>
+      `<br><span style="color:var(--gold)">${esc(i)}</span>`).join('')
+    + (item.error
+      ? `<br><span style="color:var(--gold)">${esc(item.error)}</span>` : '')
+    + `</div></span>`
+    + `<span class="pill ${ready ? 'on' : 'warn'}"><i class="dot"></i>`
+    + `${ready ? 'ready' : 'incomplete'}</span>`;
+  const act = el('div', 'lib-act');
+  const exp = el('button', 'sm', 'Export');
+  exp.title = item.kind === 'track'
+    ? 'Save the multiplayer .tar (same file Get content downloads)'
+    : 'Save a zip of .kspkg + .json';
+  exp.onclick = async (ev) => {
+    ev.stopPropagation();
+    toast('Exporting — a track pack can take a minute…');
+    const r = await apiLong('library/export',
+                            { kind: item.kind, name: item.name });
+    if (r && r.ok) {
+      toast('Saved ' + (r.path || 'to Downloads'));
+      copyText(r.path, r.path);
+    }
+  };
+  const copy = el('button', 'sm', 'Copy');
+  copy.title = 'Copy the name friends use (folder / mod id)';
+  copy.onclick = async (ev) => {
+    ev.stopPropagation();
+    const r = await api('library/clip?kind=' + encodeURIComponent(item.kind)
+      + '&name=' + encodeURIComponent(item.name));
+    const v = (r && r.variants) || {};
+    // name first — that is what a pack / share entry uses
+    await copyText(v.name || item.name, v.name || item.name);
+  };
+  const pathB = el('button', 'sm', 'Path');
+  pathB.title = 'Copy the install path';
+  pathB.onclick = async (ev) => {
+    ev.stopPropagation();
+    const r = await api('library/clip?kind=' + encodeURIComponent(item.kind)
+      + '&name=' + encodeURIComponent(item.name));
+    await copyText((r && r.path) || item.path, 'path');
+  };
+  if (item.shared && shareUrl) {
+    const link = el('button', 'sm', 'Link');
+    link.title = 'Copy the Get content share URL';
+    link.onclick = (ev) => {
+      ev.stopPropagation();
+      copyText(shareUrl, shareUrl);
+    };
+    act.append(link);
+  }
+  const rm = el('button', 'sm danger', 'Delete');
+  rm.onclick = async (ev) => {
+    ev.stopPropagation();
+    const what = item.kind === 'track'
+      ? `Delete track "${item.label}"?\n\nRemoves the imported files. `
+        + 'Stock tracks are not touched.'
+      : `Delete car "${item.name}" from client and server?`;
+    if (!confirm(what)) return;
+    const r = await api('library/remove',
+                        { kind: item.kind, name: item.name });
+    toast(r && r.ok ? 'Removed ' + item.name : (r.error || 'Delete failed'),
+          !(r && r.ok));
+    contentPage();
+  };
+  act.append(exp, copy, pathB, rm);
+  row.append(act);
+  return row;
+}
+
+async function libraryCard(p) {
+  const lib = await api('library');
+  const c = el('div', 'card');
+  const cars = lib.cars || [];
+  const tracks = lib.tracks || [];
+  c.innerHTML = `<h2>Installed mods · ${lib.total ?? (cars.length + tracks.length)}</h2>`
+    + '<div class="tiny dim" style="margin-bottom:10px">Drag a car zip '
+    + '(<code>.kspkg</code> + <code>.json</code>) or a track pack '
+    + '(<code>.tar</code> — the same file multiplayer Get content uses) onto '
+    + '<b>any</b> page. Export writes that same file to Downloads.</div>';
+  const tools = el('div', 'row wrap lib-tabs');
+  const pick = el('button', 'primary', 'Install from file');
+  const inp = el('input');
+  inp.type = 'file';
+  inp.multiple = true;
+  inp.accept = '.zip,.tar,.kspkg,.json,.tgz';
+  inp.style.display = 'none';
+  pick.onclick = () => inp.click();
+  inp.onchange = async () => {
+    const files = [...(inp.files || [])];
+    if (!files.length) return;
+    toast('Installing ' + files.map(f => f.name).join(', ') + '…');
+    const r = await uploadDropped(files);
+    ingestToast(r);
+    contentPage();
+  };
+  let filter = 'all';
+  const tabAll = el('button', 'sm primary', `All · ${cars.length + tracks.length}`);
+  const tabCars = el('button', 'sm', `Cars · ${cars.length}`);
+  const tabTr = el('button', 'sm', `Tracks · ${tracks.length}`);
+  const list = el('div');
+  const setTab = (name) => {
+    filter = name;
+    tabAll.className = name === 'all' ? 'sm primary' : 'sm';
+    tabCars.className = name === 'car' ? 'sm primary' : 'sm';
+    tabTr.className = name === 'track' ? 'sm primary' : 'sm';
+    list.innerHTML = '';
+    const rows = name === 'car' ? cars
+      : name === 'track' ? tracks
+      : cars.concat(tracks);
+    if (!rows.length) {
+      list.append(el('div', 'empty',
+        name === 'track' ? 'No imported tracks'
+        : name === 'car' ? 'No car mods' : 'Nothing installed yet — drop a pack'));
+      return;
+    }
+    rows.forEach(it => list.append(libRow(it, lib.share_url)));
+  };
+  tabAll.onclick = () => setTab('all');
+  tabCars.onclick = () => setTab('car');
+  tabTr.onclick = () => setTab('track');
+  tools.append(pick, inp, tabAll, tabCars, tabTr);
+  c.append(tools, list);
+  p.append(c);
+  setTab('all');
+}
+
 async function contentPage() {
   const p = $('#page');
   p.innerHTML = '';
-  const mods = await api('mods');
 
-  // ⚠ Order matters. Hosting a custom track is why most people open this
-  // page, and the dashboard sends them here to publish one - so that comes
-  // first. Car mods and the read-only track inventory follow.
+  // Library first: install, export, delete, copy. Host/share stay below.
+  await libraryCard(p);
   await shareCard(p);
   // --- custom track deploy -------------------------------------------------
   const td = await api('trackdeploy');
@@ -2264,14 +2839,19 @@ async function contentPage() {
      telling you to "deploy it from Content". */
   const ic = el('div', 'card');
   const imported = (td.imported || []).filter(t => t.ok);
-  ic.innerHTML = `<h2>Your imported tracks &middot; ${imported.length}</h2>`
-    + '<div class="tiny dim" style="margin-bottom:10px">Deploying puts the '
-    + 'track\'s logic into the server archive under its own name, and shares '
-    + 'it so players missing it can download from you. Stock tracks are not '
-    + 'touched.</div>';
+  ic.innerHTML = `<h2>Host a custom track &middot; ${imported.length}</h2>`
+    + '<div class="tiny dim" style="margin-bottom:10px">Tracks you already '
+    + 'imported (EvoForge or Get content). Deploy writes the logic into the '
+    + 'server archive under the track\'s own name — stock tracks stay '
+    + 'untouched — and shares it so friends can download it.</div>'
+    + `<div class="row wrap" style="margin-bottom:10px">`
+    + `<span class="pill ${td.server_running ? 'bad' : 'on'}"><i class="dot"></i>`
+    + `server ${td.server_running ? 'RUNNING — stop it first' : 'stopped'}</span>`
+    + `<span class="pill ${td.backup ? 'on' : 'off'}"><i class="dot"></i>`
+    + `${td.backup ? 'backup ready' : 'no backup yet'}</span></div>`;
   if (!imported.length) {
     ic.append(el('div', 'empty',
-      'No imported tracks found in Saved Games\\ACE\\mods'));
+      'No imported tracks in Saved Games\\ACE\\mods'));
   } else {
     imported.forEach(t => {
       const row = el('div', 'chk');
@@ -2299,135 +2879,21 @@ async function contentPage() {
       ic.append(row);
     });
   }
-  p.append(ic);
-
-  const dc = el('div', 'card');
-  dc.innerHTML = '<h2>Deploy a custom track</h2>'
-    + '<div class="tiny dim" style="margin-bottom:10px">'
-    // ⚠ This used to say a new path "cannot be found at all". That turned out
-    // to be a malformed record header plus a table that must stay sorted, not
-    // a limit of the engine - native installs are proven, so the old wording
-    // now argues against what the button above it does.
-    + 'The track\'s logic files go into the server\'s '
-    + '<code>content.kspkg</code>; the art stays with each player. '
-    + '<b>Native</b> installs it under its own name, so stock tracks are '
-    + 'untouched and anyone who imported the track can join with no extra '
-    + 'setup. <b>Borrow a slot</b> is the old way: it overwrites a stock '
-    + 'track and every joiner must patch their own game.</div>'
-    + `<div class="row wrap" style="margin-bottom:10px">`
-    + `<span class="pill ${td.server_running ? 'bad' : 'on'}"><i class="dot"></i>`
-    + `server ${td.server_running ? 'RUNNING — stop it first' : 'stopped'}</span>`
-    + `<span class="pill ${td.backup ? 'on' : 'off'}"><i class="dot"></i>`
-    + `${td.backup ? 'pre-deploy backup exists' : 'no backup yet'}</span>`
-    + `<span class="pill off"><i class="dot"></i>${td.size_mb} MB archive</span>`
-    + `</div>`
-    + `<div class="tiny dim" style="margin-bottom:10px">Target: `
-    + `<code>${esc(td.kspkg)}</code><br>${esc(td.note)}</div>`;
-
-  (td.packages || []).forEach(pk => {
-    const row = el('div', 'chk');
-    // `a || b ? x : y` binds as `(a||b) ? x : y`, so a package WITH a note was
-    // showing the missing-files text instead. Prefer the note.
-    const why = pk.note ? pk.note
-      : ((pk.missing || []).length ? `missing ${pk.missing.join(', ')}` : '');
-    row.innerHTML = `<span class="name"><b>${esc(pk.display_name || '(unnamed)')}</b>`
-      + `<div class="tiny dim">${esc(pk.folder || '')}`
-      + (pk.files ? ` &middot; ${pk.files} files` : '')
-      + (pk.host_slots && pk.host_slots.length
-          ? ` &middot; borrows ${esc(pk.host_slots[0].split(/[\\/]/).pop())}` : '')
-      + `<br>${esc(pk.path)}</div></span>`
-      + `<span class="pill ${pk.ok ? 'on' : 'warn'}"><i class="dot"></i>`
-      + `${pk.ok ? 'ready' : esc(why || 'incomplete')}</span>`;
-    // Native install: the track keeps its own paths, so no stock track is
-    // overwritten and joiners need nothing beyond their EvoForge import.
-    const nat = el('button', 'sm primary', 'Deploy (native)');
-    nat.disabled = !pk.ok || td.server_running;
-    nat.title = 'Install at the track\'s own paths. Stock tracks stay intact '
-      + 'and clients that already imported this track need no extra install.';
-    nat.onclick = async () => {
-      if (!confirm('Install "' + (pk.display_name || pk.path)
-          + '" at its own paths?\n\nNo stock track is overwritten. Clients '
-          + 'need this track imported in EvoForge, under the same folder name '
-          + '(' + (pk.folder || '?') + ').\n\nThe archive is backed up first.'))
-        return;
-      toast('Installing — this rewrites a 300 MB archive, please wait…');
-      const r = await api('trackdeploy/deploy', { path: pk.path, native: 1 });
-      toast(r.ok ? ('Installed at content\\tracks\\' + r.folder
-                    + ' — ' + r.modes + ' game modes')
-                 : (r.error || 'Install failed'), !r.ok);
-      contentPage();
-    };
-    row.append(nat);
-
-    const go = el('button', 'sm', 'Deploy (borrow slot)');
-    go.disabled = !pk.ok || td.server_running;
-    go.title = 'Legacy: overwrites Road Atlanta\'s slots. Every client also '
-      + 'needs install_track.py. Kept as a fallback.';
-    go.onclick = async () => {
-      if (!confirm('Deploy "' + (pk.display_name || pk.path)
-          + '" by BORROWING a stock track\'s slots?\n\nRoad Atlanta will show '
-          + 'this track until you restore, and every joining client must run '
-          + 'install_track.py.\n\nPrefer "Deploy (native)".')) return;
-      toast('Deploying — this rewrites a 300 MB archive, please wait…');
-      const r = await api('trackdeploy/deploy', { path: pk.path });
-      toast(r.ok ? 'Track deployed' : (r.error || 'Deploy failed'), !r.ok);
-      contentPage();
-    };
-    row.append(go);
-    dc.append(row);
-    if (pk.note) dc.append(el('div', 'tiny dim',
-      '⚠ ' + esc(pk.note)));
-  });
-  if (!(td.packages || []).length)
-    dc.append(el('div', 'empty',
-      'No track packages found. Build one with build_track_package.py.'));
-
   const rrow = el('div', 'row');
   rrow.style.marginTop = '10px';
-  const rest = el('button', 'sm danger', 'Restore archive');
+  const rest = el('button', 'sm danger', 'Undo last deploy');
   rest.disabled = !td.backup;
+  rest.title = 'Put the server archive back the way it was before the last deploy';
   rest.onclick = async () => {
-    if (!confirm('Restore content.kspkg from the pre-deploy backup?')) return;
+    if (!confirm('Restore the server archive from the backup taken before deploy?'))
+      return;
     const r = await api('trackdeploy/restore', {});
     toast(r.ok ? 'Archive restored' : (r.error || 'Restore failed'), !r.ok);
     contentPage();
   };
   rrow.append(rest);
-  dc.append(rrow);
-  p.append(dc);
-
-  // --- installed car mods --------------------------------------------------
-  const c = el('div', 'card');
-  c.innerHTML = `<h2>Installed car mods &middot; ${mods.total ?? 0} `
-    + `(${mods.usable ?? 0} usable)</h2>`
-    + `<div class="tiny dim" style="margin-bottom:10px">The dedicated server `
-    + `reads mods from your user profile, not its install folder:<br>`
-    + `<code>${esc(mods.dir)}</code></div>`;
-  if (!(mods.mods || []).length) {
-    c.append(el('div', 'empty', 'No car mods installed'));
-  } else {
-    mods.mods.forEach(m => {
-      const row = el('div', 'chk');
-      const cars = (m.cars || []).map(x => esc(x.label)).join(', ');
-      row.innerHTML =
-        `<span class="name"><b>${esc(m.name)}</b>`
-        + (cars ? ` <span class="dim">— ${cars}</span>` : '')
-        + `<div class="tiny dim">${m.size_mb} MB`
-        + (m.why ? ` &middot; <span style="color:var(--gold)">${esc(m.why)}</span>` : '')
-        + `</div></span>`
-        + `<span class="pill ${m.usable ? 'on' : 'warn'}"><i class="dot"></i>`
-        + `${m.usable ? 'ready' : 'incomplete'}</span>`;
-      const rm = el('button', 'sm danger', 'Remove');
-      rm.onclick = async () => {
-        if (!confirm('Remove mod "' + m.name + '"?')) return;
-        await api('mods/remove', { name: m.name });
-        toast('Removed ' + m.name); contentPage();
-      };
-      row.append(rm);
-      c.append(row);
-    });
-  }
-  p.append(c);
+  ic.append(rrow);
+  p.append(ic);
 
   // --- cross-side audit ----------------------------------------------------
   // Cars need the same .kspkg + .json on BOTH sides. They drift apart easily,
@@ -2495,44 +2961,60 @@ async function contentPage() {
   if (!(au.mods || []).length) ac.append(el('div', 'empty', 'No mods on either side'));
   p.append(ac);
 
-  // --- install from folder / zip -------------------------------------------
+  // --- install from a path (folders cannot be uploaded) --------------------
   const inst = el('div', 'card');
-  inst.innerHTML = '<h2>Install a car mod</h2>'
-    + '<div class="tiny dim" style="margin-bottom:10px">Point at a folder or a '
-    + '.zip containing <code>&lt;mod&gt;.kspkg</code> and '
-    + '<code>&lt;mod&gt;.json</code>. Both are required — a mod without its '
-    + '.json installs fine and then never appears in the car list.</div>';
+  inst.innerHTML = '<h2>Install from a folder or file path</h2>'
+    + '<div class="tiny dim" style="margin-bottom:10px">If a drop will not '
+    + 'work, paste a path. Cars: a folder or zip with '
+    + '<code>.kspkg</code> + <code>.json</code>. Tracks: a multiplayer '
+    + '<code>.tar</code> or an unpacked track folder.</div>';
   const rowi = el('div', 'row');
   const inp = el('input');
-  inp.placeholder = 'C:\path\to\mod-folder  or  mod.zip';
-  const scan = el('button', null, 'Scan');
-  rowi.append(inp, scan);
+  inp.placeholder = 'C:\\path\\to\\mod.zip   or   track.tar   or   folder';
+  const goPath = el('button', 'primary', 'Install');
+  rowi.append(inp, goPath);
   inst.append(rowi);
-  const res = el('div');
-  res.style.marginTop = '10px';
-  inst.append(res);
-
-  scan.onclick = async () => {
-    res.innerHTML = '';
-    scanned = await api('mods/scan?path=' + encodeURIComponent(inp.value));
-    if (!scanned.ok) return;
-    if (!scanned.mods.length) { res.append(el('div', 'empty', 'No mods found there')); return; }
-    scanned.mods.forEach(m => {
-      res.append(el('div', 'chk',
-        `<span class="name">${esc(m.name)}</span>`
-        + `<span class="pill ${m.complete ? 'on' : 'warn'}"><i class="dot"></i>`
-        + `${m.complete ? 'kspkg + json' : (m.kspkg ? 'missing .json' : 'missing .kspkg')}</span>`));
-    });
-    const go = el('button', 'primary', `Install ${scanned.complete} mod(s)`);
-    go.onclick = async () => {
-      const r = await api('mods/install', { path: inp.value });
-      if (r.ok) toast(r.warning || ('Installed ' + (r.installed || []).length + ' file(s)'),
-                      !!r.warning);
-      contentPage();
-    };
-    res.append(go);
+  goPath.onclick = async () => {
+    const r = await finishIngest({ path: inp.value });
+    ingestToast(r);
+    contentPage();
   };
   p.append(inst);
+
+  // --- AI lines / telemetry maps ------------------------------------------
+  const sp = await api('splines');
+  const sc = el('div', 'card');
+  sc.innerHTML = `<h2>AI lines for telemetry &middot; `
+    + `${sp.ready_folders ?? 0}/${sp.folders ?? 0} tracks ready</h2>`
+    + '<div class="tiny dim" style="margin-bottom:10px">The dedicated server '
+    + 'does not ship racing-line files. Stock layouts are inside the game '
+    + 'archive; custom tracks (Barber, Highlands) keep theirs in the import '
+    + 'folder. Ship copies both next to the server so the live map and vAI '
+    + 'work on every hosted track.</div>'
+    + `<div class="row wrap" style="margin-bottom:10px">`
+    + `<span class="pill ${sp.server ? 'on' : 'off'}"><i class="dot"></i>`
+    + `${sp.server || 0} on server</span>`
+    + `<span class="pill"><i class="dot"></i>${sp.imported || 0} in imports</span>`
+    + `<span class="pill"><i class="dot"></i>${sp.archive || 0} in game archive</span>`
+    + `<span class="pill ${sp.missing ? 'warn' : 'on'}"><i class="dot"></i>`
+    + `${sp.missing || 0} not copied yet</span></div>`;
+  const shipAll = el('button', 'primary',
+    sp.missing ? `Copy ${sp.missing} missing line(s) to server` : 'Re-copy AI lines');
+  shipAll.onclick = async () => {
+    toast('Copying AI lines — first run reads the game archive…');
+    const r = await apiLong('splines/ship', { all: 1 });
+    toast(r.ok
+      ? `Copied ${r.copied_n || 0}, ${r.skipped_n || 0} already there`
+      : (r.error || (r.errors || []).join('; ') || 'Ship failed'), !r.ok);
+    contentPage();
+  };
+  sc.append(shipAll);
+  if ((sp.missing_imports || []).length) {
+    sc.append(el('div', 'tiny dim',
+      'Imports still missing on the server: '
+      + sp.missing_imports.map(esc).join(', ')));
+  }
+  p.append(sc);
 
   // --- tracks --------------------------------------------------------------
   const t = await api('tracks/installed');
@@ -3246,7 +3728,9 @@ async function telemetryPage() {
     + '<div class="tiny dim" style="margin-bottom:10px">Positions are read out '
     + 'of the dedicated server process — the server publishes no coordinates. '
     + 'Cars are found by which points <b>move</b>, so a car sitting still in '
-    + 'the pits cannot be seen at all.</div>';
+    + 'the pits cannot be seen at all. Names are bound at <b>join</b>; if four '
+    + 'cars leave the pits together and were never bound, they stay unlabeled '
+    + 'rather than being guessed (which would swap people).</div>';
   const row = el('div', 'row wrap');
   const st = el('span', 'pill off', '<i class="dot"></i>checking');
   const go = el('button', 'primary sm', 'Start telemetry');
@@ -3256,7 +3740,16 @@ async function telemetryPage() {
   const sp = el('button', 'sm danger', 'Stop');
   sp.onclick = async () => { await api('telemetry/stop', { id: telProfile }); toast('Stopped');
     setTimeout(telemetryPage, 800); };
-  row.append(go, sp, st);
+  const share = el('button', 'sm primary', 'Copy live link');
+  share.title = 'Anyone with the link can watch the map — no ACECM install';
+  share.onclick = async () => {
+    const r = await api('live/link');
+    const url = (r && (r.url || r.local_url)) || '';
+    if (!url) { toast('No share address yet', true); return; }
+    try { await navigator.clipboard.writeText(url); } catch (e) {}
+    toast('Copied ' + url + ' — they open it in a browser');
+  };
+  row.append(go, sp, share, st);
   head.append(row);
   p.append(head);
 
@@ -3627,7 +4120,7 @@ const PAGES = {
   dashboard: ['Dashboard', 'Everything at a glance', dashboard],
   servers: ['Servers', 'Create, configure and run dedicated servers', serversPage],
   cars: ['Cars', 'What the dedicated server can actually load', carsPage],
-  content: ['Content', 'Install and deploy cars and tracks', contentPage],
+  content: ['Content', 'Install, export and manage cars and tracks', contentPage],
   tracks: ['Tracks', 'Layouts available to host', tracksPage],
   backend: ['Backend', 'Host through our own lobby', backendPage],
   browser: ['Server browser', 'Every public EVO server', browserPage],
@@ -3691,9 +4184,7 @@ Object.entries(PAGES).forEach(([name, spec]) => {
 function go(name) {
   if (typeof telTimer !== 'undefined' && telTimer) { clearInterval(telTimer); telTimer = null; }
   if (typeof telRaf !== 'undefined' && telRaf) { cancelAnimationFrame(telRaf); telRaf = null; }
-  if (typeof driveTimer !== 'undefined' && driveTimer && name !== 'drive') {
-    clearInterval(driveTimer); driveTimer = null;
-  }
+  if (name !== 'drive') stopDrivePoll();
   const [title, sub, fn] = PAGES[name] || PAGES.dashboard;
   $('#ttl').textContent = title;
   $('#sub').textContent = sub;
@@ -3709,6 +4200,7 @@ function go(name) {
 document.querySelectorAll('nav a').forEach(a =>
   a.onclick = () => go(a.dataset.page));
 go((location.hash || '#drive').slice(1));
+bindDropAnywhere();
 api('state').then(s => {
   $('#navfoot').textContent = s.server_exe_ok ? 'server ready' : 'server not found';
 });

@@ -30,6 +30,54 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, "tools")
 DIST = os.path.join(HERE, "dist")
 
+
+def _version_file():
+    """A real VERSIONINFO resource. Blank file info + UPX is what Defender
+    treats as a packed dropper. Do not UPX this exe."""
+    sys.path.insert(0, HERE)
+    from acecm.version import VERSION
+    parts = []
+    for chunk in str(VERSION).split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 4:
+        parts.append(0)
+    vers = tuple(parts[:4])
+    comma = ",".join(str(n) for n in vers)
+    path = os.path.join(HERE, "ACECM.version")
+    path = os.path.abspath(path)
+    body = f"""# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({comma}),
+    prodvers=({comma}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        u'040904B0',
+        [StringStruct(u'CompanyName', u'ACECM'),
+         StringStruct(u'FileDescription', u'Assetto Corsa EVO Content Manager'),
+         StringStruct(u'FileVersion', u'{VERSION}'),
+         StringStruct(u'InternalName', u'ACECM'),
+         StringStruct(u'LegalCopyright', u'ACECM'),
+         StringStruct(u'OriginalFilename', u'ACECM.exe'),
+         StringStruct(u'ProductName', u'Assetto Corsa EVO Content Manager'),
+         StringStruct(u'ProductVersion', u'{VERSION}')])
+    ]),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)
+"""
+    open(path, "w", encoding="utf-8").write(body)
+    return path, VERSION
+
 # Where these scripts live on a DEV machine, so a build here picks up edits
 # automatically. These folders do not exist anywhere else, and that is fine:
 # the committed tools/ is then used as-is, which is what makes a fresh clone
@@ -37,7 +85,10 @@ DIST = os.path.join(HERE, "dist")
 _DL = os.path.join(os.path.expanduser("~"), "Downloads")
 SOURCES = {
     os.path.join(_DL, "ACE_server_portable"): [
-        "server_telemetry.py", "start_vai_server.py", "parse_spline.py",
+        # start_vai_server.py and server_telemetry.py live in this repo's
+        # tools/. Pulling them from the portable folder overwrote ship
+        # fixes whenever that copy was newer.
+        "parse_spline.py",
         "parse_edges.py", "server_track_inject.py", "build_track_package.py",
         "penalties_tool.py",
     ],
@@ -93,9 +144,13 @@ def build(clean=False):
     if not have:
         print("nothing staged - refusing to build an exe with no tools")
         return 1
+    ver_file, ver = _version_file()
+    print(f"version resource: {ver}")
     args = [
         sys.executable, "-m", "PyInstaller", "--noconfirm",
         "--onefile", "--name", "ACECM",
+        "--noupx",
+        "--version-file", ver_file,
         "--distpath", DIST,
         "--workpath", os.path.join(HERE, "build_tmp"),
         "--specpath", HERE,

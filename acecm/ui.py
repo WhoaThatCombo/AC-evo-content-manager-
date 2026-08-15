@@ -89,4 +89,9 @@ def run(url, title="Assetto Corsa EVO Content Manager"):
                           background_color="#0b0e13")
     # Persistent profile (so the window comes back quickly), but isolated
     # per ACECM version - see _storage_path.
+    try:
+        from . import winproc
+        winproc.hide_console()
+    except Exception:
+        pass
     webview.start(private_mode=False, storage_path=_storage_path())

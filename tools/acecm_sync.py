@@ -49,14 +49,21 @@ def human(n):
 
 def destination(entry):
     """Where a manifest path belongs on THIS machine."""
-    p = entry["path"]
-    if p.startswith("mods/"):
-        return os.path.join(CLIENT_MODS, os.path.basename(p))
-    if p.startswith("tracks/"):
-        # tracks/<package>/<relative path>
-        rest = p[len("tracks/"):]
-        return os.path.join(TRACK_DEST, *rest.split("/"))
-    return os.path.join(TRACK_DEST, os.path.basename(p))
+    p = (entry.get("path") or "").replace("\\", "/").lstrip("/")
+    parts = [x for x in p.split("/") if x and x != "."]
+    if not parts or ".." in parts:
+        raise ValueError("bad content path")
+    def under(root, extra):
+        root = os.path.abspath(root)
+        dest = os.path.abspath(os.path.join(root, *extra))
+        if os.path.commonpath([root, dest]) != root:
+            raise ValueError("path escapes content folder")
+        return dest
+    if parts[0] == "mods":
+        return under(CLIENT_MODS, parts[1:2])
+    if parts[0] == "tracks":
+        return under(TRACK_DEST, parts[1:])
+    return under(TRACK_DEST, [parts[-1]])
 
 
 def download(url, dest, expect, size):

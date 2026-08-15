@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -183,6 +184,8 @@ def state():
         # not reach the process. This slot is what actually steers it.
         "client_patched": probe.get("rdata_patched"),
         "client_url": probe,
+        "inspector_patched": probe_inspector().get("inspector_patched"),
+        "inspector_port": INSPECTOR_PORT,
         "game_backend": game_backend_seen(),
     }
 
@@ -324,6 +327,146 @@ def apply_redirect():
             "url": redirect_url(), "backup": bak}
 
 
+# Gameface/cohtml inspector. Stock sets DebuggerPort to 0xFFFFFFFF (invalid)
+# and the enable flag to 0, so :9444 never listens. Drive presses Start/Join
+# through that port — without this rewrite a fresh install launches and sits
+# on the home menu forever. Addresses are from AC EVO 0.8.1 / FUN_140ce58d0;
+# a game update that moves the function will fail the byte check instead of
+# scribbling.
+INSPECTOR_PORT = int(os.environ.get("INSPECTOR_PORT", "9444"))
+_INSPECTOR_PORT_VA = 0x140CE5B8C
+_INSPECTOR_PORT_ORIG = bytes.fromhex("c74538ffffffff")  # mov [rbp+0x38], -1
+_INSPECTOR_FLAG_VA = 0x140CE5B93
+_INSPECTOR_FLAG_ORIG = bytes.fromhex("66c7453c0001")    # flag 0, next byte 1
+_INSPECTOR_FLAG_NEW = bytes.fromhex("66c7453c0101")     # flag 1
+_inspector_cache = {}
+
+
+def _va_to_file(data, va):
+    e = struct.unpack_from("<I", data, 0x3C)[0]
+    n = struct.unpack_from("<H", data, e + 6)[0]
+    opt = struct.unpack_from("<H", data, e + 20)[0]
+    ib = struct.unpack_from("<Q", data, e + 24 + 24)[0]
+    rva = va - ib
+    for i in range(n):
+        vs, va_s, rs, ra = struct.unpack_from(
+            "<IIII", data, e + 24 + opt + i * 40 + 8)
+        if va_s <= rva < va_s + max(vs, rs):
+            return ra + (rva - va_s)
+    raise ValueError(f"VA {va:#x} is not in any section")
+
+
+def _inspector_want_port():
+    return _INSPECTOR_PORT_ORIG[:3] + struct.pack("<I", INSPECTOR_PORT)
+
+
+def probe_inspector():
+    """Is the Gameface inspector enabled in the exe? None if we cannot tell."""
+    exe = _game_exe()
+    if not exe:
+        return {"inspector_patched": None, "error": "game exe not found"}
+    try:
+        st = os.stat(exe)
+        key = (exe, st.st_mtime_ns, st.st_size, INSPECTOR_PORT)
+    except OSError as ex:
+        return {"inspector_patched": None, "error": str(ex)}
+    hit = _inspector_cache.get(key)
+    if hit:
+        return hit
+    try:
+        data = open(exe, "rb").read()
+        pf = _va_to_file(data, _INSPECTOR_PORT_VA)
+        gf = _va_to_file(data, _INSPECTOR_FLAG_VA)
+    except (OSError, ValueError, struct.error) as ex:
+        info = {"exe": exe, "inspector_patched": None, "error": str(ex)}
+        _inspector_cache.clear()
+        _inspector_cache[key] = info
+        return info
+    port_b = bytes(data[pf:pf + len(_INSPECTOR_PORT_ORIG)])
+    flag_b = bytes(data[gf:gf + len(_INSPECTOR_FLAG_ORIG)])
+    want = _inspector_want_port()
+    info = {
+        "exe": exe,
+        "inspector_patched": port_b == want and flag_b == _INSPECTOR_FLAG_NEW,
+        "port_site": hex(_INSPECTOR_PORT_VA),
+        "flag_site": hex(_INSPECTOR_FLAG_VA),
+        "port_bytes": port_b.hex(),
+        "flag_bytes": flag_b.hex(),
+        "port": INSPECTOR_PORT,
+        "known": (port_b in (want, _INSPECTOR_PORT_ORIG)
+                  and flag_b in (_INSPECTOR_FLAG_ORIG, _INSPECTOR_FLAG_NEW)),
+    }
+    _inspector_cache.clear()
+    _inspector_cache[key] = info
+    return info
+
+
+def apply_inspector():
+    """Turn on Gameface DevTools on :9444 so Drive can press Start/Join.
+
+    Same rules as apply_redirect: verify the site, back up once, write
+    nothing unless the expected bytes are there. Steam drops argv, so
+    there is no launch-flag substitute.
+    """
+    exe = _game_exe()
+    if not exe:
+        return {"ok": False, "error": "game exe not found"}
+    if not (1 <= INSPECTOR_PORT <= 65536):
+        return {"ok": False, "error": f"inspector port {INSPECTOR_PORT} "
+                                      "is not a valid TCP port"}
+    try:
+        data = bytearray(open(exe, "rb").read())
+        pf = _va_to_file(data, _INSPECTOR_PORT_VA)
+        gf = _va_to_file(data, _INSPECTOR_FLAG_VA)
+    except (OSError, ValueError, struct.error) as ex:
+        return {"ok": False,
+                "error": f"could not locate the inspector sites: {ex}"}
+    port_b = bytes(data[pf:pf + len(_INSPECTOR_PORT_ORIG)])
+    flag_b = bytes(data[gf:gf + len(_INSPECTOR_FLAG_ORIG)])
+    want = _inspector_want_port()
+    if port_b == want and flag_b == _INSPECTOR_FLAG_NEW:
+        _inspector_cache.clear()
+        return {"ok": True, "already": True, "port": INSPECTOR_PORT}
+    if port_b not in (want, _INSPECTOR_PORT_ORIG):
+        return {"ok": False,
+                "error": f"unexpected bytes at inspector port site "
+                         f"{_INSPECTOR_PORT_VA:#x}: {port_b.hex()} "
+                         f"(expected {_INSPECTOR_PORT_ORIG.hex()}). "
+                         f"the game may have updated — Drive cannot press "
+                         f"Start until this is re-derived"}
+    if flag_b not in (_INSPECTOR_FLAG_ORIG, _INSPECTOR_FLAG_NEW):
+        return {"ok": False,
+                "error": f"unexpected bytes at inspector flag site "
+                         f"{_INSPECTOR_FLAG_VA:#x}: {flag_b.hex()}"}
+    if _game_running(exe):
+        return {"ok": False,
+                "error": "the game is running — close it before enabling "
+                         "the menu inspector"}
+    bak = exe + ".bak_preinspector"
+    try:
+        if not os.path.exists(bak):
+            shutil.copy2(exe, bak)
+            logs.LOG.info("inspector backup: %s", bak)
+        data[pf:pf + len(want)] = want
+        data[gf:gf + len(_INSPECTOR_FLAG_NEW)] = _INSPECTOR_FLAG_NEW
+        with open(exe, "wb") as fh:
+            fh.write(data)
+    except PermissionError:
+        return {"ok": False, "needs_admin": True,
+                "error": f"no permission to modify {exe}. Run ACECM as "
+                         f"administrator once — Drive talks to the menu "
+                         f"on :{INSPECTOR_PORT}, and stock EVO leaves that "
+                         f"inspector off"}
+    except OSError as ex:
+        return {"ok": False, "error": f"could not write the client: {ex}"}
+    _inspector_cache.clear()
+    logs.LOG.info("inspector enabled: DebuggerPort %s, flag 1 (sites %s / %s)",
+                  INSPECTOR_PORT, hex(_INSPECTOR_PORT_VA),
+                  hex(_INSPECTOR_FLAG_VA))
+    return {"ok": True, "port": INSPECTOR_PORT, "backup": bak,
+            "off": hex(pf)}
+
+
 def restore_redirect():
     """Put the official Kunos client URL back."""
     exe = _game_exe()
@@ -404,6 +547,9 @@ def start(mode="proxy"):
         env["LAN_IP"] = lan
     env["OUR_IPS"] = ",".join(sorted(netutil.our_ips(lan)))
     env["PORT"] = str(config.CFG["backend_port"])
+    env["BACKEND_LISTEN"] = (
+        (config.CFG.get("backend_listen") or "127.0.0.1").strip()
+        or "127.0.0.1")
     # ⚠ Without this the log file is EMPTY on every user machine. Python
     # block-buffers stdout when it is a file rather than a console, so ~8 KB
     # of diagnostics sit in the buffer and are lost outright when the process
@@ -412,8 +558,9 @@ def start(mode="proxy"):
     # failure could never contain anything.
     env["PYTHONUNBUFFERED"] = "1"
     cmd = config.tool_cmd(tool, [])
-    p = subprocess.Popen(cmd, cwd=os.path.dirname(script), env=env,
-                         stdout=log, stderr=subprocess.STDOUT)
+    from . import winproc
+    p = winproc.hidden_popen(cmd, cwd=os.path.dirname(script), env=env,
+                             stdout=log, stderr=subprocess.STDOUT)
     logs.launched(f"backend ({mode})", cmd, p.pid, log=log.name)
     _procs[mode] = p
     # ⚠ Spawning is not starting. If the port is taken, or an import blows up
@@ -983,11 +1130,29 @@ def launch_game(extra_args=None):
                              "and launch again."}
         return {"ok": False, "error": "set game_exe in Settings"}
 
-    # Rewrite the stock URL before we start anything. On a fresh install
-    # this is the whole difference between "Launch worked" and an empty
-    # browser. If the game is already running we cannot write the exe,
-    # and starting another copy will not fix an unpatched process.
+    # Rewrite the exe before we start anything. On a fresh install the
+    # stock client still talks to Kunos AND has the menu inspector off,
+    # so Drive launches the game and then sits on the home screen.
+    # Cannot write while the process is running.
     patch = None
+    inspector = None
+    if not probe_inspector().get("inspector_patched"):
+        if _game_running(exe):
+            return {"ok": False,
+                    "error": "the game is already running and its menu "
+                             "inspector is still off. Close it completely, "
+                             "then Launch again — ACECM will enable the "
+                             "inspector so Drive can press Start."}
+        inspector = apply_inspector()
+        if not inspector.get("ok"):
+            extra = ""
+            if inspector.get("needs_admin"):
+                extra = " Run ACECM as administrator once to allow the write."
+            return {"ok": False,
+                    "error": (inspector.get("error") or "could not enable "
+                              "the menu inspector") + extra,
+                    "needs_admin": inspector.get("needs_admin"),
+                    "inspector": inspector}
     if not probe_client_url().get("rdata_patched"):
         if _game_running(exe):
             return {"ok": False,
@@ -1050,6 +1215,16 @@ def launch_game(extra_args=None):
         extra_args.append("--tryfromenv=startup_gamemode,load_single_car,backend")
     except OSError:
         pass
+    # steam:// is a no-op (or a permission toast) if Steam is still
+    # starting. Open the client first and give it ~20s rather than
+    # handing Drive a "launched" game that never appears.
+    steam = ensure_steam()
+    if not steam.get("ok"):
+        return {"ok": False,
+                "error": steam.get("error") or "Steam is not running — "
+                         "open Steam, then Drive again",
+                "steam": steam}
+
     # Do NOT Popen the game exe from ACECM. steam_api then checks ownership
     # on THIS process's token. If ACECM was run as admin to patch rdata, or
     # the friend is on Family Share, Steam answers
@@ -1067,11 +1242,71 @@ def launch_game(extra_args=None):
         subprocess.Popen(cmd, cwd=cwd, env=env)
     logs.launched("game client", cmd, None, backend=url, via=via,
                   rdata_patched=probe_client_url().get("rdata_patched"),
+                  inspector_patched=probe_inspector().get("inspector_patched"),
+                  steam=steam,
                   flags_env={k: env[k] for k in env if k.startswith("FLAGS_")})
     return {"ok": True, "via": via, "backend": url,
             "rdata_patched": probe_client_url().get("rdata_patched"),
-            "patch": patch,
+            "inspector_patched": probe_inspector().get("inspector_patched"),
+            "patch": patch, "inspector": inspector, "steam": steam,
             "flags_env": {k: env[k] for k in env if k.startswith("FLAGS_")}}
+
+
+def _steam_running():
+    from . import winproc
+    return bool(winproc.pids_named("steam"))
+
+
+def _steam_client_ready():
+    """steam.exe plus the helper that comes up after the client is usable."""
+    from . import winproc
+    return bool(winproc.pids_named("steam")) and bool(
+        winproc.pids_named("steamwebhelper"))
+
+
+def ensure_steam(wait=20.0):
+    """Make sure Steam is actually up before steam://rungameid.
+
+    A cold start of steam.exe is not ready to own a launch: the URL is
+    dropped or Steam toasts a permission error. If the client is already
+    signed in this returns immediately. Otherwise start steam.exe -silent
+    and wait up to `wait` seconds for steamwebhelper.
+    """
+    if _steam_client_ready():
+        return {"ok": True, "already": True}
+    root = detect.steam_root()
+    steam = os.path.join(root or "", "steam.exe")
+    started = False
+    if not _steam_running():
+        if not os.path.isfile(steam):
+            return {"ok": False,
+                    "error": "Steam is not running and steam.exe was not "
+                             "found. Open Steam, then try again"}
+        try:
+            subprocess.Popen([steam, "-silent"], cwd=root or None)
+            started = True
+            logs.LOG.info("started Steam; waiting up to %.0fs for the client",
+                          wait)
+        except OSError as ex:
+            return {"ok": False, "error": f"could not start Steam: {ex}"}
+    else:
+        logs.LOG.info("Steam is up but still starting; waiting up to %.0fs",
+                      wait)
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if _steam_client_ready():
+            time.sleep(0.8)
+            return {"ok": True, "started": started, "ready": True,
+                    "waited": round(wait - max(0.0, deadline - time.time()), 1)}
+        time.sleep(0.4)
+    if _steam_running():
+        logs.LOG.warning("Steam did not finish starting in %.0fs — "
+                         "launching the game anyway", wait)
+        return {"ok": True, "started": started, "ready": False,
+                "waited": wait}
+    return {"ok": False,
+            "error": f"Steam did not open within {int(wait)}s — "
+                     "open Steam yourself, then Drive again"}
 
 
 def _start_via_steam(appid):

@@ -20,6 +20,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 import zlib
 
 # ⚠ The server folder comes from the ENVIRONMENT first, and only then from
@@ -116,10 +117,21 @@ WARNING_TRIGGER_COUNTDOWN = int(os.environ.get("WARNING_TRIGGER_COUNTDOWN", "3")
 # the time penalty itself, in milliseconds
 TIME_PENALTY_MS = int(os.environ.get("TIME_PENALTY_MS", "5000"))
 # --- full in-game date, not just the hour ----------------------------------
+# 1948 (and other pre-2020 years) abort this exe with 0xC0000409
+# right after "Start Server" — never binds 9700. Seen live on the
+# "testing telemetry" profile.
 TOD_YEAR = int(os.environ.get("TOD_YEAR", "2024"))
 TOD_MONTH = int(os.environ.get("TOD_MONTH", "8"))
 TOD_DAY = int(os.environ.get("TOD_DAY", "15"))
 TOD_SECOND = int(os.environ.get("TOD_SECOND", "0"))
+if TOD_YEAR < 2020 or TOD_YEAR > 2035:
+    print(f"  warning: year {TOD_YEAR} crashes this dedicated server "
+          f"(0xC0000409); using 2024")
+    TOD_YEAR = 2024
+if TOD_MONTH < 1 or TOD_MONTH > 12:
+    TOD_MONTH = 8
+if TOD_DAY < 1 or TOD_DAY > 31:
+    TOD_DAY = 15
 # --- flags -----------------------------------------------------------------
 # -no_lobby keeps the server OFF the public browser (it will not register with
 # Kunos). Useful for a private session, and required if you want a clean
@@ -146,6 +158,17 @@ def encode_blob(obj):
     return base64.b64encode(struct.pack(">I", len(j)) + zlib.compress(j)).decode("ascii")
 
 
+def _load_catalog(name):
+    """Server folder first, then the copy shipped next to this script."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for base in (SRV, here):
+        p = os.path.join(base, name)
+        if p and os.path.isfile(p):
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+    raise SystemExit(f"missing {name} in {SRV} (no bundled copy either)")
+
+
 def main():
     # RACE_WEEKEND draws from a different event list than PRACTICE, so which
     # file to read has to follow the mode rather than being hardcoded.
@@ -153,7 +176,7 @@ def main():
         "EVENTS_FILE",
         "events_race_weekend.json" if "RACE" in GAME_MODE.upper()
         else "events_practice.json")
-    ev = json.load(open(os.path.join(SRV, events_file)))["events"][EVENT_IDX]
+    ev = _load_catalog(events_file)["events"][EVENT_IDX]
     # ⚠ A custom track is not IN events_*.json - those list the stock events
     # only, so an index can never name one. CUSTOM_EVENT carries the whole
     # event as JSON instead:
@@ -178,7 +201,7 @@ def main():
     # names truncated to 13 chars with no preset suffix (Tesla Model S Plaid,
     # SRT Tomahawk, Bugatti Bolide Drag Spec, ...). The server's content.kspkg
     # does not contain them, so letting a player pick one is a broken join.
-    _raw = [c["name"] for c in json.load(open(os.path.join(SRV, "cars.json")))["cars"]]
+    _raw = [c["name"] for c in _load_catalog("cars.json")["cars"]]
     _all = [c for c in _raw if re.fullmatch(r".+_mech_\d+", c)]
     _mods = [c for c in _raw if c not in _all]
     if _mods:
@@ -286,8 +309,32 @@ def main():
         return 1
     print(f"exe    : {EXE}")
     os.makedirs(os.path.dirname(LOG), exist_ok=True)
-    out = open(LOG, "w", encoding="utf-8", errors="replace")
-    p = subprocess.Popen(args, cwd=SRV, stdout=out, stderr=subprocess.STDOUT)
+    # Proven-good launch (orphan-test 2026-08-15). This exe is console
+    # subsystem. CREATE_NO_WINDOW or stdout=DEVNULL makes it print
+    # "Start Server" then die with 0xC0000409 and never bind 9700.
+    # CREATE_NEW_CONSOLE + SW_HIDE gives it a hidden console. Logging
+    # MUST go to a file THIS process keeps open until the exe exits —
+    # ACECM's last_start.log is closed when Start returns and must not
+    # be inherited.
+    log_f = open(LOG, "w", encoding="utf-8", errors="replace")
+    popen_kw = {"cwd": SRV, "stdout": log_f, "stderr": subprocess.STDOUT}
+    if sys.platform == "win32":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        popen_kw["startupinfo"] = si
+        popen_kw["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+    p = subprocess.Popen(args, **popen_kw)
+    time.sleep(1.2)
+    rc = p.poll()
+    if rc is not None:
+        try:
+            log_f.flush()
+        except OSError:
+            pass
+        print(f"server exe exited immediately (code {rc}) — "
+              f"see {LOG}")
+        return 1
     print(f"server started: pid {p.pid}")
     print(f"  name  : {NAME}")
     print(f"  track : {ev['track']} / {ev['layout']}")
@@ -313,11 +360,26 @@ def main():
     # first human joins - which is what --baseline-ai needs, and what a manual
     # start never wins the race for on a busy server.
     if os.environ.get("TELEMETRY") == "1":
-        tele = os.path.join(SRV, "server_telemetry.py")
-        args = [sys.executable, "-u", tele, "--wait", "120", "--baseline-ai"]
+        # Frozen ACECM.exe cannot run `ACECM.exe -u some.py`. Re-invoke
+        # this same binary as --tool. From source, use the bundled
+        # script — not a leftover copy in the server folder.
+        os.makedirs(os.path.join(SRV, "serverConfig"), exist_ok=True)
+        if getattr(sys, "frozen", False):
+            args = [sys.executable, "--tool", "server_telemetry",
+                    "--wait", "120", "--baseline-ai"]
+        else:
+            tele = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "server_telemetry.py")
+            if not os.path.isfile(tele):
+                tele = os.path.join(SRV, "server_telemetry.py")
+            args = [sys.executable, "-u", tele, "--wait", "120",
+                    "--baseline-ai"]
         log = open(os.path.join(SRV, "serverConfig", "telemetry.log"), "w")
         subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, cwd=SRV)
         print("telemetry: started (serverConfig/telemetry.log, JSON on :8091)")
+
+    sys.stdout.flush()
+    return p.wait()
 
 
 if __name__ == "__main__":
