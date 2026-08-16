@@ -278,8 +278,12 @@ async def handle(client):
     up_ssl.check_hostname = False
     up_ssl.verify_mode = ssl.CERT_NONE          # we are not the trust anchor here
     try:
-        async with websockets.connect(UPSTREAM, ssl=up_ssl, max_size=None,
-                                      ping_interval=None) as upstream:
+        # Kunos's permessage-deflate is not always a valid zlib stream
+        # (websockets then raises "incorrect header check" and the list
+        # never arrives). Uncompressed frames work on every machine.
+        async with websockets.connect(
+                UPSTREAM, ssl=up_ssl, max_size=None,
+                ping_interval=None, compression=None) as upstream:
             print("    upstream connected - relaying")
             await asyncio.gather(pump_up(client, upstream),
                                  pump_down(client, upstream))
@@ -332,6 +336,7 @@ async def main():
     # in CONNECTING if the negotiated subprotocol never comes back.
     serve_kw = dict(ssl=ctx, ssl_handshake_timeout=15,
                     max_size=None, ping_interval=None,
+                    compression=None,
                     subprotocols=["wss"])
     # ⚠ Without a handshake timeout a client that opens the socket and then
     # never completes TLS hangs in CONNECTING FOREVER: no error, no timeout,
