@@ -93,7 +93,9 @@ SOURCES = {
         "penalties_tool.py",
     ],
     os.path.join(_DL, "acevo_localconnect", "backend"): [
-        "acevo_proxy.py", "acevo_backend.py", "join_push.py", "gencert.sh",
+        # acevo_proxy.py is owned by this repo. A newer copy next to the
+        # author's other checkout used to overwrite the ship fix.
+        "acevo_backend.py", "join_push.py", "gencert.sh",
         # the proxy imports this; without it a shipped backend cannot start
         "acevo_proto.py", "dump_protos.py",
     ],
