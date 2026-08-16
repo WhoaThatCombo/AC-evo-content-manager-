@@ -45,6 +45,24 @@ from . import config, kspkg_write, logs, servers, tracktables
 REQUIRED = ["manifest.json", "containers.bin", "tracks_entry.bin"]
 
 
+def _arc(path):
+    """Archive keys are ALWAYS lowercase.
+
+    ⚠ The engine finds a file by hashing its path (FNV-1a-64 over UTF-16LE)
+    and it lowercases before hashing: across a stock client and server archive,
+    not ONE of 137,219 records contains a capital letter. A container read off
+    disk as "layout_Brooklyn Park.scene" therefore went into the package with
+    capitals, hashed to a key the engine never asks for, and the server died
+    with "Failed to find file" for a file that was present, in-bounds and
+    readable - which is about as misleading as an error can be.
+
+    Only the archive KEY is lowered. The file is still read from its real name
+    on disk, and table rows keep their own casing (layout matching there IS
+    case-sensitive).
+    """
+    return path.lower()
+
+
 def server_kspkg():
     """The archive of the server WE run - not whatever Steam has."""
     return os.path.join(config.server_dir(), "content.kspkg")
@@ -246,14 +264,14 @@ def _package_files(pkg_dir, folder, own_folder):
             # drift_0y3j31.scene inside drift_2hwp80\ leaves the table row
             # pointing at a file that is not there
             rel = rel.replace(own_folder, folder)
-        out[f"content\\tracks\\{folder}\\{rel}"] = blob
+        out[_arc(f"content\\tracks\\{folder}\\{rel}")] = blob
 
     # ⚠ slot_map does NOT list the .track - a slot-borrow install inherits the
     # host's one and never needs its own. A native install does: tracks.table
     # points at content\tracks\<folder>\<folder>.track, and without this the
     # row names a file that is not in the archive. It went unnoticed because
     # the first archive we tried already had one left by an older injection.
-    dst = f"content\\tracks\\{folder}\\{folder}.track"
+    dst = _arc(f"content\\tracks\\{folder}\\{folder}.track")
     if dst not in out:
         host = man.get("host_track") or ""
         cands = [os.path.join(pkg_dir, "track", own_folder,
@@ -328,14 +346,14 @@ def read_track_folder(src_dir, folder=None):
         b = open(p, "rb").read()
         return b.replace(own.encode(), folder.encode()) if folder != own else b
 
-    files = {f"content\\tracks\\{folder}\\{folder}.scene": load(root),
-             f"content\\tracks\\{folder}\\{folder}.track": load(data)}
+    files = {_arc(f"content\\tracks\\{folder}\\{folder}.scene"): load(root),
+             _arc(f"content\\tracks\\{folder}\\{folder}.track"): load(data)}
     containers, layout = {}, None
     for name in sorted(os.listdir(cdir)) if os.path.isdir(cdir) else []:
         if not name.endswith(".scene"):
             continue
         stem = name[:-len(".scene")]
-        files[f"content\\tracks\\{folder}\\containers\\{name}"] = \
+        files[_arc(f"content\\tracks\\{folder}\\containers\\{name}")] = \
             load(os.path.join(cdir, name))
         if stem.startswith("layout_"):
             # layout_layout_drift.scene -> the layout is "layout_drift"
