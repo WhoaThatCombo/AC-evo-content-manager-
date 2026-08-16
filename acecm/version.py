@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.7.8"
+VERSION = "0.7.9"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -134,7 +134,37 @@ def _download_file(urls, dest, timeout=300, retries=4):
     raise last
 
 
-def check():
+_CHECK_CACHE = {"at": 0.0, "result": None}
+_CHECK_TTL = 30 * 60      # seconds
+
+
+def check(force=False):
+    """Cached wrapper around _check_now.
+
+    ⚠ The dashboard calls this on EVERY render, and the dashboard re-renders
+    itself on a ~1s timer after any action. That made a ~600 ms network
+    round-trip to GitHub part of drawing the page - the single biggest source
+    of the UI feeling slow. It also burned the unauthenticated rate limit (60
+    requests an hour) within a minute, after which the update check itself
+    started failing with 403 and reported nonsense.
+
+    A release does not appear more than once every half hour, so serve a
+    cached answer and let the Updater page pass force=True.
+    """
+    import time as _time
+    now = _time.monotonic()
+    hit = _CHECK_CACHE["result"]
+    if hit is not None and not force and (now - _CHECK_CACHE["at"]) < _CHECK_TTL:
+        return {**hit, "cached": True}
+    out = _check_now()
+    # Never cache a failure: a transient network blip would otherwise pin the
+    # UI to "check failed" for half an hour.
+    if out.get("ok"):
+        _CHECK_CACHE.update(at=now, result=out)
+    return out
+
+
+def _check_now():
     """Look for a newer build. Never raises - the UI shows whatever comes back.
 
     Reads the latest GitHub Release of `update_repo` and looks for an

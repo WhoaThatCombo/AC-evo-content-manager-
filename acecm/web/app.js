@@ -877,169 +877,46 @@ async function drivePage() {
   poll();
 }
 
-/* ------------------------------------------------------------ dashboard -- */
-async function dashboard() {
-  // ⚠ Fetch everything FIRST, then clear and build. Clearing early leaves the
-  // page blank for as long as the slowest request takes, and any await between
-  // the clear and the appends is a window for a second render to interleave.
-  // These five used to run one after another, so a slow overview made the
-  // whole dashboard wait five times.
-  // Overview already has backend + counts. Waiting on /api/cars here made
-  // every dashboard visit pay for a kspkg walk that the tiles do not need.
-  const settled = await Promise.allSettled([
-    api('state'), api('profiles'), api('overview'),
-  ]);
-  const val = i => (settled[i].status === 'fulfilled' && settled[i].value) || {};
-  const s = val(0), pr = val(1), ov = val(2);
-  const cars = {}, trk = {};
-  const profs = (pr && pr.profiles) || [];
-  const b = (s && s.backend) || (ov && ov.backend) || {};
-  const p = $('#page');
-  p.innerHTML = '';
+/* ------------------------------------------------------------- shared -- */
+/* _pill and _setText are shared: they write only when a value actually
+   differs, which is what keeps a refresh from touching the DOM needlessly.
+   They outlived the dashboard that introduced them. */
+function _pill(node, on, text, offClass) {
+  const cls = 'pill ' + (on ? 'on' : (offClass || 'off'));
+  if (node.className !== cls) node.className = cls;
+  const want = '<i class="dot"></i>' + esc(text);
+  if (node.innerHTML !== want) node.innerHTML = want;
+}
 
-  // (the missing-executable warning now comes from /api/overview's attention
-  // list, together with every other problem, so it is not a special case)
+function _setText(node, text) {
+  const s = String(text);
+  if (node.textContent !== s) node.textContent = s;
+}
 
-  // ⚠ Lead with what is WRONG. Counting things that exist is true and useless;
-  // someone opens this page because something is not working, or to see
-  // whether their server is up. (`ov` is fetched above, before the clear.)
-  (ov.attention || []).forEach(a => {
+/* ---- what needs attention ----------------------------------------------
+   The one thing the dashboard did that nothing else did: say what is wrong.
+   It lived on a page nobody landed on, so a broken server dir or an occupied
+   port stayed invisible until you went looking. It is now a strip under the
+   header on EVERY page - silent when there is nothing to say. */
+let _attnKey = '';
+async function refreshAttention() {
+  const host = $('#attention');
+  if (!host) return;
+  const ov = await api('overview');
+  // ⚠ PROBLEMS only. `attention` also carries level:"info" tips, and this
+  // strip is on every page permanently - a standing tip rendered as a box
+  // would be a warning that never goes away, which is how people learn to
+  // ignore the strip entirely. Info items are explanatory, not actionable.
+  const att = ((ov && ov.attention) || []).filter(a => a.level !== 'info');
+  const key = JSON.stringify(att.map(a => [a.level, a.what, a.do]));
+  if (key === _attnKey) return;          // nothing changed - leave the DOM be
+  _attnKey = key;
+  host.innerHTML = '';
+  att.forEach(a => {
     const box = el('div', a.level === 'bad' ? 'err' : 'warn');
-    box.innerHTML = `<b>${esc(a.what)}</b><br>${esc(a.do)}`;
-    p.append(box);
+    box.innerHTML = '<b>' + esc(a.what) + '</b> ' + esc(a.do);
+    host.append(box);
   });
-
-  // A new version, said once and plainly. Checked in the background so a slow
-  // or offline GitHub never delays the dashboard - the banner just appears
-  // when the answer arrives.
-  const upd = el('div', 'warn');
-  upd.style.display = 'none';
-  p.append(upd);
-  api('update/check').then(r => {
-    if (!r || !r.ok || !r.available) return;
-    upd.style.display = '';
-    upd.innerHTML = `<b>ACECM v${esc(r.latest)} is available</b> — you have `
-      + `v${esc(r.current)}.`;
-    const go = el('button', 'sm primary', 'Update now');
-    go.style.marginTop = '6px';
-    go.onclick = async () => {
-      go.disabled = true;
-      go.textContent = 'downloading…';
-      const a = await api('update/apply', {});
-      if (!a.ok) { toast(a.error || 'update failed', true);
-                   go.disabled = false; go.textContent = 'Update now'; return; }
-      go.textContent = 'Restart to finish';
-      go.disabled = false;
-      go.onclick = async () => {
-        const s = await api('app/restart', {});
-        if (!s.ok) toast(s.error || 'restart failed', true);
-      };
-    };
-    upd.append(el('div'), go);
-  }).catch(() => {});
-
-  const g = el('div', 'stats');
-  const tiles = [
-    [ov.running ?? 0, `server${ov.running === 1 ? '' : 's'} running`],
-    [ov.players ?? 0, 'players connected'],
-    [ov.tracks ?? trk.total ?? '—', 'tracks you can load'],
-    [ov.cars ?? cars.total ?? '—', `cars (${cars.mods ?? 0} modded)`],
-    [ov.shared ?? 0, 'items shared for download'],
-    [b.listening ? 'UP' : 'DOWN', `own backend :${b.port ?? '—'}`],
-  ];
-  tiles.forEach(([v, k]) => g.append(el('div', 'stat',
-    `<b>${esc(v)}</b><span>${esc(k)}</span>`)));
-  p.append(g);
-
-  // What is actually running, with a way to act on it
-  const live = el('div', 'card');
-  live.innerHTML = '<h2>Servers</h2>';
-  if (!(ov.servers || []).length) {
-    live.append(el('div', 'empty',
-      'No server profiles yet — create one on the Servers page'));
-  } else {
-    const t = el('table');
-    t.innerHTML = '<thead><tr><th>Profile</th><th>Track</th><th>Players</th>'
-      + '<th>Port</th><th></th></tr></thead>';
-    const tb = el('tbody');
-    ov.servers.forEach(sv => {
-      const tr = el('tr');
-      tr.innerHTML = `<td><span class="pill ${sv.running ? 'on' : 'off'}">`
-        + `<i class="dot"></i>${esc(sv.name)}</span>`
-        + (sv.pid ? `<div class="tiny dim">pid ${sv.pid}</div>` : '')
-        + `</td>`
-        + `<td>${esc(sv.track || '—')}<div class="tiny dim">`
-        + `${esc(String(sv.layout || '').replace(/^layout_/, ''))}</div></td>`
-        + `<td>${sv.running ? (sv.clients ?? '—') : '—'}</td>`
-        + `<td class="dim">${esc(sv.port)}</td>`;
-      const td = el('td');
-      const act = el('button', sv.running ? 'sm danger' : 'sm primary',
-                    sv.running ? 'Stop' : 'Start');
-      act.onclick = async () => {
-        const r = await api(sv.running ? 'server/stop' : 'server/start',
-                            { id: sv.id });
-        toast(r && r.error ? r.error : (sv.running ? 'Stopped' : 'Starting…'),
-              !!(r && r.error));
-        setTimeout(dashboard, sv.running ? 900 : 2000);
-      };
-      td.append(act);
-      tr.append(td);
-      tb.append(tr);
-    });
-    t.append(tb);
-    live.append(t);
-  }
-  p.append(live);
-
-  const c = el('div', 'card');
-  c.innerHTML = '<h2>Quick start</h2>';
-  const row = el('div', 'row wrap');
-  const bStart = el('button', 'primary', 'Start default server');
-  bStart.onclick = async () => {
-    if (!profs.length) { toast('Create a server profile first'); return; }
-    await api('server/start', { id: profs[0].id });
-    toast('Starting ' + profs[0].name); setTimeout(dashboard, 1500);
-  };
-  const bStop = el('button', 'danger', 'Stop all servers');
-  bStop.onclick = async () => { await api('server/stop', {}); toast('Stopped'); setTimeout(dashboard, 800); };
-  // "Join server directly" was removed: the backend accepts the go-to-server
-  // push and the client acknowledges it, but the join never completes, so the
-  // button did nothing a user could see. Join through the in-game browser -
-  // the proxy injects local servers into that list. The API endpoints are
-  // still there for when the push is understood.
-  const bDrive = el('button', 'primary', 'Drive');
-  bDrive.title = 'Pick car, track and mode — ACECM is the home menu';
-  bDrive.onclick = () => go('drive');
-  const bGame = el('button', null, 'Launch game');
-  bGame.onclick = async () => {
-    const r = await api('game/launch', {});
-    if (r.ok) toast(r.patch && r.patch.ok && !r.patch.already
-      ? 'Rewrote lobby URL, launching game'
-      : 'Launching game');
-    else toast(r.error || 'Launch failed', true);
-  };
-  const bAI = el('button', null, 'Launch real AI race');
-  bAI.title = 'One client. Instant Race with AiDriverEvo — not dedicated vAI ghosts.';
-  bAI.onclick = async () => {
-    const r = await api('game/launch_ai', { opponents: 16, min_strength: 70, max_strength: 95 });
-    toast(r.ok ? 'Client starting — Instant Race, then Start. Look for Creating AiDriverEvo.'
-               : (r.error || 'Launch failed'), !r.ok);
-  };
-  row.append(bDrive, bStart, bStop, bGame, bAI);
-  c.append(row);
-  p.append(c);
-
-  const st = el('div', 'card');
-  st.innerHTML = '<h2>Status</h2>';
-  st.append(el('div', 'row wrap',
-    `<span class="pill ${s.tools_ok ? 'on' : 'bad'}"><i class="dot"></i>`
-    + `backend tools ${s.tools_ok ? 'found' : 'missing'}</span>`
-    + `<span class="pill ${b.have_cert ? 'on' : 'warn'}"><i class="dot"></i>`
-    + `TLS ${b.have_cert ? 'ready' : 'run gencert.sh'}</span>`
-    + `<span class="pill ${b.listening ? 'on' : 'off'}"><i class="dot"></i>`
-    + `lobby ${b.listening ? 'listening' : 'stopped'}</span>`));
-  st.append(el('div', 'tiny dim', 'Server dir: ' + esc(s.server_dir)));
-  p.append(st);
 }
 
 /* -------------------------------------------------------------- servers -- */
@@ -1119,6 +996,7 @@ async function serversPage() {
     const row = el('div', 'row wrap');
     row.style.marginTop = '10px';
     const start = el('button', 'primary sm', 'Start');
+    start.dataset.start = prof.id;
     // ⚠ A dedicated server takes ~30 s to bind its ports. Without visible
     // feedback people click Start again, and a second server on the same port
     // spins retrying its sockets until it exhausts memory. Disable the button
@@ -1140,7 +1018,11 @@ async function serversPage() {
         return;
       }
       toast('Starting — this takes about 30 seconds');
-      setTimeout(() => { clearInterval(tick); serversPage(); }, 31000);
+      setTimeout(() => {
+        clearInterval(tick);
+        start.disabled = false; start.textContent = was;
+        serversRefresh();
+      }, 31000);
     };
     // ⚠ Stops THIS server, by its own pid or its own HTTP port. "Stop all" is
     // still there, but it should be a choice rather than the only option -
@@ -1153,7 +1035,7 @@ async function serversPage() {
       stop.disabled = false;
       toast(r.ok ? `Stopped ${prof.name}` : (r.error || 'Could not stop'),
             !r.ok);
-      setTimeout(serversPage, 900);
+      setTimeout(serversRefresh, 900);
     };
 
     const edit = el('button', 'sm', 'Edit');
@@ -1180,19 +1062,23 @@ async function serversPage() {
     const ts = (telState || {})[prof.id] || {};
     const tpill = el('span', 'pill ' + (ts.running ? 'on' : 'off'),
       `<i class="dot"></i>telemetry ${ts.running ? 'on :' + ts.port : 'off'}`);
+    tpill.dataset.tp = prof.id;
     const tOn = el('button', 'sm', ts.running ? 'Restart telemetry' : 'Start telemetry');
+    tOn.dataset.ton = prof.id;
     tOn.onclick = async () => {
       const r = await api('telemetry/start', { id: prof.id });
       toast(r.ok ? `Telemetry on port ${r.port}` : (r.error || 'Failed'), !r.ok);
-      setTimeout(serversPage, 1800);
+      setTimeout(serversRefresh, 1800);
     };
     const tOff = el('button', 'sm danger', 'Stop telemetry');
+    tOff.dataset.toff = prof.id;
     tOff.disabled = !ts.running;
     tOff.onclick = async () => {
       await api('telemetry/stop', { id: prof.id });
-      toast('Telemetry stopped'); setTimeout(serversPage, 800);
+      toast('Telemetry stopped'); setTimeout(serversRefresh, 800);
     };
     const tView = el('button', 'sm primary', 'View map');
+    tView.dataset.tview = prof.id;
     tView.disabled = !ts.running;
     tView.onclick = () => { telProfile = prof.id; telTrack = null; go('telemetry'); };
     const tLink = el('button', 'sm', 'Copy live link');
@@ -1209,7 +1095,7 @@ async function serversPage() {
     wAI.onclick = async () => {
       const r = await api('game/attach_worker', { id: prof.id, ai_player: true });
       toast(r.ok ? (r.hint || 'Worker launching') : (r.error || 'Failed'), !r.ok);
-      setTimeout(serversPage, 2000);
+      setTimeout(serversRefresh, 2000);
     };
     const more = el('details');
     more.style.marginTop = '8px';
@@ -1222,15 +1108,53 @@ async function serversPage() {
     card.append(row, more);
     p.append(card);
 
-    api('server/status?id=' + prof.id).then(s => {
-      const pill = $(`[data-st="${prof.id}"]`);
-      if (!pill) return;
-      pill.className = 'pill ' + (s.running ? 'on' : 'off');
-      pill.innerHTML = '<i class="dot"></i>' + (s.running
-        ? `running${s.clients != null ? ' · ' + s.clients + ' clients' : ''}`
-        : 'stopped');
-    });
   }
+  // ⚠ ONE overview call, not a server/status request per profile. This page
+  // fired N requests on every visit, each doing its own pid and port checks,
+  // so it got slower with every server added - and the same numbers are
+  // already in /api/overview, which the dashboard fetches anyway.
+  serversRefresh();
+}
+
+/* Update the live parts of the servers page WITHOUT rebuilding it.
+   A rebuild collapsed every open "More" panel, closed any log pane you were
+   reading and scrolled the editor away - all to change a pill from "starting"
+   to "running". Actions now patch the few elements that changed. */
+async function serversRefresh() {
+  const anchor = document.querySelector('[data-st]');
+  if (!anchor) return;                    // not on this page any more
+  const [ov, pr] = await Promise.all([api('overview'), api('profiles')]);
+  const tel = (pr && pr.telemetry) || {};
+  ((ov && ov.servers) || []).forEach(sv => {
+    const pill = document.querySelector('[data-st="' + sv.id + '"]');
+    if (pill) {
+      pill.className = 'pill ' + (sv.running ? 'on' : 'off');
+      pill.innerHTML = '<i class="dot"></i>' + (sv.running
+        ? 'running' + (sv.clients != null ? ' · ' + sv.clients + ' clients' : '')
+        : 'stopped');
+    }
+    // A start that has finished must give the button back, otherwise it stays
+    // stuck on "starting… 0s" forever now that nothing rebuilds it.
+    const start = document.querySelector('[data-start="' + sv.id + '"]');
+    if (start && sv.running) {
+      start.disabled = false;
+      start.textContent = 'Start';
+    }
+  });
+  Object.entries(tel).forEach(([id, ts]) => {
+    const tp = document.querySelector('[data-tp="' + id + '"]');
+    if (tp) {
+      tp.className = 'pill ' + (ts.running ? 'on' : 'off');
+      tp.innerHTML = '<i class="dot"></i>telemetry '
+        + (ts.running ? 'on :' + ts.port : 'off');
+    }
+    const on = document.querySelector('[data-ton="' + id + '"]');
+    if (on) on.textContent = ts.running ? 'Restart telemetry' : 'Start telemetry';
+    const off = document.querySelector('[data-toff="' + id + '"]');
+    if (off) off.disabled = !ts.running;
+    const view = document.querySelector('[data-tview="' + id + '"]');
+    if (view) view.disabled = !ts.running;
+  });
 }
 
 function editor(prof, trk, opts, extra) {
@@ -1948,70 +1872,223 @@ async function modStrip(p) {
   p.append(c);
 }
 
+/* ---- cars ---------------------------------------------------------------
+   Master-detail, after Content Manager: one dense list of everything on the
+   left, one car's details on the right.
+
+   ⚠ This page used to stack FOUR views of the same 114 cars - a picture
+   gallery, a searchable text list, a "models seen on this server" list and a
+   note about mods - so you scrolled past the same cars three times before
+   reaching anything new. One list, one detail pane, filters instead of
+   sections.
+
+   ⚠ Two different ids, and the difference is invisible if you get it wrong.
+   The list and its renders are keyed by MODEL (ks_abarth_695_biposto); a
+   server's allowed-cars list is keyed by PRESET (preset_695b_mech_1), and one
+   model usually has several presets. Allowing "a car" therefore means allowing
+   every preset of that model.                                               */
+let carSel = null;          // selected model id
+let carScope = 'all';       // all | kunos | mods
+
 async function carsPage() {
-  const d = await api('cars');
+  const [cat, viewer, pr] = await Promise.all([
+    api('cars'), api('viewer/cars'), api('profiles'),
+  ]);
   const p = $('#page');
   p.innerHTML = '';
-  // ⚠ The old text-list viewer card used to live here. The gallery does the
-  // same job with a picture of each car and the same "View in 3D" button, so
-  // keeping both meant two lists of 74 cars and a screenful of duplication
-  // before you reached anything new. viewerCard() is still defined for reuse.
-  await carGallery(p);
-  await modStrip(p);
-  const c = el('div', 'card');
-  c.innerHTML = `<h2>Cars &middot; ${d.total ?? 0} total, `
-    + `${d.kunos ?? 0} Kunos, ${d.mods ?? 0} modded</h2>`;
-  const search = el('input');
-  search.placeholder = 'Search cars…';
-  search.value = carFilter;
-  search.oninput = () => { carFilter = search.value.toLowerCase(); render(); };
-  c.append(search);
-  const list = el('div', 'list');
-  list.style.marginTop = '10px';
-  c.append(list);
-  p.append(c);
 
-  // Real model names harvested from the server log. cars.json ids are mostly
-  // preset_<code>, which cannot be expanded into a model name without a lookup
-  // we do not have - so show both truthfully rather than guess a mapping.
-  api('models').then(m => {
-    if (!m || !m.total) return;
-    const mc = el('div', 'card');
-    mc.innerHTML = `<h2>Models seen on this server &middot; ${m.total}</h2>`
-      + '<div class="tiny dim" style="margin-bottom:9px">Harvested from join '
-      + 'records in the server log — these are full model names. The ids above '
-      + 'come from cars.json and use a different scheme; the two are not '
-      + 'mapped to each other.</div>';
-    const l = el('div', 'list');
-    m.models.forEach(x => l.append(el('div', 'chk',
-      `<span class="name">${esc(x.label)}</span>`
-      + `<span class="id">${esc(x.id)}</span>`)));
-    mc.append(l);
-    p.append(mc);
+  const cars = cat.cars || [];
+  const renderable = new Set(((viewer && viewer.cars) || []).map(c => c.id || c));
+  const profs = (pr && pr.profiles) || [];
+
+  // one entry per MODEL, carrying its presets
+  const models = new Map();
+  cars.forEach(c => {
+    const key = c.model || c.id;
+    if (!models.has(key)) {
+      models.set(key, { model: key, label: c.label, brand: c.brand || '',
+                        kunos: !!c.kunos, mod: !!c.mod, presets: [] });
+    }
+    const m = models.get(key);
+    m.presets.push(c);
+    if (c.mod) m.mod = true;
+    if (!c.kunos) m.kunos = false;
   });
+  const all = [...models.values()].sort((a, b) =>
+    (a.brand || '').localeCompare(b.brand || '') || a.label.localeCompare(b.label));
 
-  if (d.mods)
-    p.append(el('div', 'card', '<h2>Modded content</h2>'
-      + `<div class="tiny dim">${d.mods} car(s) are not Kunos presets. The `
-      + 'dedicated server\'s content package does not contain them, so a player '
-      + 'picking one gets a broken join. They are excluded from server car '
-      + 'lists by default.</div>'));
+  const wrap = el('div', 'split');
+  const leftCol = el('div', 'split-list');
+  const rightCol = el('div', 'split-detail');
+  wrap.append(leftCol, rightCol);
+  p.append(wrap);
 
-  function render() {
+  // ---- filters ----------------------------------------------------------
+  const bar = el('div', 'filterbar');
+  const search = el('input');
+  search.placeholder = 'Filter cars…';
+  search.value = carFilter;
+  search.oninput = () => { carFilter = search.value.toLowerCase(); drawList(); };
+  const chips = el('div', 'chips');
+  [['all', 'All'], ['kunos', 'Kunos'], ['mods', 'Mods']].forEach(([k, lbl]) => {
+    const a = el('a', 'chip' + (carScope === k ? ' on' : ''), lbl);
+    a.onclick = () => { carScope = k; drawList(); };
+    chips.append(a);
+  });
+  bar.append(search, chips);
+  leftCol.append(bar);
+
+  const list = el('div', 'rows');
+  leftCol.append(list);
+  const count = el('div', 'tiny dim');
+  leftCol.append(count);
+
+  function match(m) {
+    if (carScope === 'kunos' && !m.kunos) return false;
+    if (carScope === 'mods' && !m.mod) return false;
+    if (!carFilter) return true;
+    return (m.label + ' ' + m.model + ' ' + m.brand).toLowerCase()
+      .includes(carFilter);
+  }
+
+  function drawList() {
     list.innerHTML = '';
-    const rows = (d.cars || []).filter(c =>
-      !carFilter || c.label.toLowerCase().includes(carFilter)
-      || c.id.toLowerCase().includes(carFilter));
+    const rows = all.filter(match);
+    count.textContent = rows.length + ' of ' + all.length + ' cars'
+      + ' · ' + cat.kunos + ' Kunos · ' + cat.mods + ' modded';
     if (!rows.length) { list.append(el('div', 'empty', 'No matches')); return; }
-    rows.slice(0, 400).forEach(car => {
-      const r = el('div', 'chk');
-      r.innerHTML = `<span class="name">${esc(car.label)}</span>`
-        + (car.mod ? '<span class="pill warn">mod</span>' : '')
-        + `<span class="id">${esc(car.id)}</span>`;
+    let brand = null;
+    rows.forEach(m => {
+      if (m.brand !== brand) {
+        brand = m.brand;
+        list.append(el('div', 'rowhead', esc(brand || 'Other')));
+      }
+      const r = el('a', 'rowitem' + (carSel === m.model ? ' on' : ''));
+      r.innerHTML = '<span class="name">' + esc(m.label) + '</span>'
+        + (m.mod ? '<span class="tag">mod</span>' : '')
+        + (m.presets.length > 1
+            ? '<span class="tag dim">' + m.presets.length + '</span>' : '');
+      r.onclick = () => { carSel = m.model; drawList(); drawDetail(); };
       list.append(r);
     });
+    // keep the chip row honest after a scope change
+    [...chips.children].forEach(c =>
+      c.classList.toggle('on', c.textContent.toLowerCase() ===
+        (carScope === 'all' ? 'all' : carScope === 'kunos' ? 'kunos' : 'mods')));
   }
-  render();
+
+  // ---- detail -----------------------------------------------------------
+  function drawDetail() {
+    rightCol.innerHTML = '';
+    const m = models.get(carSel);
+    if (!m) {
+      rightCol.append(el('div', 'empty', 'Pick a car on the left'));
+      return;
+    }
+    const head = el('div', 'dhead');
+    head.innerHTML = '<div class="dbrand">' + esc(m.brand || '') + '</div>'
+      + '<h2 class="dname">' + esc(m.label) + '</h2>'
+      + '<div class="tiny dim">' + esc(m.model) + '</div>';
+    rightCol.append(head);
+
+    const shot = el('div', 'dshot');
+    const img = el('img');
+    img.loading = 'lazy';
+    img.alt = m.label;
+    img.src = 'api/thumb/car?id=' + encodeURIComponent(m.model);
+    // ⚠ A car with no render must not leave a broken-image icon sitting in
+    // the middle of the pane - say what is missing instead.
+    img.onerror = () => {
+      shot.innerHTML = '';
+      shot.append(el('div', 'empty', renderable.has(m.model)
+        ? 'Render not built yet' : 'No 3D model available for this car'));
+    };
+    shot.append(img);
+    rightCol.append(shot);
+
+    const acts = el('div', 'row wrap');
+    const view = el('button', 'sm primary', 'View in 3D');
+    view.disabled = !renderable.has(m.model);
+    if (view.disabled) view.title = 'The viewer has no folder for this car';
+    view.onclick = async () => {
+      view.disabled = true;
+      const r = await api('viewer/open', { id: m.model });
+      view.disabled = false;
+      toast(r && r.ok ? 'Opening ' + m.label + ' in the viewer'
+                      : ((r && r.error) || 'could not open the viewer'),
+            !(r && r.ok));
+    };
+    acts.append(view);
+    rightCol.append(acts);
+
+    // ---- allowed on a server -------------------------------------------
+    const pol = el('div', 'card');
+    pol.innerHTML = '<h2>Allowed on a server</h2>';
+    const psel = el('select');
+    const none = el('option', null, 'Pick a server profile…');
+    none.value = '';
+    psel.append(none);
+    profs.forEach(x => {
+      const o = el('option', null, x.name);
+      o.value = x.id;
+      if (x.id === galProfile) o.selected = true;
+      psel.append(o);
+    });
+    psel.onchange = () => { galProfile = psel.value; drawDetail(); };
+    pol.append(psel);
+
+    const prof = profs.find(x => x.id === galProfile) || null;
+    if (prof) {
+      const allowed = new Set(prof.cars || []);
+      const ids = m.presets.map(x => x.id);
+      const on = ids.every(id => allowed.has(id));
+      const state = el('div', 'tiny dim');
+      state.style.margin = '8px 0';
+      const extra = (prof.cars || []).length;
+      state.textContent = prof.allow_kunos
+        ? (extra ? 'All Kunos cars are allowed, plus ' + extra + ' extra'
+                 : 'All Kunos cars are allowed')
+        : (extra ? extra + ' car(s) allowed explicitly'
+                 : 'No cars allowed explicitly yet');
+      pol.append(state);
+      const t = el('button', 'sm ' + (on ? 'danger' : 'primary'),
+                   on ? 'Remove from this server' : 'Allow on this server');
+      t.onclick = async () => {
+        const set = new Set(prof.cars || []);
+        // every preset of the model moves together - a half-allowed car looks
+        // identical to an allowed one in the game's list
+        ids.forEach(id => on ? set.delete(id) : set.add(id));
+        prof.cars = [...set];
+        const r = await api('profiles/save', prof);
+        if (r && r.error) { toast(r.error, true); return; }
+        toast(on ? 'Removed ' + m.label : 'Allowed ' + m.label);
+        drawDetail();
+      };
+      pol.append(t);
+    }
+    rightCol.append(pol);
+
+    if (m.presets.length) {
+      const pc = el('div', 'card');
+      pc.innerHTML = '<h2>Presets &middot; ' + m.presets.length + '</h2>';
+      const rows = el('div', 'rows');
+      m.presets.forEach(x => {
+        const r = el('div', 'rowitem');
+        r.innerHTML = '<span class="name">' + esc(x.label) + '</span>'
+          + '<span class="id">' + esc(x.id) + '</span>';
+        rows.append(r);
+      });
+      pc.append(rows);
+      rightCol.append(pc);
+    }
+  }
+
+  drawList();
+  drawDetail();
+
+  // Installing and removing car mods is a real job that belongs on this page,
+  // so it stays - below the browser rather than competing with it.
+  await modStrip(p);
 }
 
 /* --------------------------------------------------------------- tracks -- */
@@ -4184,7 +4261,6 @@ async function logsPage() {
 /* ----------------------------------------------------------------- nav --- */
 const PAGES = {
   drive: ['Drive', 'Single player or a local server — same car picker', drivePage],
-  dashboard: ['Dashboard', 'Everything at a glance', dashboard],
   servers: ['Servers', 'Create, configure and run dedicated servers', serversPage],
   cars: ['Cars', 'What the dedicated server can actually load', carsPage],
   content: ['Content', 'Install, export and manage cars and tracks', contentPage],
@@ -4220,6 +4296,8 @@ addEventListener('scroll', () => {
 // both append - and the whole dashboard appears TWICE. It only became visible
 // when a page grew an extra await, but the race was always there.
 const _rendering = {};
+// the page the user last asked for, so a late render cannot overwrite it
+let _wanted = '';
 
 function keepPlace(name, fn) {
   return async function (...args) {
@@ -4232,10 +4310,21 @@ function keepPlace(name, fn) {
       return await fn.apply(this, args);
     } finally {
       _rendering[name] = false;
-      _page = name;
-      requestAnimationFrame(() => {
-        if (want) scroller().scrollTop = want;
-      });
+      // ⚠ A page function clears #page, awaits, then appends. If the user
+      // navigated away during that await, the OLD page finishes by painting
+      // itself over the NEW one: you click Dashboard, a slow Cars render lands
+      // a moment later, and the dashboard you asked for is simply gone. The
+      // header and nav still say Dashboard, so it reads as a blank page rather
+      // than as the wrong page. Repaint what the user actually asked for.
+      if (_wanted && _wanted !== name) {
+        const spec = PAGES[_wanted];
+        if (spec) { const again = spec[2]; setTimeout(() => again(), 0); }
+      } else {
+        _page = name;
+        requestAnimationFrame(() => {
+          if (want) scroller().scrollTop = want;
+        });
+      }
     }
   };
 }
@@ -4252,7 +4341,8 @@ function go(name) {
   if (typeof telTimer !== 'undefined' && telTimer) { clearInterval(telTimer); telTimer = null; }
   if (typeof telRaf !== 'undefined' && telRaf) { cancelAnimationFrame(telRaf); telRaf = null; }
   if (name !== 'drive') stopDrivePoll();
-  const [title, sub, fn] = PAGES[name] || PAGES.dashboard;
+  _wanted = PAGES[name] ? name : 'drive';
+  const [title, sub, fn] = PAGES[name] || PAGES.drive;
   $('#ttl').textContent = title;
   $('#sub').textContent = sub;
   document.querySelectorAll('nav a').forEach(a =>
@@ -4263,10 +4353,29 @@ function go(name) {
   fn().then(() => { const p = $('#page'); if (p) p.dataset.booted = '1'; })
     .catch(e => { $('#page').innerHTML = ''; toast(String(e), true); });
   location.hash = name;
+  refreshAttention();
 }
-document.querySelectorAll('nav a').forEach(a =>
-  a.onclick = () => go(a.dataset.page));
+/* The section links are built from PAGES rather than written out in the HTML,
+   so adding a page cannot leave the nav out of step with it. The everyday
+   sections read as words next to the title; the occasional ones sit small on
+   the right so the main row stays short enough to scan. */
+const PRIMARY = ['drive', 'servers', 'cars', 'tracks', 'content',
+                 'backend', 'browser', 'telemetry'];
+function buildSections() {
+  const main = $('#sections'), side = $('#sections2');
+  main.innerHTML = ''; side.innerHTML = '';
+  Object.keys(PAGES).forEach(name => {
+    const a = el('a', null, PAGES[name][0]);
+    a.dataset.page = name;
+    a.onclick = () => go(name);
+    (PRIMARY.includes(name) ? main : side).append(a);
+  });
+}
+buildSections();
 go((location.hash || '#drive').slice(1));
+// problems are worth noticing wherever you are, but they do not change
+// often - a slow tick is plenty and costs one small request.
+setInterval(refreshAttention, 20000);
 bindDropAnywhere();
 api('state').then(s => {
   $('#navfoot').textContent = s.server_exe_ok ? 'server ready' : 'server not found';

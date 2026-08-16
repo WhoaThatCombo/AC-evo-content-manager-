@@ -746,12 +746,76 @@ def _looks_like_track_dir(path):
     return False
 
 
-def _archive_rel(rel):
+def _archive_names(path):
+    """Every member name in a zip or tar."""
+    low = (path or "").lower()
+    try:
+        if low.endswith(".zip"):
+            with zipfile.ZipFile(path) as z:
+                return [i.filename for i in z.infolist() if not i.is_dir()]
+        import tarfile
+        with tarfile.open(path, "r:*") as tar:
+            return [i.name for i in tar.getmembers() if i.isfile()]
+    except Exception:
+        return []
+
+
+def _archive_root(names):
+    """The single wrapper folder every file sits in, or "" if there is none.
+
+    ⚠ Packs ACECM makes have the track's files at the archive root, and this
+    code assumed that of EVERY archive. A track downloaded from anywhere else
+    is nearly always zipped as `<name>/...`, so the wrapper folder was kept and
+    the whole track landed one directory too deep: no .scene at the root, and a
+    track that installs "successfully" and then cannot load.
+    """
+    # ⚠ A readme or preview shipped ALONGSIDE the track folder must not stop us
+    # unwrapping it - that is how most downloads are packaged. Only these
+    # extensions are ignored: a real track keeps its .scene/.track/containers at
+    # its root, so anything else at the top means the archive is already flat
+    # and stripping would destroy it.
+    JUNK = (".txt", ".md", ".jpg", ".jpeg", ".png", ".webp", ".url",
+            ".pdf", ".nfo", ".html", ".htm")
+
+    def common(depth):
+        """The one directory every file shares at this depth, or ""."""
+        seen = set()
+        for n in names:
+            n = (n or "").replace("\\", "/").lstrip("/")
+            if not n or n.endswith("/"):
+                continue
+            parts = [p for p in n.split("/") if p]
+            if len(parts) <= depth + 1:
+                if parts and parts[-1].lower().endswith(JUNK):
+                    continue       # loose readme/screenshot: ignore it
+                return ""          # real content at this level: stop here
+            seen.add(parts[depth])
+            if len(seen) > 1:
+                return ""
+        return seen.pop() if len(seen) == 1 else ""
+
+    top = common(0)
+    if not top:
+        return ""
+    # ⚠ `tracks/<name>/...` is a wrapper TWO deep. Stripping only "tracks"
+    # leaves the track one level too low, which is the same broken install in
+    # a different disguise - so take the second level too when the first is
+    # the generic "tracks" directory.
+    if top.lower() == "tracks":
+        second = common(1)
+        if second:
+            return f"{top}/{second}/"
+    return top + "/"
+
+
+def _archive_rel(rel, root=""):
     rel = (rel or "").replace("\\", "/").lstrip("/")
     if not rel or rel.endswith("/") or ".." in rel.split("/"):
         return ""
     if os.path.basename(rel) == "acecm_track.json":
         return "acecm_track.json"
+    if root and rel.startswith(root):
+        rel = rel[len(root):]
     parts = [p for p in rel.split("/") if p]
     if parts and parts[0].lower() == "tracks" and len(parts) > 2:
         parts = parts[2:]
@@ -761,12 +825,13 @@ def _archive_rel(rel):
 def _archive_file_sizes(path):
     out = {}
     low = (path or "").lower()
+    root = _archive_root(_archive_names(path))
     if low.endswith(".zip"):
         with zipfile.ZipFile(path) as z:
             for info in z.infolist():
                 if info.is_dir():
                     continue
-                rel = _archive_rel(info.filename)
+                rel = _archive_rel(info.filename, root)
                 if rel:
                     out[rel] = info.file_size
         return out
@@ -775,7 +840,7 @@ def _archive_file_sizes(path):
         for info in tar.getmembers():
             if not info.isfile():
                 continue
-            rel = _archive_rel(info.name)
+            rel = _archive_rel(info.name, root)
             if rel:
                 out[rel] = info.size
     return out
@@ -838,6 +903,7 @@ def _extract_archive(path, dest):
     from .contentsync import _under
     os.makedirs(dest, exist_ok=True)
     low = path.lower()
+    root = _archive_root(_archive_names(path))
     if low.endswith(".zip"):
         with zipfile.ZipFile(path) as z:
             for info in z.infolist():
@@ -847,10 +913,10 @@ def _extract_archive(path, dest):
                 if os.path.basename(rel) == "acecm_track.json":
                     target = _under(dest, "acecm_track.json")
                 else:
-                    # packs are stored with files at the track-folder root
-                    parts = [p for p in rel.split("/") if p]
-                    if parts and parts[0].lower() == "tracks" and len(parts) > 2:
-                        parts = parts[2:]
+                    # ⚠ Strip a single wrapper folder: our own packs put files
+                    # at the root, downloaded ones wrap them in <name>/.
+                    stripped = _archive_rel(rel, root)
+                    parts = [p for p in stripped.split("/") if p]
                     if not parts:
                         continue
                     target = _under(dest, *parts)
@@ -860,14 +926,19 @@ def _extract_archive(path, dest):
         return dest
     import tarfile
     with tarfile.open(path, "r:*") as tar:
-        try:
-            tar.extractall(dest, filter="data")
-        except TypeError:
-            for info in tar.getmembers():
-                rel = (info.name or "").replace("\\", "/").lstrip("/")
-                if not rel or ".." in rel.split("/"):
-                    continue
-                tar.extract(info, dest)
+        for info in tar.getmembers():
+            if not info.isfile():
+                continue
+            rel = _archive_rel(info.name, root)
+            if not rel:
+                continue
+            target = _under(dest, *[p for p in rel.split("/") if p])
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            src = tar.extractfile(info)
+            if not src:
+                continue
+            with src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
     return dest
 
 
@@ -878,7 +949,12 @@ def install_track_pack(path, folder=None, overwrite=False):
     if not path or not os.path.isfile(path):
         return {"ok": False, "error": "track pack not found"}
     meta = _archive_meta(path)
-    folder = _safe_folder(folder or meta.get("folder")
+    # ⚠ Prefer the archive's own wrapper folder over the ZIP FILE NAME. A
+    # download is called things like "Shutoko Revival Project 0.9.3.zip", and
+    # naming the track folder after that gives a folder the game has never
+    # heard of; the folder inside the archive is the real id (shutoko_r_vq).
+    wrapper = _archive_root(_archive_names(path)).rstrip("/")
+    folder = _safe_folder(folder or meta.get("folder") or wrapper
                           or os.path.splitext(os.path.basename(path))[0])
     if not folder:
         return {"ok": False, "error": "could not tell the track folder name"}

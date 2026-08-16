@@ -79,11 +79,42 @@ def available():
         return False
 
 
+WINDOW = None
+
+
+def focus():
+    """Bring this instance's window to the front.
+
+    ⚠ Why a second process must NOT just open its own window: both would use
+    the same WebView2 user-data folder, which is not shared-safe. The newcomer
+    takes the profile, the FIRST instance's browser process dies, its window
+    closes, and main() unwinds - so launching ACECM twice killed the copy that
+    was already running. Asking the live instance to show itself is the only
+    version of this that leaves one healthy app.
+    """
+    w = WINDOW
+    if w is None:
+        return False
+    try:
+        w.restore()
+    except Exception:
+        pass
+    try:
+        w.show()
+        # on_top briefly, or the window rises behind whatever has focus
+        w.on_top = True
+        w.on_top = False
+        return True
+    except Exception:
+        return False
+
+
 def run(url, title="Assetto Corsa EVO Content Manager"):
     """Open the window. Blocks until it is closed."""
     import webview
     from . import version
-    webview.create_window(f"{title}  v{version.VERSION}", url,
+    global WINDOW
+    WINDOW = webview.create_window(f"{title}  v{version.VERSION}", url,
                           width=1360, height=900,
                           min_size=(1024, 680),
                           background_color="#0b0e13")
