@@ -39,3 +39,6 @@ __pycache__/
 # runner cannot produce it - and build.py only warns when it is absent,
 # which would publish a release with the 3D viewer silently missing.
 verify_out/
+
+# stray copy - the shipped viewer is staged into tools/ by build.py
+acecm/tools/
