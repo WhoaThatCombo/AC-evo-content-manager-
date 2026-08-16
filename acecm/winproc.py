@@ -241,11 +241,43 @@ def hidden_console_popen(cmd, **kw):
 
 
 def hide_console():
-    """Detach this process from its console so only the app window remains."""
+    """Hide the console window so only the app window remains.
+
+    ⚠ FreeConsole alone is not enough in a shipped build, and this is why the
+    terminal shows for the .exe but not when running from source:
+
+      * from source we start under pythonw, which never had a console;
+      * the frozen build is --console AND onefile, which is TWO processes - a
+        bootloader parent and the Python child. FreeConsole detaches only the
+        caller, so the parent stays attached and its console window remains on
+        screen for the whole session.
+
+    Hiding the window works whoever owns it, so do that first and keep the
+    detach as a fallback. The console is only ever a viewer here: everything
+    printed to it is in the log file as well, so nothing is lost by hiding it.
+    """
     import sys
     if sys.platform != "win32":
         return
+    hidden = False
     try:
+        # ⚠ Declare the types: ctypes defaults a return value to c_int, which
+        # TRUNCATES a 64-bit window handle - the call then "succeeds" against a
+        # garbage hwnd and hides nothing.
+        _k32.GetConsoleWindow.restype = wintypes.HWND
+        ctypes.windll.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        ctypes.windll.user32.ShowWindow.restype = wintypes.BOOL
+        hwnd = _k32.GetConsoleWindow()
+        if hwnd:
+            SW_HIDE = 0
+            ctypes.windll.user32.ShowWindow(hwnd, SW_HIDE)
+            hidden = True
+    except Exception:
+        pass
+    try:
+        # Still detach: it releases the console handle, and on a non-onefile
+        # build it closes the window outright.
         _k32.FreeConsole()
     except Exception:
         pass
+    return hidden

@@ -99,23 +99,75 @@ def _url(port):
     return TELEM_URL.format(port)
 
 
-def running(port):
+_RUN_CACHE = {}          # port -> (checked_at, running)
+_RUN_TTL = 2.0
+
+
+def running(port, ttl=_RUN_TTL):
+    """Is a telemetry tracker answering on this port?
+
+    ⚠ This used to be a plain urlopen with a 1.5s timeout, called once per
+    profile, serially, from /api/profiles. When no tracker is running - the
+    normal case - each call waited the FULL timeout, so the Servers tab and
+    the dashboard cost 1.5s x profiles before they could draw anything. With a
+    handful of profiles that is the app hanging for several seconds on every
+    visit.
+
+    Connect first and only speak HTTP once something accepts: a closed port
+    fails in microseconds, which turns the common case from a timeout into
+    nothing at all. The result is cached briefly so a burst of renders does
+    not re-probe.
+    """
+    import socket
+    now = time.monotonic()
+    hit = _RUN_CACHE.get(port)
+    if hit and (now - hit[0]) < ttl:
+        return hit[1]
+    ok = False
     try:
-        with urllib.request.urlopen(_url(port), timeout=1.5):
-            return True
-    except Exception:
-        return False
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.35):
+            ok = True
+    except OSError:
+        ok = False
+    if ok:
+        # Something is listening - confirm it actually speaks our endpoint
+        # rather than reporting any unrelated process as a live tracker.
+        try:
+            with urllib.request.urlopen(_url(port), timeout=1.0):
+                ok = True
+        except Exception:
+            ok = False
+    _RUN_CACHE[port] = (now, ok)
+    return ok
 
 
 def status_all():
     """Telemetry state for every profile, for the Servers tab."""
     t = _load()
+    profs = servers.load()
+    # ⚠ Probe every profile AT ONCE. Serially, a machine with several servers
+    # paid the probe cost once per profile before the page could draw, so the
+    # tab got slower the more servers you had - exactly backwards, since the
+    # people with many servers are the ones living in this tab.
+    ports = {p["id"]: (t.get(p["id"]) or {}).get("port") for p in profs}
+    live = {}
+    todo = {pid: port for pid, port in ports.items() if port}
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(8, len(todo))) as pool:
+            futures = {pid: pool.submit(running, port)
+                       for pid, port in todo.items()}
+            for pid, fut in futures.items():
+                try:
+                    live[pid] = fut.result(timeout=3)
+                except Exception:
+                    live[pid] = False
     out = {}
-    for prof in servers.load():
+    for prof in profs:
         rec = t.get(prof["id"])
         out[prof["id"]] = {
             "port": rec["port"] if rec else None,
-            "running": bool(rec and running(rec["port"])),
+            "running": bool(live.get(prof["id"])),
             "server_pid": rec.get("server_pid") if rec else None,
         }
     return out

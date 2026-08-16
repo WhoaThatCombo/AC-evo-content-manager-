@@ -56,6 +56,15 @@ def installed_cars():
     return sorted(m["name"] for m in got.get("mods", []) if m.get("name"))
 
 
+# ⚠ tracks.table is the client's list of PLACES, not of circuits: the garage,
+# the dealership you start in and the paint shop are all in there ("Garage",
+# "Startup", "Paintshop"). They are not raceable, cannot be hosted, and have no
+# layouts - so they were three dead entries in every track list in the app.
+# Filtered by FOLDER, because the display names differ per language and two of
+# them point at the same folder.
+NOT_TRACKS = frozenset(("track_garage", "car_dealership"))
+
+
 def track_map(refresh=False):
     """Display name -> folder, straight out of the CLIENT's own tracks.table.
 
@@ -128,7 +137,7 @@ def track_map(refresh=False):
                         elif h == 3:
                             folder = hv.decode("utf-8", "replace").rsplit(
                                 "\\", 1)[-1]
-                if name and folder:
+                if name and folder and folder.lower() not in NOT_TRACKS:
                     out[name] = folder
     except Exception as ex:
         logs.LOG.warning("track map: %s", ex)

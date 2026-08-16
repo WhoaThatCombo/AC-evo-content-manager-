@@ -310,11 +310,24 @@ def _load_cache():
 
 
 def _save_cache(d):
+    # ⚠ Only touch the disk when something actually CHANGED. This is called on
+    # every cache miss, and misses are the common case for any path that does
+    # not exist yet, so an unconditional write turned a lookup into a file
+    # write - hundreds of them a minute while the UI was open.
+    before = {k: (_MEM.get(k) or {}).get("path") for k in d}
     _MEM.update(d)
+    if all(before[k] == (d[k] or {}).get("path") for k in d):
+        return
     try:
         json.dump(_MEM, open(CACHE, "w", encoding="utf-8"), indent=2)
     except OSError as ex:
         logs.LOG.warning("could not write the path cache: %s", ex)
+
+
+# When each key was last probed, so a path that does not exist yet is not
+# re-detected on every single call. See find().
+_PROBED = {}
+_REPROBE_SECONDS = 15.0
 
 
 def find(what, refresh=False):
@@ -333,6 +346,18 @@ def find(what, refresh=False):
     # confusing error instead of simply looking again.
     if hit and not refresh and os.path.exists(hit):
         return hit
+
+    # ⚠ A path that is legitimately absent (folders we create on first use,
+    # or a server that is simply not installed) never satisfies the check
+    # above, so every caller re-ran the full search AND relogged it. With the
+    # UI polling several endpoints a second that produced dozens of identical
+    # "detect server_mods" lines per second and buried everything else in the
+    # log. Re-probe on a timer instead; a genuine appearance is picked up
+    # within seconds, which is far faster than any user can act.
+    now = time.monotonic()
+    if not refresh and (now - _PROBED.get(what, -1e9)) < _REPROBE_SECONDS:
+        return hit
+    _PROBED[what] = now
 
     t0 = time.perf_counter()
     found = FINDERS[what]() or ""

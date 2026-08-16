@@ -7,37 +7,33 @@
 </head>
 <body>
 
-<nav>
-  <div class="brand">
-    <div class="mark"></div>
-    <div><b>EVO Content Manager</b><small>Assetto Corsa EVO</small></div>
-  </div>
-  <a data-page="drive" class="on"><span class="ico">▶</span> Drive</a>
-  <a data-page="dashboard"><span class="ico">◆</span> Dashboard</a>
-  <a data-page="servers"><span class="ico">▤</span> Servers</a>
-  <a data-page="cars"><span class="ico">▮</span> Cars</a>
-  <a data-page="tracks"><span class="ico">◎</span> Tracks</a>
-  <a data-page="content"><span class="ico">⬇</span> Content</a>
-  <a data-page="backend"><span class="ico">⇄</span> Backend</a>
-  <a data-page="browser"><span class="ico">◈</span> Server browser</a>
-  <a data-page="telemetry"><span class="ico">◉</span> Telemetry</a>
-  <a data-page="patches"><span class="ico">⚒</span> Patches</a>
-  <a data-page="gamesettings"><span class="ico">☰</span> Game settings</a>
-  <a data-page="logs"><span class="ico">▤</span> Logs</a>
-  <a data-page="settings"><span class="ico">⚙</span> Settings</a>
-  <div class="spacer"></div>
-  <div class="foot" id="navfoot">—</div>
-</nav>
-
 <main>
+  <!-- Content Manager's own arrangement: no sidebar. The active section is the
+       page title, and the other sections sit beside it in grey. The rarely
+       used ones (patches, logs, settings…) go to the right so the row that
+       matters stays short. -->
   <header>
-    <div>
+    <div class="topline">
+      <div class="mark" title="Assetto Corsa EVO Content Manager"></div>
       <h1 id="ttl">Drive</h1>
-      <div class="sub" id="sub">&nbsp;</div>
+      <div class="grow"></div>
+      <nav id="sections2"></nav>
     </div>
-    <div class="grow"></div>
-    <div id="hdr" class="row"></div>
+    <!-- ⚠ On its own line, and every section always present. Sharing a line
+         with the title made the row slide sideways whenever the title's length
+         changed ("cars" vs "server browser"), so the link you were aiming at
+         moved between clicks. -->
+    <nav id="sections"></nav>
+    <div class="subline">
+      <div class="sub" id="sub">&nbsp;</div>
+      <div class="grow"></div>
+      <div id="hdr" class="row"></div>
+      <div class="foot" id="navfoot">—</div>
+    </div>
   </header>
+  <!-- Anything actually wrong, on every page. Empty and invisible when there
+       is nothing to report. -->
+  <div id="attention"></div>
   <div class="page" id="page"></div>
 </main>
 

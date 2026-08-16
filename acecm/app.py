@@ -346,7 +346,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/logs/files":
                 return _json(self, logs.files())
             if path == "/api/update/check":
-                return _json(self, version.check())
+                # ?force=1 from the Updater page's own button; the dashboard's
+                # per-render call takes the cached answer.
+                force = (q.get("force") or ["0"])[0] == "1"
+                return _json(self, version.check(force=force))
             if path == "/api/telemetry/leaderboard":
                 return _json(self, telemetry.leaderboard(
                     (q.get("id") or [None])[0]))
@@ -430,6 +433,12 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("names")))
             if path == "/api/app/restart":
                 return _json(self, installer.restart())
+            if path == "/api/app/show":
+                # A second launch asks the instance that owns the window to
+                # raise it, rather than opening a rival webview on the same
+                # profile - see ui.focus for why that matters.
+                from . import ui
+                return _json(self, {"ok": ui.focus()})
             if path == "/api/install/run":
                 return _json(self, installer.install(
                     desktop=body.get("desktop", True)))
@@ -872,6 +881,47 @@ def _autostop_proxy():
         logs.LOG.warning("auto proxy stop: %s", ex)
 
 
+class AlreadyRunning(Exception):
+    """An ACECM is already serving; its URL is the argument."""
+
+
+def _acecm_answering(port):
+    """Is the thing on this port one of ours?"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/version", timeout=2.5) as r:
+            return (json.loads(r.read()) or {}).get("name") == version.NAME
+    except Exception:
+        return False
+
+
+def _fatal(msg):
+    """Say something the user can actually see, then stop.
+
+    Under pythonw there is no console, so this puts the reason in a message box
+    as well as the log. A silent no-op on double-click is the worst possible
+    failure: it looks like the app is broken rather than like something needs
+    closing.
+    """
+    logs.LOG.error("%s", msg.replace("\n\n", " "))
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            None, msg, f"{version.NAME} could not start", 0x10)
+    except Exception:
+        pass
+    raise SystemExit(msg)
+    # ⚠ 127.0.0.1, NOT "localhost". Windows resolves localhost to ::1 first and
+    # we listen on IPv4 only, and the fallback to IPv4 costs ~2 SECONDS PER
+    # CONNECTION on this stack - measured: 4 ms via 127.0.0.1, 2018 ms via
+    # localhost, for the very same request. The browser opens several parallel
+    # connections and new ones whenever an idle one is reaped, so that penalty
+    # is paid over and over while the app is in use. This one word was the
+    # single largest cause of the UI feeling slow; nothing in the Python was
+    # ever the bottleneck.
+
+
 def serve():
     """Bind and start the HTTP server on a background thread; return its URL.
 
@@ -892,8 +942,24 @@ def serve():
     try:
         srv = App((listen, port), Handler)
     except OSError as ex:
-        raise SystemExit(f"port {port} in use ({ex}) - is ACECM already running?")
-    url = f"http://localhost:{port}"
+        # ⚠ Do not just die here. run.bat starts us with pythonw, which has no
+        # console, so a SystemExit message goes precisely nowhere: the user
+        # double-clicks, nothing happens, and there is nothing to read. Worse,
+        # the usual cause is a LEFTOVER ACECM with no window - so the app is
+        # "already running" in a way nobody can see or act on.
+        if _acecm_answering(port):
+            # It really is ACECM. Show that one instead of refusing to start;
+            # a second launch should bring the app up, not report an error.
+            logs.LOG.info("ACECM is already serving on %s - opening that "
+                          "instance instead of starting a second one", port)
+            raise AlreadyRunning(f"http://127.0.0.1:{port}")
+        _fatal(f"Port {port} is in use by something that is not ACECM, so the "
+               f"app cannot start.\n\n{ex}\n\nClose whatever is using port "
+               f"{port}, or change ui_port in ACECM's settings file:\n"
+               f"{os.path.join(config.DATA, 'config.json')}")
+
+
+    url = f"http://127.0.0.1:{port}"
     lan = ""
     try:
         from . import netutil
@@ -912,7 +978,32 @@ def serve():
 
 def main(mode="window", okflag=None):
     """mode: window (native), browser (default browser), headless (serve only)."""
-    srv, url = serve()
+    try:
+        srv, url = serve()
+    except AlreadyRunning as ex:
+        # Second launch: ask the instance that is already there to show itself.
+        # ⚠ Do NOT open our own window here. Two webviews cannot share one
+        # WebView2 user-data folder: the newcomer takes the profile and the
+        # running instance dies, so "launch twice" became "close the app".
+        url = str(ex)
+        import urllib.request
+        shown = False
+        try:
+            req = urllib.request.Request(url + "/api/app/show", data=b"{}",
+                                         headers={"Content-Type":
+                                                  "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                shown = bool((json.loads(r.read()) or {}).get("ok"))
+        except Exception as exc:
+            logs.LOG.info("could not raise the running window: %s", exc)
+        logs.LOG.info("ACECM already running; %s",
+                      "raised its window" if shown
+                      else "opening it in the browser instead")
+        if not shown:
+            # Headless instance (no window to raise), so give the user
+            # something rather than nothing.
+            os.startfile(url)      # noqa: S606
+        return
     # HTTP is up — this binary is good enough to keep. Write the flag
     # the swap script is waiting on BEFORE opening the window, so a
     # later window close is not mistaken for a failed update.
