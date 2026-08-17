@@ -43,6 +43,34 @@ def _imported_tracks():
         return set()
 
 
+def track_folder(profile):
+    """The FOLDER a profile's custom track lives in.
+
+    ⚠ `custom_track` holds what a player sees - "Drift", "Highlands Drift" -
+    not the folder it lives in (drift_2hwp80). Treating it as a folder made
+    every check miss: the track was never shared, every server was told its
+    track was "not in the content package", and the button meant to fix that
+    could not find the files. The client's own tracks.table is the mapping.
+    """
+    name = (profile.get("custom_track") or "").strip()
+    if not name:
+        return ""
+    from . import contentsync
+    imported = _imported_tracks()
+    if name in imported:          # already a folder
+        return name
+    try:
+        table = contentsync.track_map()
+    except Exception as ex:
+        logs.LOG.info("autoshare: track map: %s", ex)
+        return ""
+    hit = table.get(name)
+    if not hit:                   # names differ in case more often than not
+        low = name.lower()
+        hit = next((v for k, v in table.items() if k.lower() == low), "")
+    return hit or ""
+
+
 def needs(profile):
     """What is modded about this server: {"tracks": [...], "mods": [...]}.
 
@@ -53,7 +81,7 @@ def needs(profile):
     by_car = _mod_by_car()
 
     tracks = []
-    folder = (profile.get("custom_track") or "").strip()
+    folder = track_folder(profile)
     if folder and folder in imported:
         tracks.append(folder)
 
@@ -123,7 +151,7 @@ def server_gaps(profile):
     missing_mods = [m for m in want["mods"] if m not in have]
 
     missing_track = ""
-    folder = (profile.get("custom_track") or "").strip()
+    folder = track_folder(profile)
     if folder:
         from . import tracks as trackmod
         try:
