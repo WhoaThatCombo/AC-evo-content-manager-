@@ -669,13 +669,23 @@ def drop_part(did, filename, stream, size=None, limit=8 * 1024 * 1024 * 1024):
         return {"ok": False, "error": "bad drop id"}
     dest = os.path.join(dest_dir, name)
     wrote = 0
+    # ⚠ Read EXACTLY Content-Length. Reading "until EOF" looks right and is a
+    # deadlock here: the server speaks HTTP/1.1, so the browser keeps the
+    # connection open for reuse and never sends EOF. The body arrives, the next
+    # read blocks forever, and the upload hangs with the file already complete
+    # on disk - which is indistinguishable from a slow copy, so a dropped track
+    # simply never finished.
+    remaining = int(size) if size else None
     try:
         with open(dest, "wb") as fh:
-            while True:
-                chunk = stream.read(1 << 20)
+            while remaining is None or remaining > 0:
+                want = (1 << 20) if remaining is None else min(1 << 20, remaining)
+                chunk = stream.read(want)
                 if not chunk:
-                    break
+                    break                      # client went away mid-upload
                 wrote += len(chunk)
+                if remaining is not None:
+                    remaining -= len(chunk)
                 if wrote > limit:
                     fh.close()
                     try:
@@ -686,6 +696,14 @@ def drop_part(did, filename, stream, size=None, limit=8 * 1024 * 1024 * 1024):
                 fh.write(chunk)
     except OSError as ex:
         return {"ok": False, "error": str(ex)}
+    if size and wrote != int(size):
+        # a truncated upload must not be handed on as if it were the file
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return {"ok": False,
+                "error": f"upload stopped early ({wrote} of {size} bytes)"}
     return {"ok": True, "name": name, "bytes": wrote,
             "size": size or wrote}
 

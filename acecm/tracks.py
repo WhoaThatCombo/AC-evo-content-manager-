@@ -68,6 +68,41 @@ def server_kspkg():
     return os.path.join(config.server_dir(), "content.kspkg")
 
 
+_IN_PKG = {"stamp": None, "folders": set()}
+
+
+def in_server_package(folder):
+    """Is this track already inside the server's own archive?
+
+    Cached on the archive's size+mtime: the index is 64 MiB at the end of a
+    multi-hundred-megabyte file, so asking once per profile per page render
+    would be pointlessly expensive.
+    """
+    pkg = server_kspkg()
+    if not folder or not os.path.isfile(pkg):
+        return False
+    try:
+        st = os.stat(pkg)
+        stamp = (st.st_size, int(st.st_mtime))
+    except OSError:
+        return False
+    if _IN_PKG["stamp"] != stamp:
+        found = set()
+        try:
+            from . import kspkg
+            for p, _s, _o in kspkg.iter_entries(pkg):
+                low = p.lower().replace("/", "\\")
+                if low.startswith("content\\tracks\\"):
+                    rest = low[len("content\\tracks\\"):]
+                    if "\\" in rest:
+                        found.add(rest.split("\\", 1)[0])
+        except Exception as ex:
+            logs.LOG.info("in_server_package: %s", ex)
+            return False
+        _IN_PKG.update(stamp=stamp, folders=found)
+    return folder.lower() in _IN_PKG["folders"]
+
+
 def validate(pkg_dir):
     """Is this a usable track package?"""
     if not pkg_dir or not os.path.isdir(pkg_dir):

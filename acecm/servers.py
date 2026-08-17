@@ -248,11 +248,27 @@ def upsert(profile):
             out.append(profile)
         items = out
     save_all(items)
+    # Sharing follows the configuration. Saving a profile is the moment we
+    # know what it needs, so the share list is updated here rather than being
+    # a separate thing to remember - see autoshare.
+    # ⚠ Publishing only. Copying files is left to start-up, where there is a
+    # progress indicator and the user is already waiting for something.
+    try:
+        from . import autoshare
+        autoshare.publish(profile)
+    except Exception as ex:
+        logs.LOG.warning("autoshare on save: %s", ex)
     return profile
 
 
 def delete(pid):
     save_all([p for p in load() if p["id"] != pid])
+    # the profile is gone, so anything shared purely on its behalf should go
+    try:
+        from . import autoshare
+        autoshare.prune(load())
+    except Exception as ex:
+        logs.LOG.warning("autoshare on delete: %s", ex)
 
 
 def runtime():
@@ -528,6 +544,25 @@ def start(profile):
     bad = _custom_track_problem(profile)
     if bad:
         return {"ok": False, "error": bad}
+
+    # ⚠ The client and the server read car mods from DIFFERENT folders, so a
+    # car you can drive is not necessarily a car this server can host - and
+    # nothing says so until a player picks it and cannot join. Starting is the
+    # right moment to close that gap, and to make sure what we advertise for
+    # download matches what this server actually needs.
+    try:
+        from . import autoshare
+        got = autoshare.sync(profile)
+        filled = (got.get("filled") or {}).get("copied") or []
+        if filled:
+            logs.LOG.info("copied %d car mod(s) to the server for '%s': %s",
+                          len(filled), profile.get("name"), ", ".join(filled))
+        for name in (got.get("filled") or {}).get("failed") or []:
+            logs.LOG.warning("car mod '%s' is allowed on '%s' but could not "
+                             "be copied to the server", name,
+                             profile.get("name"))
+    except Exception as ex:
+        logs.LOG.warning("autoshare before start: %s", ex)
 
     # AI + telemetry need loose .aisplinedata next to the server. Stock
     # lines come from the client archive; Barber etc. from the import.

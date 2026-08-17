@@ -263,7 +263,10 @@ pre.log{
   background:var(--panel);border:1px solid var(--line);margin-bottom:12px;
   min-height:150px;display:flex;align-items:center;justify-content:center;
 }
-.dshot img{width:100%;height:auto;display:block}
+/* ⚠ Never scale a render UP. width:100% blew a 480px thumbnail across the
+   whole pane and made every car look blurry; the big render is 1440px, so it
+   fills normal widths and is downscaled (crisp) rather than stretched. */
+.dshot img{max-width:100%;height:auto;display:block;margin:0 auto}
 
 /* ------------------------------------------------------------ attention --
    Problems, on every page. Takes no room at all when there is nothing wrong,
@@ -279,3 +282,31 @@ pre.log{
   color:var(--gold);background:#1d1809;border:1px solid #3a3117;
   border-radius:9px;padding:9px 12px;margin-bottom:12px;
 }
+
+/* ------------------------------------------------------- drop progress --
+   A dropped track can be a gigabyte. Sits above everything, bottom-centre,
+   so it is visible whatever page you are on and whatever is scrolled. */
+#dropprog{
+  position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(10px);
+  min-width:min(520px,90vw);background:var(--panel2);border:1px solid var(--line);
+  border-radius:10px;padding:12px 16px;z-index:90;
+  opacity:0;pointer-events:none;transition:.18s;
+}
+#dropprog.on{opacity:1;transform:translateX(-50%)}
+#dropprog .dp-what{font-size:13px;margin-bottom:8px}
+#dropprog .dp-track{
+  height:4px;background:var(--line);border-radius:99px;overflow:hidden;
+}
+#dropprog .dp-bar{
+  height:100%;width:0;background:var(--accent);border-radius:99px;
+  transition:width .2s linear;
+}
+/* no byte count from the server side, so the bar moves instead of lying
+   about a percentage */
+#dropprog .dp-bar.indet{
+  width:100%;transition:none;
+  background:linear-gradient(90deg,var(--line) 0%,var(--accent) 50%,var(--line) 100%);
+  background-size:200% 100%;animation:dpslide 1.1s linear infinite;
+}
+@keyframes dpslide{from{background-position:200% 0}to{background-position:-200% 0}}
+#dropprog .dp-detail{margin-top:6px}

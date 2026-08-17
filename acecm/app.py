@@ -184,6 +184,15 @@ class Handler(BaseHTTPRequestHandler):
                     ports=(8092, 8093), timeout=to))
             if path == "/api/share":
                 return _json(self, contentsync.share_info())
+            if path == "/api/share/auto":
+                # what each server needs, what it is missing, what we publish
+                from . import autoshare
+                out = []
+                for p in servers.load():
+                    out.append({"id": p.get("id"), "name": p.get("name"),
+                                "needs": autoshare.needs(p),
+                                "gaps": autoshare.server_gaps(p)})
+                return _json(self, {"ok": True, "servers": out})
             if path in ("/live", "/live.html"):
                 return self._static("/live.html")
             if path == "/live.js":
@@ -219,10 +228,23 @@ class Handler(BaseHTTPRequestHandler):
                     (q.get("base") or [""])[0], (q.get("id") or [""])[0]))
             # --- pictures for the car and track lists --------------------
             if path == "/api/thumb/car":
-                # Cached PNG only. Rendering here blocked the UI and spawned
-                # evoview consoles on every Drive search keystroke.
-                return self._send_png(thumbs.render_car(
-                    (q.get("id") or [""])[0], make=False))
+                # Cached PNG only for list rows: rendering here blocked the UI
+                # and spawned an evoview console on every Drive keystroke.
+                # ⚠ big=1 is the exception and DOES render, because it is one
+                # car the user has deliberately opened - and it is the only way
+                # the detail pane gets a picture that is not upscaled. force=1
+                # replaces a stale render rather than reusing it.
+                big = (q.get("big") or ["0"])[0] == "1"
+                force = (q.get("force") or ["0"])[0] == "1"
+                cid = (q.get("id") or [""])[0]
+                if big:
+                    shot = thumbs.render_car(cid, big=True, force=force,
+                                             make=True)
+                    # fall back to the small one rather than showing nothing
+                    return self._send_png(shot or thumbs.render_car(
+                        cid, make=False))
+                return self._send_png(thumbs.render_car(cid, make=False,
+                                                        force=force))
             if path == "/api/thumb/track":
                 return self._send_png(thumbs.track_cover(
                     (q.get("folder") or [""])[0]))
@@ -939,9 +961,30 @@ def serve():
     # only to loopback, a friend on the LAN or the internet can never
     # reach it - "can't reach the IP" - even with 9700 forwarded.
     listen = (config.CFG.get("listen") or "0.0.0.0").strip() or "0.0.0.0"
-    try:
-        srv = App((listen, port), Handler)
-    except OSError as ex:
+    # ⚠ Wait for a HANDOVER before deciding the port is taken. After an update
+    # (and after Restart) the replacement starts while the outgoing copy is
+    # still letting go of the socket: it is gone as a process, but the port is
+    # briefly still bound. Binding once and giving up meant the new copy saw
+    # "already running", tried to raise a window on an instance that was
+    # dying, and exited - so the app did not come back and you had to start it
+    # a second time. Retry for a few seconds; a genuinely running instance is
+    # still detected, it just costs a moment longer to say so.
+    srv = None
+    deadline = time.time() + 12.0
+    last = None
+    while True:
+        try:
+            srv = App((listen, port), Handler)
+            break
+        except OSError as ex:
+            last = ex
+            # someone is ANSWERING there - that is a real second instance, and
+            # waiting will not change it
+            if _acecm_answering(port) or time.time() >= deadline:
+                break
+            time.sleep(0.5)
+    if srv is None:
+        ex = last
         # ⚠ Do not just die here. run.bat starts us with pythonw, which has no
         # console, so a SystemExit message goes precisely nowhere: the user
         # double-clicks, nothing happens, and there is nothing to read. Worse,
