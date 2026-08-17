@@ -468,10 +468,80 @@ def plan(base, server_id):
             have.append(f["path"])
         else:
             need.append({**f, "dest": dest, "url": url})
+    stale = stale_files(man)
     return {"ok": True, "server": man.get("server", {}),
             "need": need, "have": len(have),
             "bytes": sum(f.get("size", 0) for f in need),
+            # files the host has deleted since we last synced - removed after
+            # the new files are safely in place, never before
+            "stale": stale,
             "missing_on_host": man.get("missing_locally") or []}
+
+
+def stale_files(man):
+    """Local files the host no longer has, for the tracks in this manifest.
+
+    An update that REMOVES a file used to leave the old one behind forever:
+    the plan only ever added or replaced, so a joiner accumulated files the
+    host had deleted. Usually harmless, occasionally not - a leftover the
+    track still references is exactly the kind of thing that loads once and
+    then misbehaves.
+
+    ⚠ Scope is deliberately narrow. Only TRACK FOLDERS are pruned, because a
+    track folder belongs entirely to that track; the mods directory holds
+    other people's mods side by side, so "not in this manifest" says nothing
+    about whether a file there should exist.
+
+    ⚠ A folder is skipped unless the manifest lists at least one file for it.
+    An empty or half-built manifest must never be read as "delete everything".
+    """
+    files = man.get("files") or []
+    if not files:
+        return []
+    keep, folders = set(), set()
+    for f in files:
+        rel = (f.get("path") or "").replace("\\", "/").lstrip("/")
+        parts = [p for p in rel.split("/") if p]
+        if len(parts) >= 3 and parts[0] == "tracks":
+            folders.add(parts[1])
+            keep.add("/".join(parts).lower())
+    out = []
+    for folder in folders:
+        try:
+            root = _under(tracks_dir(), folder)
+        except ValueError:
+            continue
+        if not os.path.isdir(root):
+            continue
+        for base, _dirs, names in os.walk(root):
+            for n in names:
+                full = os.path.join(base, n)
+                rel = os.path.relpath(full, tracks_dir()).replace("\\", "/")
+                if f"tracks/{rel}".lower() not in keep:
+                    out.append(full)
+    return out
+
+
+def remove_stale(paths):
+    """Delete files stale_files() identified. Never touches anything else."""
+    root = os.path.abspath(tracks_dir())
+    gone, failed = [], []
+    for p in paths:
+        try:
+            # belt and braces: refuse anything outside the tracks folder
+            if os.path.commonpath([root, os.path.abspath(p)]) != root:
+                continue
+        except ValueError:
+            continue
+        try:
+            os.remove(p)
+            gone.append(p)
+        except OSError as ex:
+            logs.LOG.info("could not remove stale %s: %s", p, ex)
+            failed.append(p)
+    if gone:
+        logs.LOG.info("removed %d file(s) the host no longer has", len(gone))
+    return {"removed": gone, "failed": failed}
 
 
 def _under(root, *parts):

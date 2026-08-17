@@ -43,6 +43,7 @@ def _install_content(body):
     # file, and downloading it twice is just slower.
     ids = body.get("ids") or ([body["id"]] if body.get("id") else [])
     need, seen, errors = [], set(), []
+    stale = []
     for sid in ids:
         p = contentsync.plan(base, sid)
         if not p.get("ok"):
@@ -52,6 +53,14 @@ def _install_content(body):
             if e["path"] not in seen:
                 seen.add(e["path"])
                 need.append(e)
+        for f in (p.get("stale") or []):
+            if f not in stale:
+                stale.append(f)
+    if not need and stale:
+        # nothing to download, but the host has removed files since last time
+        got = contentsync.remove_stale(stale)
+        return {"ok": True, "files": 0, "bytes": 0,
+                "removed": len(got.get("removed") or [])}
     if not need:
         return {"ok": False,
                 "error": ("; ".join(errors) if errors
@@ -64,6 +73,11 @@ def _install_content(body):
     def run():
         try:
             contentsync.install_files(need, _INSTALL)
+            # ⚠ AFTER the downloads, never before: a failed install must not
+            # leave the joiner with files deleted and nothing to replace them.
+            dropped = contentsync.remove_stale(stale) if stale else {}
+            if dropped.get("removed"):
+                _INSTALL["removed"] = len(dropped["removed"])
             extra = _INSTALL.get("warning")
             _INSTALL.update({"state": "done",
                              "detail": (f"{len(need)} file(s) installed"
