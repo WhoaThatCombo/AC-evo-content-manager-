@@ -1609,7 +1609,10 @@ function editor(prof, trk, opts, extra) {
       needBody.append(box);
     }
   })();
-  p.append(need);
+  // ⚠ into the editor card, NOT a page-level `p` - there is no such variable
+  // in this function, and referencing it threw before anything was appended,
+  // so the whole Servers page rendered blank after opening an editor.
+  c.append(need);
 
   const row = el('div', 'row');
   const save = el('button', 'primary', 'Save');
