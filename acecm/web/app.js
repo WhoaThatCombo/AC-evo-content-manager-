@@ -960,7 +960,9 @@ async function serversPage() {
     // Real choices for the two fields that used to be typed by hand: tracks
     // this machine can actually load, and the car catalogue.
     const cat = await api('cars');
-    const loc = await api('browser/local');
+    // ⚠ refresh: content changes often (imports, updates, deletions) and a
+  // cached map shows tracks that are gone or misses ones just added.
+  const loc = await api('browser/local?refresh=1');
     const imported = new Set(loc.tracks || []);
     const modTracks = Object.entries(loc.track_map || {})
       .filter(([, folder]) => imported.has(folder))
@@ -1543,6 +1545,72 @@ function editor(prof, trk, opts, extra) {
   mk(g, 'log', 'Log file', 'text');
   mk(g, 'telemetry', 'Start telemetry with this server', 'bool');
 
+  /* ---- what this server pulls in ---------------------------------------
+     Shown where the track and cars are chosen, because that is where the
+     consequence belongs: pick modded content and it is shared for joiners and
+     copied to the server automatically. The only thing worth a button is the
+     one job that is slow and deliberate - putting a track into the server's
+     own package. */
+  const need = el('div', 'card');
+  need.innerHTML = '<h2>Content this server needs</h2>';
+  need.append(el('div', 'tiny dim',
+    'Modded track and cars are shared for joiners automatically, and car mods '
+    + 'are copied to the server when it starts. Stock content is never shared '
+    + '— everyone already has it.'));
+  const needBody = el('div');
+  needBody.style.marginTop = '8px';
+  need.append(needBody);
+  (async () => {
+    const info = await api('share/auto');
+    const me = ((info && info.servers) || []).find(x => x.id === prof.id);
+    needBody.innerHTML = '';
+    if (!me) {
+      needBody.append(el('div', 'tiny dim',
+        'Save the server once and this will fill in.'));
+      return;
+    }
+    const n = me.needs || {}, gaps = me.gaps || {};
+    const bits = [...(n.tracks || []), ...(n.mods || [])];
+    needBody.append(el('div', 'tiny dim', bits.length
+      ? 'Modded content: ' + bits.map(esc).join(', ')
+      : 'Nothing modded — this server needs no downloads.'));
+    if ((gaps.mods || []).length) {
+      needBody.append(el('div', 'warn',
+        '<b>Not on the server yet:</b> ' + (gaps.mods || []).map(esc).join(', ')
+        + '<br>These are copied over automatically when you start it.'));
+    }
+    if (gaps.track) {
+      const box = el('div', 'warn');
+      box.innerHTML = '<b>' + esc(gaps.track) + ' is not in the '
+        + 'server content package.</b><br>Players cannot join until it is added. '
+        + 'This rewrites the package index, so it is a deliberate step.';
+      const go = el('button', 'sm primary', 'Add track to the server');
+      go.style.marginTop = '6px';
+      go.onclick = async () => {
+        go.disabled = true;
+        go.textContent = 'adding…';
+        // deploy takes the imported track's PACKAGE FOLDER, not its name
+        const list = await api('tracks');
+        const hit = ((list && list.imported) || [])
+          .find(x => x.folder === gaps.track);
+        if (!hit) {
+          toast('Could not find the imported files for ' + gaps.track, true);
+          go.disabled = false; go.textContent = 'Add track to the server';
+          return;
+        }
+        const r = await apiLong('trackdeploy/deploy',
+                                { path: hit.path, native: true });
+        toast(r && r.ok ? 'Added to the server package'
+                        : ((r && r.error) || 'could not add it'),
+              !(r && r.ok));
+        serversPage();
+      };
+      box.append(el('div'), go);
+      needBody.append(box);
+    }
+  })();
+  p.append(need);
+
   const row = el('div', 'row');
   const save = el('button', 'primary', 'Save');
   save.onclick = async () => {
@@ -1995,7 +2063,13 @@ async function carsPage() {
     const img = el('img');
     img.loading = 'lazy';
     img.alt = m.label;
-    img.src = 'api/thumb/car?id=' + encodeURIComponent(m.model);
+    // ⚠ big=1: the list thumbnail is 480px and this pane is far wider, so
+    // reusing it here shows an upscaled, soft picture. This renders the one
+    // car being looked at at full size, and the request may take a moment
+    // the first time because evoview has to draw it.
+    const shotUrl = (force) => 'api/thumb/car?big=1&id='
+      + encodeURIComponent(m.model) + (force ? '&force=1&t=' + Date.now() : '');
+    img.src = shotUrl(false);
     // ⚠ A car with no render must not leave a broken-image icon sitting in
     // the middle of the pane - say what is missing instead.
     img.onerror = () => {
@@ -2018,7 +2092,24 @@ async function carsPage() {
                       : ((r && r.error) || 'could not open the viewer'),
             !(r && r.ok));
     };
-    acts.append(view);
+    const shoot = el('button', 'sm', 'Re-render photo');
+    shoot.title = 'Draw this car again with evoview, replacing the cached image';
+    shoot.onclick = async () => {
+      shoot.disabled = true;
+      const was = shoot.textContent;
+      shoot.textContent = 'rendering…';
+      // the browser will not re-fetch an identical URL, hence the timestamp
+      await new Promise(done => {
+        const probe = new Image();
+        probe.onload = probe.onerror = done;
+        probe.src = shotUrl(true);
+      });
+      img.src = shotUrl(true);
+      shoot.disabled = false;
+      shoot.textContent = was;
+      toast('Re-rendered ' + m.label);
+    };
+    acts.append(view, shoot);
     rightCol.append(acts);
 
     // ---- allowed on a server -------------------------------------------
@@ -2094,7 +2185,7 @@ async function carsPage() {
 /* --------------------------------------------------------------- tracks -- */
 async function tracksPage() {
   const [d, loc, st] = await Promise.all([
-    api('tracks'), api('browser/local'), api('thumbs/status'),
+    api('tracks'), api('browser/local?refresh=1'), api('thumbs/status'),
   ]);
   const p = $('#page');
   p.innerHTML = '';
@@ -2514,7 +2605,9 @@ let scanned = null;
    Sharing is also the thing that makes a modded server joinable at all, which
    makes it too important to be a side effect. */
 async function shareCard(p) {
-  const loc = await api('browser/local');
+  // ⚠ refresh: content changes often (imports, updates, deletions) and a
+  // cached map shows tracks that are gone or misses ones just added.
+  const loc = await api('browser/local?refresh=1');
   const reg = await api('registry');
   const shared = {};
   (reg.servers || []).forEach(e => (e.required_tracks || []).forEach(
@@ -2526,6 +2619,14 @@ async function shareCard(p) {
     .sort((a, b) => a[0].localeCompare(b[0]));
 
   const share = await api('share');
+  // which servers pull in which track, so each row can say WHY it is shared
+  const autoInfo = await api('share/auto');
+  const autoWho = {};
+  ((autoInfo && autoInfo.servers) || []).forEach(sv => {
+    ((sv.needs && sv.needs.tracks) || []).forEach(t => {
+      (autoWho[t] = autoWho[t] || []).push(sv.name || 'a server');
+    });
+  });
   const c = el('div', 'card');
   c.innerHTML = '<h2>Shared for download</h2>'
     + '<div class="tiny dim" style="margin-bottom:10px">A player who does not '
@@ -2533,56 +2634,67 @@ async function shareCard(p) {
     + 'Share it here, copy the link, and they paste it into '
     + '<b>Server browser → Fetch from ACECM</b>. Only tracks you imported '
     + 'are listed — stock tracks everyone already has.</div>';
-  if (share.lan_url) {
+  // ⚠ TWO links, labelled by who they are for. Handing out one LAN address and
+  // telling people to "swap in your public IP" is how a share link that cannot
+  // possibly work gets sent to a friend on another network - the server list
+  // reaches them through the lobby without touching this PC, so everything
+  // looks fine right up until the download.
+  function linkRow(label, url, note, primary) {
+    const wrap = el('div');
+    wrap.style.marginBottom = '10px';
+    wrap.append(el('div', 'tiny dim', label));
     const box = el('div', 'row wrap');
-    box.style.marginBottom = '10px';
-    const url = el('input');
-    url.readOnly = true;
-    url.value = share.lan_url;
-    url.style.minWidth = '18em';
-    url.title = share.hint || '';
-    const copy = el('button', 'sm primary', 'Copy share link');
+    const inp = el('input');
+    inp.readOnly = true;
+    inp.value = url;
+    inp.style.minWidth = '18em';
+    inp.onclick = () => inp.select();
+    const copy = el('button', 'sm' + (primary ? ' primary' : ''), 'Copy');
     copy.onclick = async () => {
-      try { await navigator.clipboard.writeText(share.lan_url); } catch (e) {}
-      toast('Copied ' + share.lan_url + ' — they paste this in Server browser');
+      try { await navigator.clipboard.writeText(url); } catch (e) {}
+      toast('Copied ' + url);
     };
-    box.append(url, copy);
-    c.append(box);
+    box.append(inp, copy);
+    wrap.append(box);
+    if (note) wrap.append(el('div', 'tiny dim', note));
+    return wrap;
+  }
+
+  if (share.public_url) {
+    c.append(linkRow('For anyone outside your network', share.public_url,
+      esc(share.public_note || ''), true));
+  } else if (share.public_note) {
+    c.append(el('div', 'tiny dim', esc(share.public_note)));
+  }
+  if (share.lan_url) {
+    c.append(linkRow('For someone on your own network', share.lan_url,
+      `They need <b>TCP ${share.port}</b> open in Windows Firewall. `
+      + 'ACECM stays open while they download.', !share.public_url));
+  }
+  if (share.lan_url || share.public_url) {
     c.append(el('div', 'tiny dim',
-      `They need <b>TCP ${share.port}</b> (this app) and the game `
-      + '<b>TCP+UDP 9700</b>. Same LAN: allow 8092 in Windows Firewall. '
-      + 'Different internet: forward both, and swap the LAN address in the '
-      + 'link for your public IP — keep <code>:' + share.port + '</code>. '
-      + 'ACECM stays open while they download.'));
+      `Joining also needs the game server itself: <b>TCP+UDP 9700</b>. `
+      + `From the internet, forward <b>${share.port}</b> and <b>9700</b> to `
+      + 'this PC.'));
   }
   if (!rows.length) {
-    c.append(el('div', 'empty', 'No imported tracks to share'));
+    c.append(el('div', 'empty', 'No imported tracks yet'));
   } else {
+    /* ⚠ No Share / Stop sharing buttons any more. Working out which of your
+       content a joining player is missing is a question ACECM can answer from
+       the server profiles, so sharing follows what you host instead of being a
+       list to keep in step by hand. This is the READ-OUT of that. */
     rows.forEach(([name, folder]) => {
       const row = el('div', 'chk');
-      const on = !!shared[folder];
+      const auto = (autoWho[folder] || []);
+      const on = auto.length || !!shared[folder];
+      const why = auto.length
+        ? 'shared for ' + auto.join(', ')
+        : (shared[folder] ? 'shared manually' : 'not needed by any server yet');
       row.innerHTML = `<span class="name"><b>${esc(name)}</b>`
-        + `<div class="tiny dim">${esc(folder)}</div></span>`
+        + `<div class="tiny dim">${esc(folder)} — ${esc(why)}</div></span>`
         + `<span class="pill ${on ? 'on' : 'off'}"><i class="dot"></i>`
-        + `${on ? 'shared' : 'not shared'}</span>`;
-      const b = el('button', on ? 'sm danger' : 'sm primary',
-                   on ? 'Stop sharing' : 'Share');
-      b.onclick = async () => {
-        if (on) {
-          await api('registry/delete', { id: shared[folder].id });
-          toast('No longer shared');
-        } else {
-          const r = await api('registry/save', {
-            name: `${name} (hosted here)`,
-            description: `Content for ${name}`,
-            required_tracks: [folder], public: true,
-          });
-          toast(r && r.error ? r.error : `${name} is now downloadable`,
-                !!(r && r.error));
-        }
-        contentPage();
-      };
-      row.append(b);
+        + `${on ? 'shared' : 'idle'}</span>`;
       c.append(row);
     });
   }
@@ -2699,19 +2811,103 @@ async function finishIngest(payload) {
   return r;
 }
 
+/* ---- drop progress ------------------------------------------------------
+   A dropped track is a gigabyte or more. It used to show one toast and then
+   nothing at all for minutes, which is indistinguishable from the app having
+   hung - so people drop the file again, and now two installs are running.
+
+   ⚠ fetch() cannot report UPLOAD progress; only XMLHttpRequest exposes
+   upload.onprogress. That is the whole reason this is not a fetch call.      */
+function dropProgress() {
+  let box = $('#dropprog');
+  if (!box) {
+    box = el('div');
+    box.id = 'dropprog';
+    box.innerHTML = '<div class="dp-what"></div>'
+      + '<div class="dp-track"><div class="dp-bar"></div></div>'
+      + '<div class="dp-detail tiny dim"></div>';
+    document.body.append(box);
+  }
+  const bar = box.querySelector('.dp-bar');
+  return {
+    show(what) {
+      box.classList.add('on');
+      box.querySelector('.dp-what').textContent = what;
+      bar.style.width = '0%';
+      bar.classList.remove('indet');
+      box.querySelector('.dp-detail').textContent = '';
+    },
+    set(frac, detail) {
+      bar.classList.remove('indet');
+      bar.style.width = Math.max(0, Math.min(1, frac)) * 100 + '%';
+      if (detail != null) box.querySelector('.dp-detail').textContent = detail;
+    },
+    // the server side gives no byte-level feedback, so say so honestly with a
+    // moving bar rather than a percentage we would be inventing
+    busy(what, detail) {
+      box.querySelector('.dp-what').textContent = what;
+      bar.style.width = '100%';
+      bar.classList.add('indet');
+      if (detail != null) box.querySelector('.dp-detail').textContent = detail;
+    },
+    hide() { box.classList.remove('on'); },
+  };
+}
+
+function mb(n) { return (n / 1048576).toFixed(1) + ' MB'; }
+
+function putFile(url, file, onProgress) {
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = () => {
+      let j;
+      try { j = JSON.parse(xhr.responseText); }
+      catch (e) { j = { error: 'upload failed (' + xhr.status + ')' }; }
+      resolve(j);
+    };
+    xhr.onerror = () => resolve({ error: 'upload failed - connection lost' });
+    xhr.onabort = () => resolve({ error: 'upload cancelled' });
+    xhr.send(file);
+  });
+}
+
 async function uploadDropped(files) {
   const id = dropId();
-  for (const f of files) {
-    const r = await fetch(
-      '/api/drop/part?id=' + encodeURIComponent(id)
-      + '&name=' + encodeURIComponent(f.name),
-      { method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: f });
-    const j = await r.json().catch(() => ({ error: 'upload failed' }));
-    if (!j.ok) return j;
+  const prog = dropProgress();
+  const total = files.reduce((n, f) => n + (f.size || 0), 0);
+  let done = 0;
+  const started = Date.now();
+  prog.show('Copying ' + files.length + ' file'
+            + (files.length === 1 ? '' : 's') + '…');
+  try {
+    for (const f of files) {
+      const r = await putFile(
+        '/api/drop/part?id=' + encodeURIComponent(id)
+        + '&name=' + encodeURIComponent(f.name),
+        f,
+        (loaded) => {
+          const secs = Math.max(0.001, (Date.now() - started) / 1000);
+          const rate = (done + loaded) / secs;
+          const left = rate > 0 ? (total - done - loaded) / rate : 0;
+          prog.set(total ? (done + loaded) / total : 0,
+            `${f.name} — ${mb(done + loaded)} of ${mb(total)}`
+            + (rate ? ` · ${mb(rate)}/s` : '')
+            + (left > 2 ? ` · ${Math.ceil(left)}s left` : ''));
+        });
+      if (!r.ok) { prog.hide(); return r; }
+      done += f.size || 0;
+    }
+    // Unpacking and registering happens on the server with no byte counter.
+    prog.busy('Installing…', 'unpacking and registering the content');
+    return await finishIngest({ id });
+  } finally {
+    prog.hide();
   }
-  return finishIngest({ id });
 }
 
 function collectDropped(dt) {

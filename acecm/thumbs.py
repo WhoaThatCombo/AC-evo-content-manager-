@@ -30,6 +30,12 @@ CACHE = os.path.join(config.DATA, "thumbs")
 CARS = os.path.join(CACHE, "cars")
 TRACKS = os.path.join(CACHE, "tracks")
 SIZE = "480x320"
+# ⚠ The detail pane shows one car much larger than a list row does, and a
+# 480px render blown up to fill it is visibly soft - it reads as a low-quality
+# app rather than a low-resolution file. Big renders are made ON DEMAND for the
+# car you actually opened, never for all 85, because each one costs an evoview
+# launch.
+BIG = "1440x960"
 _LOCK = threading.Lock()
 _JOB = {"state": "idle", "done": 0, "total": 0, "current": "", "made": 0}
 # tracks decode separately from cars: different work, different button
@@ -41,9 +47,10 @@ def _dirs():
         os.makedirs(d, exist_ok=True)
 
 
-def car_path(car_id):
+def car_path(car_id, big=False):
     _dirs()
-    return os.path.join(CARS, re.sub(r"[^A-Za-z0-9_.-]", "_", car_id) + ".png")
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", car_id)
+    return os.path.join(CARS, safe + ("@big.png" if big else ".png"))
 
 
 def track_path(folder):
@@ -53,7 +60,7 @@ def track_path(folder):
 
 # ------------------------------------------------------------------- cars --
 
-def render_car(car_id, force=False, timeout=180, make=True):
+def render_car(car_id, force=False, timeout=180, make=True, big=False):
     """One car, rendered by evoview into the cache. Returns the path or None.
 
     make=False (the list GET) never launches evoview. Typing in Drive used
@@ -62,7 +69,7 @@ def render_car(car_id, force=False, timeout=180, make=True):
     """
     if not car_id:
         return None
-    out = car_path(car_id)
+    out = car_path(car_id, big=big)
     if os.path.isfile(out) and not force:
         return out
     if not make:
@@ -73,7 +80,8 @@ def render_car(car_id, force=False, timeout=180, make=True):
     pkg = viewer._package_for(car_id)
     if not pkg:
         return None
-    cmd = [exe, pkg, "--car", car_id, "--shot", out, "--size", SIZE,
+    cmd = [exe, pkg, "--car", car_id, "--shot", out,
+           "--size", BIG if big else SIZE,
            "--yaw", "2.35", "--pitch", "0.17"]
     base = viewer.package()
     # a mod package holds only its own car; the base game supplies shared tyres

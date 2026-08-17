@@ -79,3 +79,46 @@ def our_ips(lan=None):
 def backend_ws_url(port, host="127.0.0.1"):
     """The -backend= value Kunos's own help text describes."""
     return f"wss://{host}:{int(port)}/communicationNode/dev"
+
+
+# ---------------------------------------------------------------- public IP --
+# ⚠ This is the ONLY outbound request in this module, and it exists because a
+# LAN address is useless to the person you are sharing with. Someone on another
+# network needs the address your router answers on, and nothing on this machine
+# knows it - the PC only ever sees its private 192.168.x.x. So we ask an
+# outside service what address our traffic appears to come from.
+#
+# Nothing is uploaded: the request carries no data beyond itself, and the reply
+# is a bare IP. It runs only when the share panel is opened, never on startup,
+# and a failure degrades to "we could not work it out" rather than an error.
+_PUBLIC = {"ip": "", "at": 0.0}
+_PUBLIC_TTL = 15 * 60
+
+# Two providers, so one being down is not the end of it. Both return a bare
+# address in the body.
+_PUBLIC_URLS = ("https://api.ipify.org", "https://ifconfig.me/ip")
+
+
+def public_ipv4(refresh=False, timeout=4.0):
+    """The address the outside world sees, or "" if it cannot be determined."""
+    import re
+    import time
+    import urllib.request
+
+    now = time.monotonic()
+    if not refresh and _PUBLIC["ip"] and (now - _PUBLIC["at"]) < _PUBLIC_TTL:
+        return _PUBLIC["ip"]
+    for url in _PUBLIC_URLS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "ACECM"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                txt = r.read(64).decode("ascii", "replace").strip()
+        except Exception:
+            continue
+        # Only accept something that really is a dotted IPv4 - a captive
+        # portal or an error page would otherwise become "your address".
+        if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", txt) and \
+                all(0 <= int(p) <= 255 for p in txt.split(".")):
+            _PUBLIC.update(ip=txt, at=now)
+            return txt
+    return ""

@@ -284,18 +284,34 @@ def share_info():
             "tracks": e.get("required_tracks") or [],
             "mods": e.get("required_mods") or [],
         })
+    # ⚠ A LAN address is unroutable for anyone not on this network, and that is
+    # exactly who you share with. Handing out 192.168.x.x is why "he can see my
+    # server but the download fails with a port error" kept happening: the
+    # server list arrives through the lobby and never touches this PC, while
+    # the download is a direct connection to it.
+    wan = netutil.public_ipv4()
     return {
         "ok": True,
         "port": port,
         "listen": (config.CFG.get("listen") or "0.0.0.0"),
         "lan_ip": lan,
         "lan_url": f"http://{lan}:{port}" if lan else "",
+        "public_ip": wan,
+        "public_url": f"http://{wan}:{port}" if wan else "",
         "localhost_url": f"http://127.0.0.1:{port}",
         "published": pub,
         "hint": (f"Players paste the URL into Server browser → Fetch from "
                  f"ACECM. They need TCP {port} (this app) and the game's "
                  f"TCP+UDP port (usually 9700). Same LAN: firewall on "
                  f"{port}. Different network: forward both."),
+        # said separately, because the address alone is not enough and the
+        # missing half is always the forwarding
+        "public_note": (f"Anyone outside your network also needs TCP {port} "
+                        f"forwarded to this PC on your router - the address "
+                        f"alone is not enough."
+                        if wan else
+                        "Could not work out your public address (no internet, "
+                        "or the lookup was blocked)."),
     }
 
 

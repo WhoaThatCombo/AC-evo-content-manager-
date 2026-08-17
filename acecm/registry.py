@@ -72,7 +72,16 @@ def flush_cache():
 
 
 def file_digest(path):
-    """SHA-256, cached on (size, mtime) so big content is hashed once."""
+    """SHA-256, cached on (size, mtime_ns) so big content is hashed once.
+
+    ⚠ NANOSECONDS, not int(st_mtime). Truncating to whole seconds means a file
+    rewritten within the same second at the same size keeps its old hash - and
+    that is not a corner case here: re-exporting a track file usually preserves
+    its size, and this hash is exactly what tells a joining player their copy
+    is out of date. A stale digest means the host advertises content it no
+    longer has and nobody ever receives the update. Proven with a same-size
+    rewrite: the digest did not change.
+    """
     global _DIRTY
     try:
         st = os.stat(path)
@@ -81,14 +90,16 @@ def file_digest(path):
     key = os.path.abspath(path)
     c = _cache()
     hit = c.get(key)
-    if hit and hit.get("size") == st.st_size and hit.get("mtime") == int(st.st_mtime):
+    if hit and hit.get("size") == st.st_size \
+            and hit.get("mtime_ns") == st.st_mtime_ns:
         return hit["sha256"]
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     digest = h.hexdigest()
-    c[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "sha256": digest}
+    c[key] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns,
+              "sha256": digest}
     _DIRTY = True
     return digest
 
