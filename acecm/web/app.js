@@ -1580,32 +1580,15 @@ function editor(prof, trk, opts, extra) {
         + '<br>These are copied over automatically when you start it.'));
     }
     if (gaps.track) {
+      // ⚠ No button. The user asked for this to be automatic, and a button
+      // that deploys is a button that can be forgotten - which is exactly how
+      // a server ends up advertising a track it cannot host. Starting the
+      // server puts it into the package.
       const box = el('div', 'warn');
-      box.innerHTML = '<b>' + esc(gaps.track) + ' is not in the '
-        + 'server content package.</b><br>Players cannot join until it is added. '
-        + 'This rewrites the package index, so it is a deliberate step.';
-      const go = el('button', 'sm primary', 'Add track to the server');
-      go.style.marginTop = '6px';
-      go.onclick = async () => {
-        go.disabled = true;
-        go.textContent = 'adding…';
-        // deploy takes the imported track's PACKAGE FOLDER, not its name
-        const list = await api('tracks');
-        const hit = ((list && list.imported) || [])
-          .find(x => x.folder === gaps.track);
-        if (!hit) {
-          toast('Could not find the imported files for ' + gaps.track, true);
-          go.disabled = false; go.textContent = 'Add track to the server';
-          return;
-        }
-        const r = await apiLong('trackdeploy/deploy',
-                                { path: hit.path, native: true });
-        toast(r && r.ok ? 'Added to the server package'
-                        : ((r && r.error) || 'could not add it'),
-              !(r && r.ok));
-        serversPage();
-      };
-      box.append(el('div'), go);
+      box.innerHTML = '<b>' + esc(gaps.track) + ' is not in the server '
+        + 'content package yet.</b><br>It is added automatically when you '
+        + 'start this server. That rewrites the package index, so the first '
+        + 'start after adding a track takes longer than usual.';
       needBody.append(box);
     }
   })();
