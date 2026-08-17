@@ -201,7 +201,60 @@ async function drivePage() {
   carSearch.placeholder = 'Filter cars…';
   carSearch.value = driveFilter.car;
   const carList = el('div', 'list drive-list');
-  carCol.append(carHead, carSearch, carList);
+  const liveryBox = el('div');
+  liveryBox.style.marginTop = '10px';
+  carCol.append(carHead, carSearch, carList, liveryBox);
+
+  /* ---- livery -----------------------------------------------------------
+     Colours come from the CAR's own design, never from the brand's folder:
+     the brand list is a superset, and writing a colour the car does not offer
+     crashes the game on load. Everything here is wrapped, because this column
+     is the main screen and a fault in a nice-to-have must not take it down. */
+  async function drawLivery(carId) {
+    liveryBox.innerHTML = '';
+    if (!carId) return;
+    try {
+      const g = await api('livery');
+      // the garage is keyed by MODEL; the picker's id is a preset
+      const model = (((d.cars || []).find(c => c.id === carId)) || {}).model
+                    || carId;
+      const owned = ((g && g.cars) || []).find(c => c.model === model);
+      if (!owned) return;              // not a car you own - nothing to paint
+      const info = await api('livery?model=' + encodeURIComponent(model));
+      const list = ((info && info.allowed) || {})['EXT SKIN'] || [];
+      if (!list.length) return;
+
+      liveryBox.append(el('div', 'tiny dim', 'Colour'));
+      const sel = el('select');
+      const short = p => (p.split('\\').pop() || p)
+        .replace(/\.oemmultilayercolor$/, '')
+        .replace(/^[a-z0-9]+_paint_/, '').replace(/_/g, ' ');
+      list.forEach(pth => {
+        const o = el('option', null, short(pth));
+        o.value = pth;
+        if (pth === owned.slots['EXT SKIN']) o.selected = true;
+        sel.append(o);
+      });
+      const note = el('div', 'tiny dim');
+      note.style.marginTop = '4px';
+      sel.onchange = async () => {
+        sel.disabled = true;
+        note.textContent = 'applying…';
+        const r = await api('livery/apply', {
+          file: owned.file, model: model, slot: 'EXT SKIN', color: sel.value,
+        });
+        sel.disabled = false;
+        note.textContent = r && r.ok
+          ? 'Saved — takes effect next time the game starts'
+          : ((r && r.error) || 'could not apply that colour');
+        if (r && r.error) toast(r.error, true);
+      };
+      liveryBox.append(sel, note);
+    } catch (e) {
+      // never let this blank the Drive screen
+      console.warn('livery picker unavailable', e);
+    }
+  }
 
   trkCol.innerHTML = '<h2>Track</h2>';
   const trkHead = el('div', 'drive-pick');
@@ -692,6 +745,14 @@ async function drivePage() {
 
   function paintSelected() {
     const c = carOf(sel.car);
+    // ⚠ here, not on a row's onclick: the car can change through several
+    // paths (row click, server filter clearing it, a restored pick) and only
+    // this runs for all of them - hooking one click handler meant the picker
+    // never appeared at all.
+    if (paintSelected._lastCar !== sel.car) {
+      paintSelected._lastCar = sel.car;
+      drawLivery(sel.car);
+    }
     paintHead(carHead,
       'api/thumb/car?id=' + encodeURIComponent((c && (c.model || c.id)) || ''),
       c ? c.label : 'Pick a car',

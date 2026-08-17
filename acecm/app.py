@@ -201,6 +201,17 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, contentsync.discover(
                     raw, (q.get("port") or [None])[0],
                     ports=(8092, 8093), timeout=to))
+            if path == "/api/livery":
+                # the garage, and what each car is allowed to wear
+                from . import livery
+                model = (q.get("model") or [""])[0]
+                out = {"ok": True, "cars": livery.garage()}
+                if model:
+                    out["allowed"] = livery.allowed(model)
+                    out["designs"] = [
+                        {"name": d["name"], "slots": sorted(d["slots"])}
+                        for d in livery.designs(model)]
+                return _json(self, out)
             if path == "/api/share":
                 return _json(self, contentsync.share_info())
             if path == "/api/share/auto":
@@ -474,6 +485,22 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("names")))
             if path == "/api/app/restart":
                 return _json(self, installer.restart())
+            if path == "/api/livery/apply":
+                # ⚠ Writes the player's garage. It backs the record up first,
+                # and only ever accepts a colour the car's own design allows -
+                # an arbitrary path is what crashed the game while this was
+                # being worked out.
+                from . import livery
+                car = body.get("file") or ""
+                slot = body.get("slot") or "EXT SKIN"
+                color = body.get("color") or ""
+                model = body.get("model") or ""
+                ok_list = livery.allowed(model).get(slot, []) if model else []
+                if ok_list and color not in ok_list:
+                    return _json(self, {
+                        "ok": False,
+                        "error": "that colour is not offered for this car"})
+                return _json(self, livery.apply_color(car, slot, color))
             if path == "/api/app/show":
                 # A second launch asks the instance that owns the window to
                 # raise it, rather than opening a rival webview on the same
