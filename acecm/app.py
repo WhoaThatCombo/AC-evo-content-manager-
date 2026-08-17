@@ -26,6 +26,11 @@ from . import (backend, config, content, contentsync, detect, drive,
 
 _INSTALL = {"state": "idle", "detail": "", "done": 0, "total": 0, "files": []}
 
+# Set when the update swap script launched us (it passes --okflag). A
+# freshly swapped build waits the outgoing one out instead of deferring
+# to it - see the bind loop in serve().
+_JUST_UPDATED = False
+
 
 def _install_content(body):
     """Download everything a server needs that this machine lacks.
@@ -992,9 +997,17 @@ def serve():
             break
         except OSError as ex:
             last = ex
-            # someone is ANSWERING there - that is a real second instance, and
-            # waiting will not change it
-            if _acecm_answering(port) or time.time() >= deadline:
+            # ⚠ A JUST-UPDATED exe must never defer. It was started by the swap
+            # script the moment the old one exited, so the copy still answering
+            # on the port is the outgoing build finishing its shutdown - not a
+            # second instance. Deferring to it meant the new build quit, the
+            # script saw "running" and kept the swap, and the user was left
+            # with nothing on screen and no way back but launching by hand.
+            # Their update log said it plainly: "new exe is running without a
+            # flag - keeping it", and then nothing.
+            if not _JUST_UPDATED and _acecm_answering(port):
+                break
+            if time.time() >= deadline:
                 break
             time.sleep(0.5)
     if srv is None:
@@ -1035,6 +1048,8 @@ def serve():
 
 def main(mode="window", okflag=None):
     """mode: window (native), browser (default browser), headless (serve only)."""
+    global _JUST_UPDATED
+    _JUST_UPDATED = bool(okflag)
     try:
         srv, url = serve()
     except AlreadyRunning as ex:
@@ -1043,6 +1058,14 @@ def main(mode="window", okflag=None):
         # WebView2 user-data folder: the newcomer takes the profile and the
         # running instance dies, so "launch twice" became "close the app".
         url = str(ex)
+        # ⚠ CONFIRM THE UPDATE ANYWAY. This binary started fine - another
+        # instance simply owns the port. The swap script restores the previous
+        # exe unless the new one writes its handshake file, so returning here
+        # without it made an update roll itself back: press Restart after
+        # updating and you land on the OLD version, with nothing explaining
+        # why. Deferring to a running instance is not a failed start.
+        from . import version as _v
+        _v.confirm_update(okflag)
         import urllib.request
         shown = False
         try:
