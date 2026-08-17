@@ -164,12 +164,42 @@ def server_gaps(profile):
             "ok": not missing_mods and not missing_track}
 
 
+def deploy_track(folder):
+    """Put an imported track into the SERVER's own content package.
+
+    ⚠ This rewrites the package's 64 MiB index, so it is done at START, not on
+    every save - once, when the user is already waiting for the server to come
+    up. Skipped entirely when the track is already there.
+    """
+    if not folder:
+        return {"ok": True, "skipped": "no custom track"}
+    from . import tracks as trackmod
+    if trackmod.in_server_package(folder):
+        return {"ok": True, "skipped": "already in the package"}
+    hit = next((x for x in trackmod.importable()
+                if x.get("folder") == folder), None)
+    if not hit or not hit.get("path"):
+        return {"ok": False,
+                "error": f"no imported files found for {folder}"}
+    logs.LOG.info("deploying %s into the server package", folder)
+    try:
+        r = trackmod.deploy_native(hit["path"])
+    except Exception as ex:
+        logs.LOG.exception("deploying %s", folder)
+        return {"ok": False, "error": str(ex)}
+    if r.get("ok"):
+        logs.LOG.info("deployed %s into the server package", folder)
+    else:
+        logs.LOG.warning("deploying %s: %s", folder, r.get("error"))
+    return r
+
+
 def fill_server(profile):
     """Copy anything the server is missing from the client side.
 
-    Only the car mods: putting a track into the server package rewrites its
-    index and is a deliberate, slow operation, so that stays an explicit
-    action with its own progress and confirmation.
+    Car mods are files in a folder; the track has to go INTO the server's
+    content package, which is slower - both happen here so that starting a
+    server is all it takes to make it hostable.
     """
     gaps = server_gaps(profile)
     copied, failed = [], []
@@ -190,8 +220,11 @@ def fill_server(profile):
                 ok = False
                 break
         (copied if ok else failed).append(name)
-    return {"ok": not failed, "copied": copied, "failed": failed,
-            "track_missing": gaps["track"]}
+    track = deploy_track(gaps["track"]) if gaps["track"] else {}
+    return {"ok": not failed and track.get("ok", True),
+            "copied": copied, "failed": failed,
+            "track": gaps["track"], "track_deploy": track,
+            "track_missing": "" if track.get("ok", True) else gaps["track"]}
 
 
 def sync(profile, fill=True):
