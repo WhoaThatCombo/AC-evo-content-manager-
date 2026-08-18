@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -272,7 +272,10 @@ def schedule_relaunch(exe, pid, bat=None):
         f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n',
         "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)\r\n",
         "ping -n 2 127.0.0.1 >nul\r\n",
-        f'start "ACECM" /d "{inst}" "{exe}"\r\n',
+        # ⚠ --relaunch tells the new copy it is REPLACING us, so it waits for
+        # the port instead of deferring to the instance still letting go of
+        # it. Without it, Restart looked like it closed ACECM for good.
+        f'start "ACECM" /d "{inst}" "{exe}" --relaunch\r\n',
         'del "%~f0"\r\n',
     ]
     with open(bat, "w", encoding="utf-8") as f:
@@ -387,7 +390,7 @@ def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True,
         lines.append(f'echo {ver}> "{marker}"\r\n')
     if relaunch:
         lines.extend([
-            f'start "ACECM" /d "{inst}" "{exe}"{args}\r\n',
+            f'start "ACECM" /d "{inst}" "{exe}"{args} --relaunch\r\n',
             "set W=0\r\n",
             ":waitok\r\n",
             "ping -n 3 127.0.0.1 >nul\r\n",
@@ -409,7 +412,7 @@ def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True,
             f'copy /y "{exe}.old" "{exe}" >>%LOG% 2>&1\r\n',
             f'if exist "{prev_marker}" copy /y "{prev_marker}" "{marker}" >>%LOG% 2>&1\r\n',
             f'echo rollback> "{rolled}"\r\n',
-            f'start "ACECM" /d "{inst}" "{exe}"\r\n',
+            f'start "ACECM" /d "{inst}" "{exe}" --relaunch\r\n',
             "goto done\r\n",
             ":upok\r\n",
             (f'del "{okflag}" >nul 2>&1\r\n' if okflag else ""),

@@ -1073,10 +1073,16 @@ def serve():
     return srv, url
 
 
-def main(mode="window", okflag=None):
-    """mode: window (native), browser (default browser), headless (serve only)."""
+def main(mode="window", okflag=None, relaunch=False):
+    """mode: window (native), browser (default browser), headless (serve only).
+
+    ⚠ `relaunch` covers BOTH ways one copy replaces another: the update swap
+    (which also passes okflag) and the Restart button. Only the update case
+    was handled before, so Restart still deferred to the outgoing copy and
+    exited - which is why it never came back.
+    """
     global _JUST_UPDATED
-    _JUST_UPDATED = bool(okflag)
+    _JUST_UPDATED = bool(okflag) or bool(relaunch)
     try:
         srv, url = serve()
     except AlreadyRunning as ex:
