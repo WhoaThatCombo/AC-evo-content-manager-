@@ -72,6 +72,11 @@ def main():
     # Written by the update swap script. The new exe must create this
     # file once it is serving, or the previous build is restored.
     _okflag = _take_opt("--okflag")
+    # ⚠ A scheduled relaunch (Restart, or the update swap) is handing the port
+    # over from a copy that is still exiting - see app.serve.
+    _relaunch = "--relaunch" in sys.argv
+    if _relaunch:
+        sys.argv.remove("--relaunch")
     _take_opt("--updated")
 
     # Put a downloaded exe somewhere permanent, with a shortcut, so it never
@@ -102,7 +107,7 @@ def main():
         mode = "headless"
     from .app import main as app_main
     try:
-        app_main(mode, okflag=_okflag)
+        app_main(mode, okflag=_okflag, relaunch=_relaunch)
     except SystemExit:
         raise
     except BaseException as ex:
