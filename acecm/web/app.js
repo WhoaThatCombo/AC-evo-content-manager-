@@ -4625,9 +4625,16 @@ const _rendering = {};
 // the page the user last asked for, so a late render cannot overwrite it
 let _wanted = '';
 
+const _queued = {};
 function keepPlace(name, fn) {
-  return async function (...args) {
-    if (_rendering[name]) return;          // a render is already in flight
+  const wrapped = async function (...args) {
+    // ⚠ QUEUE, do not drop. go() has already swapped the title, moved the
+    // nav highlight and blanked #page to "Loading..." by the time we get here,
+    // so returning early left the header saying one page while the body showed
+    // the previous one - or nothing at all until you clicked away and back.
+    // Drive polls every 1200ms, so it almost always had a render in flight for
+    // a click to collide with, which is why it was the one that "broke".
+    if (_rendering[name]) { _queued[name] = args; return; }
     _rendering[name] = true;
     // a self-refresh should come back to where the user was, a fresh
     // navigation should start at the top
@@ -4636,13 +4643,23 @@ function keepPlace(name, fn) {
       return await fn.apply(this, args);
     } finally {
       _rendering[name] = false;
-      // ⚠ A page function clears #page, awaits, then appends. If the user
-      // navigated away during that await, the OLD page finishes by painting
-      // itself over the NEW one: you click Dashboard, a slow Cars render lands
-      // a moment later, and the dashboard you asked for is simply gone. The
-      // header and nav still say Dashboard, so it reads as a blank page rather
-      // than as the wrong page. Repaint what the user actually asked for.
-      if (_wanted && _wanted !== name) {
+      // ⚠ NO `return` anywhere in this finally block. A return here swallows
+      // an exception thrown by the page function, and go() depends on
+      // catching that to report the error instead of leaving a blank screen -
+      // silently eaten errors are what made several of these bugs so hard to
+      // find in the first place.
+      const requeue = _queued[name];
+      if (requeue) {
+        // a click that landed mid-render runs now, rather than being lost
+        delete _queued[name];
+        setTimeout(() => wrapped(...requeue), 0);
+      } else if (_wanted && _wanted !== name) {
+        // ⚠ A page function clears #page, awaits, then appends. If the user
+        // navigated away during that await, the OLD page finishes by painting
+        // itself over the NEW one: you click Dashboard, a slow Cars render
+        // lands a moment later, and the dashboard you asked for is gone. The
+        // header and nav still say Dashboard, so it reads as a blank page
+        // rather than as the wrong page. Repaint what was actually asked for.
         const spec = PAGES[_wanted];
         if (spec) { const again = spec[2]; setTimeout(() => again(), 0); }
       } else {
@@ -4653,6 +4670,7 @@ function keepPlace(name, fn) {
       }
     }
   };
+  return wrapped;
 }
 Object.entries(PAGES).forEach(([name, spec]) => {
   const orig = spec[2];
