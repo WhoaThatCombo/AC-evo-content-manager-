@@ -331,3 +331,16 @@ pre.log{
 .livery-opt:hover{background:var(--panel2);color:var(--fg)}
 .livery-opt.on{color:var(--accent);border-left-color:var(--accent)}
 .livery-opt.busy{opacity:.5;cursor:wait}
+
+.livery-none{cursor:default;color:var(--dim2)}
+.livery-none:hover{color:var(--dim2)}
+
+/* Drive list: one row per car, variants tucked underneath. */
+.drive-count{
+  color:var(--dim2);font-size:10.5px;padding:1px 6px;border:1px solid var(--line);
+  border-radius:99px;
+}
+.drive-caret{color:var(--dim2);font-size:9px;margin-left:6px}
+.drive-kids{display:none}
+.drive-kids.on{display:block}
+.drive-row.drive-variant{padding-left:34px;background:rgba(0,0,0,.15)}

@@ -203,7 +203,11 @@ async function drivePage() {
   const carList = el('div', 'list drive-list');
   const liveryBox = el('div');
   liveryBox.style.marginTop = '10px';
-  carCol.append(carHead, carSearch, carList, liveryBox);
+  // ⚠ Directly under the SELECTED car, not after the list. The list is a
+  // tall scrolling box of ~100 rows, so anything appended after it sits
+  // below the fold and is invisible in normal use - which is exactly how
+  // it was reported: "where do i pick the livery?"
+  carCol.append(carHead, liveryBox, carSearch, carList);
 
   /* ---- livery -----------------------------------------------------------
      Colours come from the CAR's own design, never from the brand's folder:
@@ -219,7 +223,18 @@ async function drivePage() {
       const model = (((d.cars || []).find(c => c.id === carId)) || {}).model
                     || carId;
       const owned = ((g && g.cars) || []).find(c => c.model === model);
-      if (!owned) return;              // not a car you own - nothing to paint
+      // ⚠ SAY SO rather than showing nothing. A livery belongs to an owned
+      // car, and only 9 of the 116 cars in this list are owned - so staying
+      // silent meant the picker looked missing for almost every car you
+      // clicked, which is exactly how it was reported.
+      if (!owned) {
+        const why = el('div', 'livery-head livery-none');
+        why.textContent = 'no livery — you do not own this car';
+        why.title = 'Liveries are stored per owned car. Buy or unlock it '
+          + 'in-game and its colours appear here.';
+        liveryBox.append(why);
+        return;
+      }
       const info = await api('livery?model=' + encodeURIComponent(model));
       const list = ((info && info.allowed) || {})['EXT SKIN'] || [];
       if (!list.length) return;
@@ -429,22 +444,64 @@ async function drivePage() {
         carList.append(el('div', 'empty',
           allow ? 'No cars allowed on this server' : 'No cars'));
       } else {
+        /* ⚠ One row per CAR, not per preset. The AE86 ships four presets
+           and the Gr86 three, so a flat list repeated the same car name over
+           and over and buried the rest - 116 rows for 85 actual cars. A car
+           with variants expands to show them; a car with one is just a row. */
+        const groups = new Map();
         pool.forEach(c => {
-          const r = el('div', 'drive-row' + (c.id === sel.car ? ' on' : ''));
+          const key = c.model || c.id;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(c);
+        });
+
+        const mkRow = (c, variant) => {
+          const r = el('div', 'drive-row' + (variant ? ' drive-variant' : '')
+                              + (c.id === sel.car ? ' on' : ''));
           r.dataset.id = c.id;
           r.dataset.blob = `${c.label} ${c.id} ${c.brand || ''}`.toLowerCase();
-          const img = el('img');
-          img.loading = 'lazy';
-          img.alt = '';
-          img.src = 'api/thumb/car?id=' + encodeURIComponent(c.model || c.id);
-          img.onerror = () => { img.style.visibility = 'hidden'; };
+          if (!variant) {
+            const img = el('img');
+            img.loading = 'lazy';
+            img.alt = '';
+            img.src = 'api/thumb/car?id=' + encodeURIComponent(c.model || c.id);
+            img.onerror = () => { img.style.visibility = 'hidden'; };
+            r.append(img);
+          }
           const t = el('div', 'grow');
           t.innerHTML = `<div class="name">${esc(c.label)}</div>`
             + `<div class="tiny dim">${esc(c.id)}</div>`;
-          r.append(img, t);
+          r.append(t);
           if (c.mod) r.append(el('span', 'pill warn', 'mod'));
           r.onclick = () => { sel.car = c.id; paintCars(); paintSelected(); };
-          carList.append(r);
+          return r;
+        };
+
+        groups.forEach(list => {
+          const first = list[0];
+          if (list.length === 1) {
+            carList.append(mkRow(first, false));
+            return;
+          }
+          const head = mkRow(first, false);
+          // the head row selects nothing on its own - it opens the variants
+          head.dataset.id = '';
+          head.onclick = null;
+          const count = el('span', 'drive-count', String(list.length));
+          const caret = el('span', 'drive-caret', '▸');
+          head.append(count, caret);
+          const kids = el('div', 'drive-kids');
+          list.forEach(c => kids.append(mkRow(c, true)));
+          // searching must still reach a variant, so match on any of them
+          head.dataset.blob = list
+            .map(c => `${c.label} ${c.id} ${c.brand || ''}`).join(' ')
+            .toLowerCase();
+          head.onclick = () => {
+            const open = kids.classList.toggle('on');
+            caret.textContent = open ? '▾' : '▸';
+          };
+          if (list.some(c => c.id === sel.car)) kids.classList.add('on');
+          carList.append(head, kids);
         });
       }
     }
