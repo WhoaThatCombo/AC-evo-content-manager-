@@ -224,32 +224,58 @@ async function drivePage() {
       const list = ((info && info.allowed) || {})['EXT SKIN'] || [];
       if (!list.length) return;
 
-      liveryBox.append(el('div', 'tiny dim', 'Colour'));
-      const sel = el('select');
+      /* ⚠ Collapsed by default. Thirteen colours listed under every car
+         pushes the track and session columns off the screen, and the colour
+         is not what you came to this page to choose - so show only which
+         livery is on, and open the list when asked. */
       const short = p => (p.split('\\').pop() || p)
         .replace(/\.oemmultilayercolor$/, '')
         .replace(/^[a-z0-9]+_paint_/, '').replace(/_/g, ' ');
-      list.forEach(pth => {
-        const o = el('option', null, short(pth));
-        o.value = pth;
-        if (pth === owned.slots['EXT SKIN']) o.selected = true;
-        sel.append(o);
-      });
+      const cur = owned.slots['EXT SKIN'] || '';
+
+      const head = el('div', 'livery-head');
+      const caret = el('span', 'livery-caret', '▸');
+      const label = el('span', 'livery-name', esc(short(cur) || 'default'));
+      head.append(caret, label);
+      head.title = 'Change this car’s colour';
+
+      const body = el('div', 'livery-body');
       const note = el('div', 'tiny dim');
-      note.style.marginTop = '4px';
-      sel.onchange = async () => {
-        sel.disabled = true;
-        note.textContent = 'applying…';
-        const r = await api('livery/apply', {
-          file: owned.file, model: model, slot: 'EXT SKIN', color: sel.value,
-        });
-        sel.disabled = false;
-        note.textContent = r && r.ok
-          ? 'Saved — takes effect next time the game starts'
-          : ((r && r.error) || 'could not apply that colour');
-        if (r && r.error) toast(r.error, true);
+
+      let open = false;
+      head.onclick = () => {
+        open = !open;
+        body.classList.toggle('on', open);
+        caret.textContent = open ? '▾' : '▸';
+        if (open && !body.dataset.built) {
+          body.dataset.built = '1';
+          list.forEach(pth => {
+            const row = el('a', 'livery-opt' + (pth === cur ? ' on' : ''),
+                           esc(short(pth)));
+            row.onclick = async () => {
+              if (row.classList.contains('busy')) return;
+              row.classList.add('busy');
+              note.textContent = 'applying…';
+              const r = await api('livery/apply', {
+                file: owned.file, model: model,
+                slot: 'EXT SKIN', color: pth,
+              });
+              row.classList.remove('busy');
+              if (r && r.ok) {
+                [...body.children].forEach(c => c.classList.remove('on'));
+                row.classList.add('on');
+                label.textContent = short(pth);
+                note.textContent = 'Saved — applies next time the game starts';
+              } else {
+                note.textContent = (r && r.error) || 'could not apply that colour';
+                if (r && r.error) toast(r.error, true);
+              }
+            };
+            body.append(row);
+          });
+        }
       };
-      liveryBox.append(sel, note);
+      liveryBox.append(head, body, note);
     } catch (e) {
       // never let this blank the Drive screen
       console.warn('livery picker unavailable', e);
