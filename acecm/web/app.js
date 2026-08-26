@@ -62,6 +62,20 @@ async function drivePage() {
     $('#page').innerHTML = `<div class="err">${esc(d.error)}</div>`;
     return;
   }
+  // Server car ids arrive interned - a pool plus indices into it - because
+  // spelling them out for every server was three quarters of that payload.
+  // Expand once, so every row/filter/search below still just sees a list of
+  // ids. Mapping through the pool hands back the SAME string for each id
+  // rather than 35k copies of 143 distinct ones.
+  function expandPool(data) {
+    const pool = data && data.car_pool;
+    if (!pool || !Array.isArray(data.servers)) return;
+    for (const s of data.servers) {
+      if (Array.isArray(s.cars))
+        s.cars = s.cars.map(i => (typeof i === 'number' ? pool[i] : i));
+    }
+  }
+  expandPool(d);
   const pick = d.pick || {};
   const p = $('#page');
   p.innerHTML = '';
@@ -100,13 +114,19 @@ async function drivePage() {
     race_laps: pick.race_laps ?? 10,
     starting_position: pick.starting_position ?? 0,
   };
-  if (sel.via === 'server' && !sel.server_id && !sel.server_ip && (d.servers || [])[0]) {
-    const s0 = d.servers[0];
+  // ⚠ Must run again when the public list lands, not only here: the list is
+  // fetched after this point now, so at page-build time there is nothing to
+  // default to and "Join" would have had no server picked.
+  function defaultServer() {
+    if (sel.via !== 'server' || sel.server_id || sel.server_ip) return;
+    const s0 = (d.servers || [])[0];
+    if (!s0) return;
     sel.server_id = s0.id;
     sel.server_ip = s0.server_ip;
     sel.server_tcp_port = s0.server_tcp_port;
     sel.server_udp_port = s0.server_udp_port;
   }
+  defaultServer();
   const aiModes = d.ai_modes || ['INSTANT_RACE', 'RACE_WEEKEND'];
 
   function carOf(id) {
@@ -595,6 +615,28 @@ async function drivePage() {
     if (!driveLocal) {
       api('browser/local').then(l => { driveLocal = l || {}; paintServers(); });
     }
+    // The public list is fetched separately so the rest of Drive can draw
+    // straight away - same late-load shape as browser/local above. Guarded
+    // so the filter checkboxes repainting cannot start a second fetch.
+    if (d.servers_pending && !d._srvFetch) {
+      d._srvFetch = true;
+      api('drive/servers').then(r => {
+        if (!r || r.error) {
+          d.servers_pending = false;
+          d.servers_meta = { error: (r && r.error) || 'could not load list' };
+        } else {
+          expandPool(r);
+          d.servers = r.servers || [];
+          d.servers_meta = r.servers_meta || {};
+          d.servers_pending = false;
+        }
+        // the user may have clicked away, or switched to a different source
+        if (_page !== 'drive') return;
+        defaultServer();
+        paintServers();
+        if (sel.via === 'server') paintVia();
+      });
+    }
   }
 
   function paintServers() {
@@ -607,10 +649,14 @@ async function drivePage() {
     trkList.innerHTML = '';
     const meta = d.servers_meta || {};
     if (!(d.servers || []).length) {
+      // ⚠ "still coming" and "there are none" are different things to say.
+      // Showing the empty-state while the fetch is in flight read as though
+      // the list had failed, a moment before it appeared.
       trkList.append(el('div', 'empty',
-        meta.hint || meta.error
-        || 'No public list yet. Use Refresh list, or open Multiplayer '
-          + 'in-game once.'));
+        d.servers_pending ? 'Loading public servers…'
+        : (meta.hint || meta.error
+           || 'No public list yet. Use Refresh list, or open Multiplayer '
+             + 'in-game once.')));
       return;
     }
     const num = v => (typeof v === 'number' ? v : 0);

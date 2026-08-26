@@ -147,3 +147,76 @@ def extract_one(kspkg_path, entry_path, dst):
                 o.write(data)
             return True
     return False
+
+
+def find_entry(kspkg_path, entry_path):
+    """(size, offset) for one entry, or (None, None) - WITHOUT scanning.
+
+    The table is a dense array sorted by FNV-1a-64 of the path as UTF-16LE
+    (see kspkg_write for the measured layout), so a single entry is a binary
+    search: ~18 probes of 256 bytes each instead of decrypting a quarter of a
+    million buckets. iter_entries is still the right call when you genuinely
+    want everything; this is for "is this one file in here, and where".
+
+    ⚠ Buckets are 256-byte aligned, so every record decrypts at key phase 0
+    regardless of where the table starts.
+    """
+    from . import kspkg_write
+    total = os.path.getsize(kspkg_path)
+    table_start = total - TABLE
+    if table_start < 0:
+        return None, None
+    want = kspkg_write.entry_id(entry_path)
+    target = entry_path.lower()
+
+    with open(kspkg_path, "rb") as f:
+        def rec(i):
+            f.seek(table_start + i * BUCKET)
+            raw = f.read(BUCKET)
+            return decrypt(raw, 0) if len(raw) == BUCKET else None
+
+        def used(dec):
+            # ⚠ NOT the `kind` field: 0x0000 shows up on plenty of real
+            # entries (irradiance volumes, shadow caches), so testing kind
+            # put the end of the array at index 3 and lost ~a quarter of all
+            # lookups. A zero id is what actually marks the empty tail.
+            return dec is not None and struct.unpack("<Q", dec[232:240])[0] != 0
+
+        # the array is packed from 0, so the used region is a prefix - find
+        # its length by bisecting on "is this record still a real one"
+        lo, hi = 0, TABLE // BUCKET
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if used(rec(mid)):
+                lo = mid + 1
+            else:
+                hi = mid
+        count = lo
+
+        lo, hi = 0, count
+        while lo < hi:
+            mid = (lo + hi) // 2
+            dec = rec(mid)
+            got = struct.unpack("<Q", dec[232:240])[0]
+            if got < want:
+                lo = mid + 1
+            else:
+                hi = mid
+
+        # ⚠ walk equal ids rather than trusting the first hit: the id is a
+        # hash, and a collision would otherwise silently return the wrong file
+        i = lo
+        while i < count:
+            dec = rec(i)
+            if struct.unpack("<Q", dec[232:240])[0] != want:
+                break
+            end = dec.find(b"\0")
+            if end > 0:
+                try:
+                    if dec[:end].decode("utf-8").lower() == target:
+                        return (struct.unpack("<I", dec[240:244])[0],
+                                struct.unpack("<Q", dec[248:256])[0])
+                except UnicodeDecodeError:
+                    pass
+            i += 1
+    return None, None

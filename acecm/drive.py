@@ -1312,8 +1312,27 @@ def _public_briefs():
             "cars": cars,
             "locked": bool(s.get("driver_password")),
         })
+    # ⚠ Car ids are sent INTERNED: a pool of the distinct ids, and each
+    # server's list as indices into it. A full public list is ~35k car
+    # references drawn from ~143 distinct ids, so spelling every one out made
+    # that single field 75% of the whole Drive payload (825 KB of 1.1 MB).
+    # The browser expands it back to strings on arrival, so everything
+    # downstream still sees a plain list of ids - and because the expansion
+    # reuses the pool's strings, the page holds 143 strings instead of 35k.
+    pool = []
+    seen = {}
+    for s in out:
+        idx = []
+        for cid in s["cars"]:
+            i = seen.get(cid)
+            if i is None:
+                i = seen[cid] = len(pool)
+                pool.append(cid)
+            idx.append(i)
+        s["cars"] = idx
     return {
         "servers": out,
+        "car_pool": pool,
         "count": lst.get("count") or len(out),
         "captured_at": lst.get("captured_at"),
         "cached": bool(lst.get("cached")),
@@ -1322,10 +1341,27 @@ def _public_briefs():
     }
 
 
+def public_servers():
+    """Just the public list, for the page to fetch after it has drawn.
+
+    ⚠ Split out of options() on purpose. This is the slow half - it can be a
+    live fetch of ~800 servers - and the Drive page does not need it to draw
+    the car picker, the track list or the Drive button. Bundled together, one
+    slow list made the whole page arrive late every time you switched back.
+    """
+    pub = _public_briefs()
+    return {
+        "ok": True,
+        "servers": pub["servers"],
+        "car_pool": pub["car_pool"],
+        "servers_meta": {k: pub[k] for k in
+                         ("count", "captured_at", "cached", "error", "hint")},
+    }
+
+
 def options():
     tracks = content.tracks()
     cars = content.cars()
-    pub = _public_briefs()
     be = backend.state()
     return {
         "ok": True,
@@ -1338,9 +1374,11 @@ def options():
         "tracks_error": tracks.get("error"),
         "cars": cars.get("cars") or [],
         "cars_error": cars.get("error"),
-        "servers": pub["servers"],
-        "servers_meta": {k: pub[k] for k in
-                         ("count", "captured_at", "cached", "error", "hint")},
+        # the public list arrives separately - see public_servers()
+        "servers": [],
+        "car_pool": [],
+        "servers_pending": True,
+        "servers_meta": {},
         "local_servers": _local_briefs(),
         "backend": {
             "listening": bool(be.get("listening")),

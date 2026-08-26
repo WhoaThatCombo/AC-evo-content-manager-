@@ -176,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, realai.worker_status())
             if path == "/api/drive":
                 return _json(self, drive.options())
+            if path == "/api/drive/servers":
+                return _json(self, drive.public_servers())
             if path == "/api/drive/status":
                 return _json(self, drive.status())
             # 3D viewer: which cars can be shown, and how a pending
