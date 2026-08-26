@@ -108,6 +108,99 @@ def track_paths(folder):
     return base, f"{base}\\{folder}.scene", f"{base}\\{folder}.track"
 
 
+def registered_names(blob):
+    """Display names already present in tracks.table.
+
+    A Kunos content update replaces content.kspkg wholesale, so any row we
+    upserted earlier is gone - there is no diff, no merge, just a fresh stock
+    table. This is what lets a caller tell "still registered" from "wiped by
+    the last update" without re-deploying tracks that don't need it.
+    """
+    out = set()
+    for f, w, v in walk(_unwrap(blob)):
+        if w != 2:
+            continue
+        for g, gw, gv in walk(v):
+            if g != 2 or gw != 2:
+                continue
+            for h, hw, hv in walk(gv):
+                if h == 1 and hw == 2:
+                    out.add(hv.decode("utf-8", "replace"))
+    return out
+
+
+def rows_for_folder(blob, folder):
+    """(display_name, folder) for every tracks.table row pointing at `folder`.
+
+    Three different naming fallbacks existed across this codebase at once
+    (deploy_native, pack_meta, and an early redeclare_tracks all disagreed),
+    so the same folder can end up registered under two or three different
+    display names before this is noticed. Finding rows by the thing that
+    is actually unique - the folder path - is what makes cleanup possible;
+    matching by name only would leave every wrong name in place.
+    """
+    out = []
+    want = ("content\\tracks\\" + folder).lower()
+    for f, w, v in walk(_unwrap(blob)):
+        if w != 2:
+            continue
+        name = base = None
+        for g, gw, gv in walk(v):
+            if g == 2 and gw == 2:
+                for h, hw, hv in walk(gv):
+                    if h == 1 and hw == 2:
+                        name = hv.decode("utf-8", "replace")
+                    elif h == 3 and hw == 2:
+                        base = hv.decode("utf-8", "replace")
+        if base and base.lower() == want:
+            out.append(name)
+    return out
+
+
+def remove_track_row(blob, display_name):
+    """Drop the row for `display_name`, if present. No-op otherwise."""
+    rows = _unwrap(blob)
+    out = b""
+    for f, w, v in walk(rows):
+        if w != 2:
+            out += emit(f, w, v)
+            continue
+        name = None
+        for g, gw, gv in walk(v):
+            if g == 2 and gw == 2:
+                for h, hw, hv in walk(gv):
+                    if h == 1 and hw == 2:
+                        name = hv.decode("utf-8", "replace")
+        if name == display_name:
+            continue
+        out += emit(f, w, v)
+    return emit(2, 2, out)
+
+
+def remove_container_rows(blob, display_name):
+    """Drop every track_containers.table row for `display_name`.
+
+    Mirrors container_rows()'s own field path exactly: _unwrap, then the
+    display name sits inside the row's field 8 wrapper at field 10.
+    """
+    out = b""
+    for f, w, v in walk(_unwrap(blob)):
+        if w != 2:
+            out += emit(f, w, v)
+            continue
+        name = None
+        for g, gw, gv in walk(v):
+            if g != 8 or gw != 2:
+                continue
+            for h, hw, hv in walk(gv):
+                if h == 10 and hw == 2:
+                    name = hv.decode("utf-8", "replace")
+        if name == display_name:
+            continue
+        out += emit(f, w, v)
+    return emit(2, 2, out)
+
+
 def upsert_track_row(blob, display_name, folder, template_name=None):
     """Point `display_name` at `folder`'s own paths, adding the row if absent.
 

@@ -560,6 +560,236 @@ def deploy_native(pkg_dir, dry_run=False, folder=None, display_name=None):
             "splines": shipped, **bak}
 
 
+def _display_name_for(folder):
+    """One canonical display name per folder, used everywhere a track gets
+    (re)registered.
+
+    Three different fallbacks used to disagree - deploy_native stripped the
+    trailing random suffix before title-casing, pack_meta title-cased the
+    whole folder name including the suffix, and an early redeclare_tracks
+    used the raw folder untouched. The same track ended up registered under
+    two or three different names across the client and server archives,
+    which is indistinguishable from "different tracks" to anything that
+    looks it up by name (a saved profile, the picker, _custom_track_problem).
+
+    ⚠ Deliberately does NOT prefer whatever tracks.table already calls this
+    folder. That table is exactly what a content update wipes and what the
+    naming bug above wrongly re-populated - trusting it here just picks
+    whichever wrong name got written most recently instead of fixing it.
+
+    ⚠ Stripping only the trailing "_xxxx" EvoForge suffix collides for real:
+    shutoko_r_vq and shutoko_r_x0 (Tatsumi PA and Daishi PA - two different
+    tracks) both strip down to "Shutoko R". upsert_track_row keys by display
+    name, so a collision here is not a cosmetic problem, it is one track's
+    row silently overwriting the other's on the next write. Any folder whose
+    stripped name is not unique among all locally known folders keeps its
+    full name instead, even though that is uglier.
+    """
+    def strip(f):
+        return f.rsplit("_", 1)[0].replace("_", " ").title()
+
+    name = strip(folder)
+    others = [f for f in client_track_folders()
+             if f != folder and f != "common_assets" and strip(f) == name]
+    if others:
+        return folder.replace("_", " ").title()
+    return name
+
+
+def fix_track_naming(dry_run=False):
+    """Consolidate every folder onto ONE display name on BOTH archives.
+
+    Finds every row - correctly named or not - for each loose track folder,
+    removes all of them, and re-registers exactly once under
+    _display_name_for()'s canonical name. Cheap to run any time; a folder
+    already registered correctly under the right name is a no-op.
+    """
+    canonical = {f: _display_name_for(f) for f in client_track_folders()
+                if f != "common_assets"}
+    plan = []
+    changes = {"server": {}, "client": {}}
+    for side, kspkg_path in (("server", server_kspkg()), ("client", client_kspkg())):
+        if not kspkg_path or not os.path.isfile(kspkg_path):
+            continue
+        tk = kspkg_write.read_entry(kspkg_path, "system\\tracks.table")
+        tc = kspkg_write.read_entry(kspkg_path, "system\\track_containers.table")
+        if tk is None or tc is None:
+            continue
+        for folder, want in canonical.items():
+            have = tracktables.rows_for_folder(tk, folder)
+            stray = [n for n in have if n != want]
+            if not stray and want in have:
+                continue
+            plan.append({"side": side, "folder": folder, "want": want,
+                        "removing": stray})
+            for name in stray:
+                tk = tracktables.remove_track_row(tk, name)
+                tc = tracktables.remove_container_rows(tc, name)
+            changes[side][folder] = (tk, tc)
+    if dry_run:
+        return {"ok": True, "dry_run": True, "plan": plan}
+    if not plan:
+        return {"ok": True, "plan": [], "note": "every folder already has one consistent name"}
+    if servers._server_pids():
+        return {"ok": False, "error": "stop the server before fixing track "
+                                      "names - it holds content.kspkg open"}
+    from . import winproc
+    if winproc.pids_named("AssettoCorsaEVO"):
+        return {"ok": False, "needs_close": True,
+                "error": "close the game before fixing client track names"}
+
+    # Persist the stray-removed tables FIRST - deploy_native() and
+    # register_client_track() each re-read tracks.table fresh off disk, so
+    # the in-memory removal computed above is invisible to them until it is
+    # actually written. Skipping this step silently discards every removal.
+    if changes["server"]:
+        tk_final, tc_final = None, None
+        for tk, tc in changes["server"].values():
+            tk_final, tc_final = tk, tc      # each folder's edit builds on the last
+        kspkg_write.write_archive(server_kspkg(), server_kspkg() + ".fixnames_tmp",
+                                  {"system\\tracks.table": tk_final,
+                                   "system\\track_containers.table": tc_final})
+        os.replace(server_kspkg() + ".fixnames_tmp", server_kspkg())
+    if changes["client"]:
+        tk_final, tc_final = None, None
+        for tk, tc in changes["client"].values():
+            tk_final, tc_final = tk, tc
+        kspkg_write.write_inplace(client_kspkg(),
+                                  {"system\\tracks.table": tk_final,
+                                   "system\\track_containers.table": tc_final})
+
+    results = []
+    for folder, want in canonical.items():
+        if folder in changes["server"]:
+            src = os.path.join(os.path.expanduser("~"), "Saved Games", "ACE",
+                               "mods", "content", "tracks", folder)
+            r = deploy_native(src, folder=folder, display_name=want)
+            results.append({"side": "server", "folder": folder, "ok": r.get("ok", False)})
+        if folder in changes["client"]:
+            r = register_client_track(folder, {"display_name": want})
+            results.append({"side": "client", "folder": folder, "ok": r.get("ok", False)})
+    ok = all(r["ok"] for r in results)
+    return {"ok": ok, "fixed": [r for r in results if r["ok"]],
+            "failed": [r for r in results if not r["ok"]]}
+
+
+def redeclare_tracks(dry_run=False):
+    """Re-register every loose custom track that a content update wiped.
+
+    A Kunos update replaces content.kspkg wholesale - it doesn't merge, it
+    overwrites - so any tracks.table / track_containers.table rows deploy_native
+    wrote are gone even though the track's own files are untouched (they live
+    under their own path, not inside a stock folder). EvoForge re-injects rows
+    like this on every update; without it a server that survived ten patches
+    can go silently trackless on the eleventh. This is the same fix, built in,
+    for people who don't have EvoForge installed.
+
+    Only loose folders under the CLIENT's import path are candidates - that is
+    where EvoForge writes finished conversions, and it is the only place we
+    can recover a display name and layout from without asking the user.
+    """
+    kspkg = server_kspkg()
+    if not os.path.isfile(kspkg):
+        return {"ok": False, "error": f"server archive not found: {kspkg}"}
+    if servers._server_pids():
+        return {"ok": False,
+                "error": "stop the server before redeclaring tracks - it "
+                         "holds content.kspkg open and writing under it "
+                         "corrupts both"}
+
+    tk = kspkg_write.read_entry(kspkg, "system\\tracks.table")
+    if tk is None:
+        return {"ok": False, "error": "archive has no system\\tracks.table"}
+    try:
+        registered = tracktables.registered_names(tk)
+    except Exception as ex:
+        return {"ok": False, "error": f"could not read tracks.table: {ex}"}
+
+    missing = []
+    for folder in client_track_folders():
+        if folder == "common_assets":
+            continue
+        display = _display_name_for(folder)
+        if display in registered:
+            continue
+        src = os.path.join(os.path.expanduser("~"), "Saved Games", "ACE",
+                           "mods", "content", "tracks", folder)
+        try:
+            info = read_track_folder(src, folder)
+        except Exception as ex:
+            missing.append({"folder": folder, "display_name": display,
+                            "ok": False, "error": str(ex)})
+            continue
+        missing.append({"folder": folder, "display_name": display,
+                        "own_folder": info["own_folder"],
+                        "layout": info["layout"], "ok": None})
+
+    if dry_run:
+        return {"ok": True, "dry_run": True, "checked": len(missing),
+                "candidates": missing}
+
+    results = []
+    for m in missing:
+        if m["ok"] is False:
+            results.append(m)
+            continue
+        r = deploy_native(os.path.join(os.path.expanduser("~"), "Saved Games",
+                                       "ACE", "mods", "content", "tracks",
+                                       m["folder"]),
+                          folder=m["folder"], display_name=m["display_name"])
+        results.append({**m, "ok": r.get("ok", False), "detail": r})
+
+    ok = all(r["ok"] is not False for r in results)
+    return {"ok": ok, "redeclared": [r for r in results if r["ok"]],
+            "failed": [r for r in results if r["ok"] is False],
+            "already_registered": len(client_track_folders()) - len(missing)}
+
+
+def redeclare_client_tracks(dry_run=False):
+    """The client-side twin of redeclare_tracks().
+
+    A content update wipes the CLIENT's own tracks.table exactly the same
+    way it wipes the server's - they are two separate archives, so fixing one
+    says nothing about the other. Single-player Practice/Custom Session reads
+    the client's own table to resolve a track name to paths; a row missing
+    there is not a "not found" in the UI, it is "Trying to load a message
+    with an empty path" and a crash, because the game already committed to
+    starting before discovering the path is empty.
+    """
+    pkg = client_kspkg()
+    if not pkg:
+        return {"ok": False, "error": "client content.kspkg not found"}
+    from . import winproc
+    if winproc.pids_named("AssettoCorsaEVO"):
+        return {"ok": False, "needs_close": True,
+                "error": "close the game before redeclaring client tracks - "
+                         "content.kspkg is locked while it is running"}
+
+    tk = kspkg_write.read_entry(pkg, "system\\tracks.table")
+    if tk is None:
+        return {"ok": False, "error": "client archive has no system\\tracks.table"}
+    try:
+        registered = tracktables.registered_names(tk)
+    except Exception as ex:
+        return {"ok": False, "error": f"could not read tracks.table: {ex}"}
+
+    missing = [f for f in client_track_folders()
+              if f != "common_assets" and (_client_name(f) or f) not in registered]
+
+    if dry_run:
+        return {"ok": True, "dry_run": True, "candidates": missing}
+
+    results = []
+    for folder in missing:
+        r = register_client_track(folder)
+        results.append({"folder": folder, "ok": r.get("ok", False), "detail": r})
+
+    ok = all(r["ok"] for r in results)
+    return {"ok": ok, "redeclared": [r for r in results if r["ok"]],
+            "failed": [r for r in results if not r["ok"]],
+            "already_registered": len(client_track_folders()) - len(missing)}
+
+
 def _client_name(folder):
     """What the local client's tracks.table calls this folder, if anything."""
     try:
@@ -579,7 +809,7 @@ def client_kspkg():
 
 def pack_meta(folder):
     """Sidecar the joiner needs to register this track in THEIR tables."""
-    display = _client_name(folder) or folder.replace("_", " ").title()
+    display = _display_name_for(folder)
     layout, containers = "layout", {}
     try:
         from . import contentsync
@@ -616,7 +846,7 @@ def register_client_track(folder, meta=None):
     layout = (meta.get("layout") or "layout").strip()
     containers = meta.get("containers") or {}
     if not display:
-        display = folder.replace("_", " ").title()
+        display = _display_name_for(folder)
 
     pkg = client_kspkg()
     if not pkg:
@@ -644,9 +874,22 @@ def register_client_track(folder, meta=None):
             pkg, {"system\\tracks.table": new_tk,
                   "system\\track_containers.table": new_tc})
         check = kspkg_write.verify(pkg)
-        if not check.get("ok"):
+        # ⚠ verify() checks all ~120k records, most of which we never touched.
+        # A pre-existing header quirk on some unrelated texturemips (seen on
+        # this build's own content, before any of our writes) used to fail
+        # this whole call even though sorted/unique - the properties an
+        # in-place table write can actually break - both held. Only the sites
+        # we just wrote are grounds to call OUR write bad; anything else is
+        # someone else's problem to log, not ours to block on.
+        ours = {"system\\tracks.table", "system\\track_containers.table"}
+        our_bad = [p for p in check.get("bad_headers", []) if p in ours]
+        if not check.get("sorted") or not check.get("unique") or our_bad:
             return {"ok": False, "error": "client archive failed verification "
                     "after the table write", "detail": check}
+        if check.get("bad_headers"):
+            logs.LOG.warning("client content.kspkg has %d pre-existing "
+                             "header quirk(s) unrelated to this write: %s",
+                             len(check["bad_headers"]), check["bad_headers"])
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
 
