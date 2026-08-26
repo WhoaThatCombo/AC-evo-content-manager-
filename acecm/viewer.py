@@ -30,9 +30,19 @@ _LOCK = threading.Lock()
 _JOBS = {}          # car id -> {"state", "detail"}
 
 
+_root_made = set()
+
+
 def _root():
+    # ⚠ makedirs on every call looks free and is not: cars_root/assets_root
+    # go through here, so building the Drive page hit the filesystem ~180
+    # times to create one directory that already existed. Remember the ones
+    # we have made this run; if something deletes it underneath us the next
+    # write fails loudly, which is better than paying for the check forever.
     d = os.path.join(config.DATA, "viewer")
-    os.makedirs(d, exist_ok=True)
+    if d not in _root_made:
+        os.makedirs(d, exist_ok=True)
+        _root_made.add(d)
     return d
 
 

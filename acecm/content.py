@@ -41,8 +41,53 @@ def _pretty(name):
     return " ".join(out)
 
 
+def _content_key():
+    """Everything the car and track lists are derived from.
+
+    ⚠ The mod folders go in as LISTINGS, not file stats. Installing or
+    removing a mod does not change any file we already read - a stat-only key
+    would keep serving a list with the deleted mod still in it. dir_key sees
+    the folder's entries, so an add, a delete or a rename all change the key.
+
+    The archives are in here too: carsmap reads the server's content.kspkg,
+    so a Kunos update (or our own penalty patch) must invalidate this as well.
+    """
+    from . import cache, install
+    try:
+        mods, cmods = install.mods_dir(), install.client_mods_dir()
+    except Exception:
+        mods = cmods = None
+    try:
+        from . import contentsync
+        troot = contentsync.tracks_dir()
+    except Exception:
+        troot = None
+    return (cache.stat_key(config.catalog_path("cars.json"),
+                           config.catalog_path("events_practice.json"),
+                           _server_pkg()),
+            cache.dir_key(mods, cmods, troot))
+
+
+def _server_pkg():
+    try:
+        from . import tracks as trackdeploy
+        return trackdeploy.server_kspkg()
+    except Exception:
+        return None
+
+
 def cars():
-    """Every car the server knows about, annotated."""
+    """Every car the server knows about, annotated.
+
+    Cached on the catalogue, the archive and the mod folders - see
+    _content_key. Drive alone asked for this twice per page build (once for
+    the picker, once per server profile through allowed_car_ids).
+    """
+    from . import cache
+    return cache.get("content.cars", _content_key(), _cars_uncached)
+
+
+def _cars_uncached():
     path = config.catalog_path("cars.json")
     try:
         raw = json.load(open(path, encoding="utf-8"))["cars"]
@@ -138,7 +183,16 @@ def cars():
 
 
 def tracks():
-    """Track/layout list, indexed exactly as the launcher's EVENT_IDX."""
+    """Track/layout list, indexed exactly as the launcher's EVENT_IDX.
+
+    Same key as cars() - importable() walks the imported-tracks folder, so a
+    track appearing or being deleted has to invalidate this too.
+    """
+    from . import cache
+    return cache.get("content.tracks", _content_key(), _tracks_uncached)
+
+
+def _tracks_uncached():
     path = config.catalog_path("events_practice.json")
     try:
         evs = json.load(open(path, encoding="utf-8"))["events"]

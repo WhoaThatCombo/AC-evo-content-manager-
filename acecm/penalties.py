@@ -161,12 +161,18 @@ def _find_bucket(table, needle):
     return None, None
 
 
-def _read_entry(kspkg_path, table, rel_path):
-    idx, dec = _find_bucket(table, rel_path.encode("utf-8") + b"\x00")
-    if idx is None:
+def _read_entry(kspkg_path, rel_path):
+    """Read one entry. Binary search, not a scan - see kspkg.find_entry.
+
+    This used to walk the table decrypting every bucket byte-at-a-time in
+    Python: ~112k decrypt calls for the four lookups behind /api/penalties,
+    1.8s per request, which is what made opening the Servers page feel stuck.
+    The table is sorted, so the answer was always ~18 seeks away.
+    """
+    from . import kspkg
+    size, offset = kspkg.find_entry(kspkg_path, rel_path)
+    if size is None:
         return None, None
-    size = struct.unpack("<I", dec[240:244])[0]
-    offset = struct.unpack("<Q", dec[248:256])[0]
     with open(kspkg_path, "rb") as f:
         f.seek(offset)
         raw = f.read(size)
@@ -194,9 +200,8 @@ def _write_entry(kspkg_path, rel_path, new_content):
 def _state(kspkg_path):
     """'off', 'on', or a short problem description."""
     try:
-        table, _ = _read_table(kspkg_path)
-        d1, size1 = _read_entry(kspkg_path, table, TARGET1)
-        d2, _ = _read_entry(kspkg_path, table, TARGET2)
+        d1, size1 = _read_entry(kspkg_path, TARGET1)
+        d2, _ = _read_entry(kspkg_path, TARGET2)
         if d1 is None or d2 is None:
             return "target files not found (version mismatch?)"
         return "off" if (size1 == 0 and _nested_is_empty(d2, NESTED_PATH)) else "on"
@@ -206,8 +211,7 @@ def _state(kspkg_path):
 
 def _patch(kspkg_path):
     status = []
-    table, _ = _read_table(kspkg_path)
-    d1, size1 = _read_entry(kspkg_path, table, TARGET1)
+    d1, size1 = _read_entry(kspkg_path, TARGET1)
     if d1 is None:
         status.append(f"{TARGET1} not found - skipped")
     elif size1 == 0:
@@ -219,8 +223,7 @@ def _patch(kspkg_path):
         _write_entry(kspkg_path, TARGET1, b"")
         status.append(f"cleared {TARGET1} ({size1} -> 0 bytes)")
 
-    table, _ = _read_table(kspkg_path)
-    d2, _ = _read_entry(kspkg_path, table, TARGET2)
+    d2, _ = _read_entry(kspkg_path, TARGET2)
     if d2 is None:
         status.append(f"{TARGET2} not found - skipped")
     else:
@@ -265,15 +268,26 @@ def _client_kspkg():
 
 
 def status():
-    """State of both installs, for the Servers page to show on load."""
-    out = {}
+    """State of both installs, for the Servers page to show on load.
+
+    Cached on the two archives' stat, so opening Servers repeatedly costs one
+    read rather than four - and a toggle (or a Kunos update) changes the file,
+    which changes the key, so the next call recomputes on its own.
+    """
+    from . import cache
     server = _server_kspkg()
-    if server and os.path.isfile(server):
-        out["server"] = {"path": server, "state": _state(server)}
     client = _client_kspkg()
-    if client and os.path.isfile(client):
-        out["client"] = {"path": client, "state": _state(client)}
-    return {"ok": True, **out}
+
+    def compute():
+        out = {}
+        if server and os.path.isfile(server):
+            out["server"] = {"path": server, "state": _state(server)}
+        if client and os.path.isfile(client):
+            out["client"] = {"path": client, "state": _state(client)}
+        return {"ok": True, **out}
+
+    return cache.get("penalties.status", cache.stat_key(server, client),
+                     compute)
 
 
 def set_penalties(side, off):

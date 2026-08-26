@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
