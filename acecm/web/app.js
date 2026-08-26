@@ -1091,6 +1091,48 @@ async function serversPage() {
     p.append(wc);
   }
 
+  // Penalties: install-wide, not per-profile - the trigger list lives inside
+  // content.kspkg itself, so every profile hosted from this server shares
+  // one on/off state. Shown here rather than in the per-profile editor
+  // because that is exactly what it is not scoped to.
+  const pc = el('div', 'card');
+  const pens = await api('penalties');
+  pc.innerHTML = '<h2>Penalties</h2>';
+  const pdim = el('div', 'tiny dim',
+    'A Kunos content update replaces content.kspkg wholesale, which silently '
+    + 'resets this to ON along with everything else in the archive - if it '
+    + 'looks flipped after an update, that is why, not a bug.');
+  pc.append(pdim);
+  const prow = el('div', 'row');
+  for (const side of ['server', 'client']) {
+    const info = pens && pens[side];
+    if (!info) continue;
+    const label = side === 'server' ? 'Dedicated server (affects everyone who joins)'
+                                    : 'This client (affects only your own singleplayer)';
+    const box = el('div', 'card');
+    box.style.flex = '1';
+    const isOff = info.state === 'off';
+    const isOn = info.state === 'on';
+    const stateText = isOff ? 'OFF' : isOn ? 'ON' : info.state;
+    box.innerHTML = `<div><b>${esc(label)}</b></div>
+      <div class="tiny dim">${esc(info.path)}</div>
+      <div style="margin:6px 0">state: <b>${esc(stateText)}</b></div>`;
+    if (isOff || isOn) {
+      const btn = el('button', isOff ? 'sm' : 'sm danger',
+        isOff ? 'Turn penalties ON' : 'Turn penalties OFF');
+      btn.onclick = async () => {
+        const r = await api('penalties/set', { side, off: isOn });
+        toast(r.ok ? `Penalties now ${(r.state || '').toUpperCase()} (${side})`
+                   : (r.error || 'Failed'), !r.ok);
+        serversPage();
+      };
+      box.append(btn);
+    }
+    prow.append(box);
+  }
+  pc.append(prow);
+  p.append(pc);
+
   const head = el('div', 'row');
   const add = el('button', 'primary', '+ New server');
   add.onclick = () => { editing = { ...template }; serversPage(); };

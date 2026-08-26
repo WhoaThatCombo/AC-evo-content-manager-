@@ -19,7 +19,8 @@ from http.server import BaseHTTPRequestHandler
 from . import (backend, config, content, contentsync, detect, drive,
                hooking, install,
                installer,
-               logs, lobby, netutil, overview, patching, realai, version,
+               logs, lobby, netutil, overview, patching, penalties, realai,
+               version,
                registry, servers, settings as gamesettings,
                telemetry, thumbs, tracks as trackdeploy, viewer)
 
@@ -313,6 +314,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._library_export(
                     (q.get("kind") or [""])[0],
                     (q.get("name") or [""])[0])
+            if path == "/api/penalties":
+                return _json(self, penalties.status())
             if path == "/api/trackdeploy":
                 return _json(self, {**trackdeploy.state(),
                                     **trackdeploy.packages(
@@ -543,6 +546,9 @@ class Handler(BaseHTTPRequestHandler):
                 # without needing EvoForge
                 return _json(self, trackdeploy.redeclare_tracks(
                     dry_run=bool(body.get("dry_run"))))
+            if path == "/api/penalties/set":
+                return _json(self, penalties.set_penalties(
+                    body.get("side"), bool(body.get("off"))))
             if path == "/api/trackdeploy/redeclare_client":
                 # same wipe, the CLIENT's own content.kspkg - single-player
                 # Practice/Custom Session reads THIS table, not the server's
