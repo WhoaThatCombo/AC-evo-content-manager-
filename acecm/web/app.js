@@ -3362,6 +3362,65 @@ async function contentPage() {
     contentPage();
   };
   rrow.append(rest);
+  const redec = el('button', 'sm', 'Redeclare wiped tracks');
+  redec.title = 'A Kunos content update replaces content.kspkg wholesale, '
+    + 'which erases tracks.table rows for every custom track even though the '
+    + "track's own files survive. This re-registers whatever got wiped, "
+    + 'without needing EvoForge.';
+  redec.onclick = async () => {
+    toast('Checking for tracks wiped by the last update…');
+    const dry = await api('trackdeploy/redeclare', { dry_run: 1 });
+    if (!dry.ok && !dry.candidates) {
+      toast(dry.error || 'Could not check tracks.table', true);
+      return;
+    }
+    const n = (dry.candidates || []).length;
+    if (n === 0) {
+      toast('Nothing to redeclare — every loose track is already registered');
+      return;
+    }
+    const names = dry.candidates.map(c => c.display_name).join(', ');
+    if (!confirm(`${n} track(s) missing from tracks.table:\n\n${names}\n\n`
+        + 'Re-register them now? This rewrites a 300 MB archive.'))
+      return;
+    toast('Redeclaring — please wait…');
+    const r = await api('trackdeploy/redeclare', {});
+    const okN = (r.redeclared || []).length;
+    const failN = (r.failed || []).length;
+    toast(failN === 0
+      ? `Redeclared ${okN} track(s)`
+      : `Redeclared ${okN}, ${failN} failed — see log`, failN > 0);
+    contentPage();
+  };
+  rrow.append(redec);
+  const redecC = el('button', 'sm', 'Redeclare on client too');
+  redecC.title = 'The client keeps its own separate content.kspkg with its '
+    + "own tracks.table - fixing the server's copy does not fix single-"
+    + 'player Practice/Custom Session, which reads this one instead.';
+  redecC.onclick = async () => {
+    toast('Checking the client archive for tracks wiped by the last update…');
+    const dry = await api('trackdeploy/redeclare_client', { dry_run: 1 });
+    if (!dry.ok && !dry.candidates) {
+      toast(dry.error || 'Could not check the client tracks.table', true);
+      return;
+    }
+    const n = (dry.candidates || []).length;
+    if (n === 0) {
+      toast('Nothing to redeclare — every loose track is already registered on the client');
+      return;
+    }
+    if (!confirm(`${n} track(s) missing from the client's tracks.table:\n\n`
+        + `${dry.candidates.join(', ')}\n\nRe-register them now?`))
+      return;
+    toast('Redeclaring on the client — please wait…');
+    const r = await api('trackdeploy/redeclare_client', {});
+    const okN = (r.redeclared || []).length;
+    const failN = (r.failed || []).length;
+    toast(failN === 0
+      ? `Redeclared ${okN} track(s) on the client`
+      : `Redeclared ${okN}, ${failN} failed — see log`, failN > 0);
+  };
+  rrow.append(redecC);
   ic.append(rrow);
   p.append(ic);
 

@@ -543,7 +543,25 @@ def start(profile):
     # path", which names nothing useful. Check first and say what is wrong.
     bad = _custom_track_problem(profile)
     if bad:
-        return {"ok": False, "error": bad}
+        # A Kunos content update replaces content.kspkg wholesale, wiping
+        # every tracks.table row we wrote even though the track's own loose
+        # files survive untouched. That is indistinguishable from "never
+        # deployed" to the check above, so before believing it, try putting
+        # back whatever an update wiped and re-check once. EvoForge does this
+        # automatically on every launch; this is the same fix for people who
+        # don't have it.
+        try:
+            from . import tracks as trackdeploy
+            redec = trackdeploy.redeclare_tracks()
+            if redec.get("redeclared"):
+                logs.LOG.info("auto-redeclared %d track(s) wiped by an "
+                              "update before start: %s", len(redec["redeclared"]),
+                              ", ".join(r["folder"] for r in redec["redeclared"]))
+        except Exception as ex:
+            logs.LOG.warning("auto-redeclare before start: %s", ex)
+        bad = _custom_track_problem(profile)
+        if bad:
+            return {"ok": False, "error": bad}
 
     # ⚠ The client and the server read car mods from DIFFERENT folders, so a
     # car you can drive is not necessarily a car this server can host - and

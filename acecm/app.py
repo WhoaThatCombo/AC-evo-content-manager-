@@ -536,6 +536,18 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, trackdeploy.deploy(body.get("path")))
             if path == "/api/trackdeploy/restore":
                 return _json(self, trackdeploy.restore())
+            if path == "/api/trackdeploy/redeclare":
+                # a Kunos content update replaces content.kspkg wholesale, so
+                # any track rows we wrote earlier are gone even though the
+                # track's own loose files survive - this re-registers them
+                # without needing EvoForge
+                return _json(self, trackdeploy.redeclare_tracks(
+                    dry_run=bool(body.get("dry_run"))))
+            if path == "/api/trackdeploy/redeclare_client":
+                # same wipe, the CLIENT's own content.kspkg - single-player
+                # Practice/Custom Session reads THIS table, not the server's
+                return _json(self, trackdeploy.redeclare_client_tracks(
+                    dry_run=bool(body.get("dry_run"))))
             if path == "/api/splines/ship":
                 from . import splines
                 if body.get("all"):

@@ -330,13 +330,14 @@ def apply_redirect():
 # Gameface/cohtml inspector. Stock sets DebuggerPort to 0xFFFFFFFF (invalid)
 # and the enable flag to 0, so :9444 never listens. Drive presses Start/Join
 # through that port — without this rewrite a fresh install launches and sits
-# on the home menu forever. Addresses are from AC EVO 0.8.1 / FUN_140ce58d0;
-# a game update that moves the function will fail the byte check instead of
-# scribbling.
+# on the home menu forever. The two writes sit 7 bytes apart in the same
+# instruction run, so re-deriving after an update is a single combined-pattern
+# search rather than two independent ones. Re-derived 2026-08-25 against
+# buildid 24331595 (was FUN_140ce58d0 in 0.8.1; function moved +0x106b10).
 INSPECTOR_PORT = int(os.environ.get("INSPECTOR_PORT", "9444"))
-_INSPECTOR_PORT_VA = 0x140CE5B8C
+_INSPECTOR_PORT_VA = 0x140DEC69C
 _INSPECTOR_PORT_ORIG = bytes.fromhex("c74538ffffffff")  # mov [rbp+0x38], -1
-_INSPECTOR_FLAG_VA = 0x140CE5B93
+_INSPECTOR_FLAG_VA = 0x140DEC6A3
 _INSPECTOR_FLAG_ORIG = bytes.fromhex("66c7453c0001")    # flag 0, next byte 1
 _INSPECTOR_FLAG_NEW = bytes.fromhex("66c7453c0101")     # flag 1
 _inspector_cache = {}
@@ -918,12 +919,16 @@ def join(server_id, shape="bare", tcp=None, udp=None, password=""):
 # Two je-if-flag-zero sites. NOPping them forces LocalAI on the *showroom*
 # car at boot and the client then stops pumping lobby messages.
 # Keep the original jumps; flip the live BSS flag after the menu is up.
+# Re-derived 2026-08-26 against buildid 24331595 (was 0x140FB358E/0x140FB38E8;
+# found by tracing the ai_player_car gflag registration call to its BSS
+# storage byte, then finding which of 216 gap-matched je pairs actually reads
+# it - bytes at the new sites are identical to the old ones, just relocated).
 _AI_FLAG_SITES = (
-    (0x140FB358E, bytes([0x0F, 0x84, 0x3F, 0x01, 0x00, 0x00]), bytes([0x90] * 6)),
-    (0x140FB38E8, bytes([0x74, 0x6C]), bytes([0x90] * 2)),
+    (0x1410B171E, bytes([0x0F, 0x84, 0x3F, 0x01, 0x00, 0x00]), bytes([0x90] * 6)),
+    (0x1410B1A78, bytes([0x74, 0x6C]), bytes([0x90] * 2)),
 )
 # cmp byte [rip+disp], 0 just before both sites resolves here.
-_AI_FLAG_VA = 0x145D7BD78
+_AI_FLAG_VA = 0x1467120A9
 _IMAGE_BASE = 0x140000000
 
 
@@ -1171,6 +1176,25 @@ def launch_game(extra_args=None):
                               "client lobby URL") + extra,
                     "needs_admin": patch.get("needs_admin"),
                     "patch": patch}
+
+    # A Kunos content update replaces the client's content.kspkg wholesale,
+    # wiping tracks.table rows we wrote even though the track's own loose
+    # files survive - indistinguishable from "never registered" until the
+    # game commits to loading it and dies on an empty path. Same fix as the
+    # inspector/redirect patches above: catch it before Launch, not after a
+    # crash. Cheap when there is nothing to fix - it is a table diff, not a
+    # rewrite, when every track is already registered.
+    if not _game_running(exe):
+        try:
+            from . import tracks as trackdeploy
+            redec = trackdeploy.redeclare_client_tracks()
+            if redec.get("redeclared"):
+                logs.LOG.info("auto-redeclared %d client track(s) wiped by "
+                              "an update before launch: %s",
+                              len(redec["redeclared"]),
+                              ", ".join(r["folder"] for r in redec["redeclared"]))
+        except Exception as ex:
+            logs.LOG.warning("auto-redeclare client tracks before launch: %s", ex)
 
     url = netutil.backend_ws_url(config.CFG["backend_port"])
     env = dict(os.environ)
