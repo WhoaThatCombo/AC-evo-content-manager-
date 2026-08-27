@@ -3234,6 +3234,90 @@ function dropProgress() {
 
 function mb(n) { return (n / 1048576).toFixed(1) + ' MB'; }
 
+/* ---- the bar the whole app shows ---------------------------------------
+   Installing content is the one thing here that runs for minutes, and it was
+   only visible on the page that started it: navigate away mid-download and
+   there was nothing anywhere saying the app was busy, which is why a working
+   install read as a hang.
+
+   ⚠ OWNERSHIP. A window-drop drives this bar directly from the upload's own
+   byte counter, which is better than anything the server can tell us about
+   that phase. So the poller stands aside while a local job holds it, rather
+   than the two writing over each other every second.                       */
+let _progOwner = null;      // 'local' while a drop is uploading
+let _progTimer = null;
+let _progRate = { done: 0, at: 0, v: 0 };
+
+function progClaim(who) { _progOwner = who; }
+function progRelease(who) { if (_progOwner === who) _progOwner = null; }
+
+async function pollProgress() {
+  if (_progOwner) return;                       // a drop is driving it
+  let p;
+  try { p = await api('progress'); } catch (e) { return; }
+  const prog = dropProgress();
+  if (!p || !p.active) {
+    // ⚠ hide unconditionally, not only after a run this poller saw start. A
+    // drop drives the bar itself and hands it back; if that job finished
+    // between two ticks the bar would otherwise stay on screen for ever.
+    pollProgress._was = false;
+    prog.hide();
+    return;
+  }
+  const done = p.done || 0, total = p.total || 0;
+  const now = Date.now();
+  if (!pollProgress._was) {
+    pollProgress._was = true;
+    // ⚠ Seed the baseline with what is ALREADY done, not zero. We usually
+    // arrive part-way through - the first poll of a download that has moved
+    // 100 MB would otherwise divide all of it by one interval and claim
+    // 100 GB/s. No rate until there are two samples to compare.
+    _progRate = { done, at: now, v: 0 };
+    prog.show(p.phase === 'download' ? 'Downloading content…' : 'Installing…');
+  }
+  if (done > _progRate.done) {
+    const inst = (done - _progRate.done) / Math.max(0.001, (now - _progRate.at) / 1000);
+    _progRate.v = _progRate.v ? _progRate.v * 0.7 + inst * 0.3 : inst;
+    _progRate.done = done; _progRate.at = now;
+  }
+  const left = (_progRate.v > 0 && total > done) ? (total - done) / _progRate.v : 0;
+  const detail = [
+    p.what,
+    total ? `${mb(done)} of ${mb(total)}` : null,
+    _progRate.v > 0 ? `${mb(_progRate.v)}/s` : null,
+    left > 2 ? `${Math.ceil(left)}s left` : null,
+  ].filter(Boolean).join(' · ');
+  if (total) prog.set(done / total, detail);
+  // no byte count for this phase - move the bar rather than invent a number
+  else prog.busy(p.phase === 'download' ? 'Downloading content…' : 'Installing…',
+                 p.what || '');
+}
+
+function startProgressWatch() {
+  if (_progTimer) return;
+  // ⚠ Slow when nothing is happening. This runs on every page for the whole
+  // session, so a fixed 1s poll would be a request a second for ever; the
+  // endpoint is a dict lookup, but the log noise alone is not worth it.
+  // Anything WE start calls progKick, so the idle rate only has to catch a
+  // job started elsewhere - another window, or a drop onto the tray.
+  const tick = async () => {
+    await pollProgress();
+    const fast = pollProgress._was || _progOwner;
+    clearTimeout(_progTimer);
+    _progTimer = setTimeout(tick, fast ? 700 : 2500);
+  };
+  _progTimer = setTimeout(tick, 0);
+}
+
+/* Poll NOW rather than up to a couple of seconds from now. Without this the
+   bar lagged behind the button that started the job, which reads as the
+   click not having worked. */
+function progKick() {
+  clearTimeout(_progTimer);
+  _progTimer = null;
+  startProgressWatch();
+}
+
 function putFile(url, file, onProgress) {
   return new Promise(resolve => {
     const xhr = new XMLHttpRequest();
@@ -3262,6 +3346,9 @@ async function uploadDropped(files) {
   const started = Date.now();
   prog.show('Copying ' + files.length + ' file'
             + (files.length === 1 ? '' : 's') + '…');
+  // the upload's own byte counter beats anything the server can report for
+  // this phase, so hold the bar until the files are actually up
+  progClaim('local');
   try {
     for (const f of files) {
       const r = await putFile(
@@ -3282,26 +3369,22 @@ async function uploadDropped(files) {
     }
     // ⚠ Unpacking is the SLOW half for a big track - thousands of files and
     // several GB - and it used to show a bare "Installing…" for minutes,
-    // which reads as a hang. The drop request runs for that whole time, so
-    // ask the server separately what it is up to.
+    // which reads as a hang. Hand the bar back here: the upload is done, and
+    // from now on only the server knows what is happening, which is exactly
+    // what the global watcher reports. It also means the bar survives
+    // navigating away mid-install.
     prog.busy('Installing…', 'unpacking and registering the content');
-    const watch = setInterval(async () => {
-      const st = await api('drop/status');
-      if (!st || st.state !== 'running') return;
-      if (st.total) {
-        prog.set(st.done / st.total,
-                 `${st.detail} — ${mb(st.done)} of ${mb(st.total)}`);
-      } else {
-        prog.busy('Installing…', st.detail || '');
-      }
-    }, 600);
+    progRelease('local');
+    progKick();                     // hand straight over, no gap
     try {
       return await finishIngest({ id });
     } finally {
-      clearInterval(watch);
+      // let the watcher paint the finished state rather than yanking the bar
+      // out from under it
+      progKick();
     }
   } finally {
-    prog.hide();
+    progRelease('local');
   }
 }
 
@@ -4183,43 +4266,30 @@ async function contentFrom(s) {
   // idea whether a 4 GB track was moving or stuck. Reuse the same progress
   // component a window-drop already uses, so both ways of getting content
   // look and behave the same.
+  // ⚠ The BAR is not this function's job any more - startProgressWatch draws
+  // it from /api/progress, so it keeps going (and stays visible) if the user
+  // wanders off to another page mid-download. All that is left here is
+  // noticing the end, so the browser page can refresh itself.
   const bar = $('#brprog');
-  const prog = dropProgress();
-  prog.show('Downloading content…');
   const started = Date.now();
-  let lastDone = 0, lastAt = Date.now(), rate = 0;
+  progKick();                       // show the bar now, not on the next tick
   const poll = setInterval(async () => {
     const st = await api('browser/status');
-    const done = st.done || 0, total = st.total || 0;
-    // smooth the rate: per-file completions arrive in lumps, and a raw
-    // instantaneous figure jumps between 0 and silly numbers
-    const now = Date.now();
-    if (done > lastDone) {
-      const inst = (done - lastDone) / Math.max(0.001, (now - lastAt) / 1000);
-      rate = rate ? rate * 0.7 + inst * 0.3 : inst;
-      lastDone = done; lastAt = now;
+    if (bar) {
+      bar.textContent = st.total
+        ? `${st.detail} — ${mb(st.done || 0)} of ${mb(st.total)}`
+        : (st.detail || '');
     }
-    const left = (rate > 0 && total > done) ? (total - done) / rate : 0;
-    const detail = [
-      st.detail,
-      total ? `${mb(done)} of ${mb(total)}` : null,
-      rate > 0 ? `${mb(rate)}/s` : null,
-      left > 2 ? `${Math.ceil(left)}s left` : null,
-    ].filter(Boolean).join(' · ');
-    if (total) prog.set(done / total, detail);
-    else prog.busy('Installing…', st.detail || '');
-    if (bar) bar.textContent = detail;
     if (st.state === 'done' || st.state === 'error') {
       clearInterval(poll);
-      prog.hide();
       const secs = Math.round((Date.now() - started) / 1000);
       toast(st.state === 'done'
         ? `Content installed in ${secs}s — you can join now`
         : st.detail, st.state === 'error');
       brLocal = await api('browser/local');
-      browserPage();
+      if (_page === 'browser') browserPage();
     }
-  }, 700);
+  }, 1000);
 }
 
 function fetchHostCard() {
@@ -5072,6 +5142,9 @@ go((location.hash || '#drive').slice(1));
 // problems are worth noticing wherever you are, but they do not change
 // often - a slow tick is plenty and costs one small request.
 setInterval(refreshAttention, 20000);
+// installing content is the one job that runs for minutes - show it wherever
+// the user happens to be, not only on the page that started it
+startProgressWatch();
 bindDropAnywhere();
 api('state').then(s => {
   $('#navfoot').textContent = s.server_exe_ok ? 'server ready' : 'server not found';

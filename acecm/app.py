@@ -105,6 +105,35 @@ def _install_content(body):
     return {"ok": True, "files": len(need), "bytes": p["bytes"]}
 
 
+def _progress():
+    """Whatever long content job is running, for the bar the whole app shows.
+
+    Two separate things can be in flight and they are phases of one job as
+    far as anyone watching is concerned: Get content DOWNLOADS files, then
+    unpacking/registering INSTALLS them. Reporting them from one place means
+    the UI does not have to know which is which, and a page that is not the
+    one that started the job can still show it.
+
+    ⚠ Ingest is checked FIRST. A track pack downloads and then unpacks, and
+    for that moment both look busy - the unpack is the phase that is actually
+    moving, and reporting the finished download instead would freeze the bar
+    at 100% for the slowest part of the job.
+    """
+    ing = install.INGEST
+    if ing.get("state") == "running":
+        return {"ok": True, "active": True, "phase": "install",
+                "what": ing.get("detail") or "Installing",
+                "done": ing.get("done") or 0, "total": ing.get("total") or 0}
+    if _INSTALL.get("state") == "running":
+        return {"ok": True, "active": True, "phase": "download",
+                "what": _INSTALL.get("detail") or "Downloading",
+                "done": _INSTALL.get("done") or 0,
+                "total": _INSTALL.get("total") or 0}
+    return {"ok": True, "active": False,
+            "state": _INSTALL.get("state") or "idle",
+            "what": _INSTALL.get("detail") or ""}
+
+
 def _json(handler, obj, code=200):
     body = json.dumps(obj).encode("utf-8")
     handler.send_response(code)
@@ -185,6 +214,8 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, realai.worker_status())
             if path == "/api/drive":
                 return _json(self, drive.options())
+            if path == "/api/progress":
+                return _json(self, _progress())
             if path == "/api/drop/status":
                 # the /api/drop request itself runs for the whole install, so
                 # this is the only way the page can see inside it
