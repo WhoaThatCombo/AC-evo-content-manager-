@@ -397,7 +397,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/server/log":
                 pid = (q.get("id") or [None])[0]
                 prof = next((p for p in servers.load() if p["id"] == pid), None)
-                return _json(self, servers.log_tail(prof or {}))
+                try:
+                    since = int((q.get("since") or ["0"])[0] or 0)
+                except ValueError:
+                    since = 0
+                return _json(self, servers.log_tail(prof or {}, since=since))
             # ---- public server list + content delivery -------------------
             if path == "/api/registry":
                 return _json(self, {"servers": registry.load(),

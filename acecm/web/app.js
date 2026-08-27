@@ -1398,7 +1398,16 @@ async function refreshAttention() {
 
 /* -------------------------------------------------------------- servers -- */
 let editing = null;
+// stop-functions for every log currently following, so a page rebuild or a
+// navigation does not leave them polling a <pre> that is no longer on screen
+let openLogTimers = [];
+function stopAllLogFollows() {
+  openLogTimers.forEach(fn => { try { fn(); } catch (e) {} });
+  openLogTimers = [];
+}
+
 async function serversPage() {
+  stopAllLogFollows();
   const [pr, trkWrap, worker] = await Promise.all([
     api('profiles'), api('tracks'), api('game/worker'),
   ]);
@@ -1561,16 +1570,55 @@ async function serversPage() {
 
     const edit = el('button', 'sm', 'Edit');
     edit.onclick = () => { editing = { ...prof }; serversPage(); };
+    /* ---- live log ---------------------------------------------------------
+       This used to fetch once and paste the tail, so watching a server start
+       meant clicking Logs over and over. It follows now: only the bytes
+       written since the last poll come back, which is why it can run every
+       couple of seconds without re-reading the file each time.
+
+       ⚠ The timer is owned by the <pre>. This whole row is rebuilt by
+       serversRefresh on a timer, so a poller left running against a detached
+       node would keep polling for the rest of the session - one more leaked
+       every few seconds, for every server whose log had ever been opened. */
     const logs = el('button', 'sm', 'Logs');
     const pre = el('pre', 'log');
     pre.style.display = 'none';
-    logs.onclick = async () => {
-      pre.style.display = pre.style.display === 'none' ? '' : 'none';
-      if (pre.style.display === '') {
-        const r = await api('server/log?id=' + prof.id);
+    let logAt = 0, logTimerId = null;
+
+    const atBottom = () =>
+      pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+
+    const pullLog = async () => {
+      if (!pre.isConnected) { stopLog(); return; }
+      const r = await api(`server/log?id=${prof.id}&since=${logAt}`);
+      if (!r) return;
+      // ⚠ stick to the bottom only if the user was ALREADY there. Yanking
+      // the view back down while they are reading further up is exactly what
+      // makes a live log unusable.
+      const follow = atBottom();
+      if (r.reset) {
         pre.textContent = (r.lines || []).join('\n') || r.error || '(empty)';
-        pre.scrollTop = pre.scrollHeight;
+      } else if ((r.lines || []).length) {
+        pre.textContent += (pre.textContent ? '\n' : '') + r.lines.join('\n');
       }
+      logAt = r.size || logAt;
+      if (follow) pre.scrollTop = pre.scrollHeight;
+    };
+
+    const stopLog = () => {
+      if (logTimerId) { clearInterval(logTimerId); logTimerId = null; }
+    };
+
+    logs.onclick = async () => {
+      const opening = pre.style.display === 'none';
+      pre.style.display = opening ? '' : 'none';
+      logs.classList.toggle('primary', opening);
+      if (!opening) { stopLog(); return; }
+      logAt = 0;
+      await pullLog();
+      stopLog();
+      logTimerId = setInterval(pullLog, 2000);
+      openLogTimers.push(stopLog);
     };
     const del = el('button', 'sm danger', 'Delete');
     del.onclick = async () => {
@@ -5274,6 +5322,7 @@ function go(name) {
   if (typeof telTimer !== 'undefined' && telTimer) { clearInterval(telTimer); telTimer = null; }
   if (typeof telRaf !== 'undefined' && telRaf) { cancelAnimationFrame(telRaf); telRaf = null; }
   if (name !== 'drive') stopDrivePoll();
+  if (name !== 'servers') stopAllLogFollows();
   _wanted = PAGES[name] ? name : 'drive';
   const [title, sub, fn] = PAGES[name] || PAGES.drive;
   $('#ttl').textContent = title;
