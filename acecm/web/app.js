@@ -456,6 +456,36 @@ async function drivePage() {
       // ⚠ look it up again rather than trusting what was saved: the player
       // count and even the name will have moved on since it was pinned
       r.onclick = () => lookupAndSelect(`${f.ip}:${f.tcp}`, true);
+      /* Fetch what this server needs, without going to the browser page and
+         finding it in a list. Content only comes from a host running ACECM,
+         and we cannot know whether it is until we ask - so the button is
+         always here and says so plainly when the answer is no. */
+      const get = el('button', 'sm', 'Get content');
+      get.title = 'Download the tracks and mods this server needs';
+      get.onclick = async ev => {
+        ev.stopPropagation();
+        get.disabled = true;
+        const was = get.textContent;
+        get.textContent = 'Checking…';
+        try {
+          const info = await api('drive/direct', { target: `${f.ip}:${f.tcp}` });
+          if (!info || !info.ok) { toast('could not reach that host', true); return; }
+          if (info.source !== 'acecm' || !info.base) {
+            toast(`${f.name} is not sharing content through ACECM — `
+                  + 'the host has to run it and allow TCP 8092', true);
+            return;
+          }
+          const ids = info.sid ? [info.sid] : (info.sids || []);
+          if (!ids.length) { toast('that host lists no content', true); return; }
+          const r = await api('browser/install', { base: info.base, ids });
+          if (!r.ok) { toast(r.error || 'could not start', true); return; }
+          toast(`Fetching ${r.files} file(s), ${mb(r.bytes || 0)}`);
+          progKick();          // the global bar takes it from here
+        } finally {
+          get.disabled = false;
+          get.textContent = was;
+        }
+      };
       const x = el('button', 'sm', '×');
       x.title = 'Remove from favourites';
       x.onclick = async ev => {
@@ -464,7 +494,7 @@ async function drivePage() {
         favs = (res && res.favourites) || [];
         paintFavs();
       };
-      r.append(t, x);
+      r.append(t, get, x);
       box.append(r);
     });
   }
