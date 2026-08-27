@@ -220,6 +220,8 @@ class Handler(BaseHTTPRequestHandler):
                 # the /api/drop request itself runs for the whole install, so
                 # this is the only way the page can see inside it
                 return _json(self, {"ok": True, **install.INGEST})
+            if path == "/api/drive/fav":
+                return _json(self, drive.favourites())
             if path == "/api/drive/servers":
                 return _json(self, drive.public_servers())
             if path == "/api/drive/status":
@@ -700,6 +702,15 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("ai_player", True)))
             if path == "/api/drive":
                 return _json(self, drive.start(body))
+            if path == "/api/drive/direct":
+                return _json(self, drive.direct_lookup(
+                    body.get("target") or ""))
+            if path == "/api/drive/fav/add":
+                return _json(self, drive.favourite_add(
+                    body.get("target") or "", body.get("name") or ""))
+            if path == "/api/drive/fav/remove":
+                return _json(self, drive.favourite_remove(
+                    body.get("id") or ""))
             if path == "/api/drive/capture":
                 return _json(self, drive.capture_list())
             if path == "/api/drive/list":

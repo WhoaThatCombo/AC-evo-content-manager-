@@ -256,6 +256,20 @@ pre.log{
   font-size:20px;line-height:1;padding:0 4px;
 }
 .pk-x:hover{color:var(--fg)}
+/* ---- direct connect + favourites --------------------------------------- */
+.drive-direct{margin-bottom:10px}
+.drive-direct .fav-title{
+  margin:10px 0 4px;text-transform:uppercase;letter-spacing:.06em;font-size:10px;
+}
+.fav-row{
+  display:flex;align-items:center;gap:8px;padding:5px 8px;cursor:pointer;
+  border:1px solid var(--line);border-radius:7px;margin-bottom:4px;
+  background:var(--panel2);
+}
+.fav-row:hover{border-color:var(--accent2)}
+.fav-row.on{border-color:var(--accent);background:#12241f}
+.fav-row .name{font-size:12.5px}
+.fav-row button{flex:none;padding:2px 7px;line-height:1}
 .drive-row{
   display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;
   border-bottom:1px solid #161b23;
