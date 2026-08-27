@@ -455,16 +455,20 @@ async function drivePage() {
      selection changes, so a handler attached once outside would be dropped
      along with the innerHTML it was attached to - the card would open the
      picker until you picked something, and then never again. */
-  function paintHead(box, imgSrc, title, sub, open) {
+  function paintHead(box, imgSrc, title, sub, open, row) {
     box.innerHTML = '';
     const has = !!imgSrc && !/[?&](id|folder)=(&|$)/.test(imgSrc);
-    box.classList.toggle('empty-pick', !has);
+    box.classList.toggle('row-pick', !!row);
+    box.classList.toggle('empty-pick', !has && !row);
     if (has) {
       const img = el('img');
       img.alt = '';
       img.src = imgSrc;
       // a car with no render must not leave a broken-image glyph on the card
-      img.onerror = () => { img.remove(); box.classList.add('empty-pick'); };
+      img.onerror = () => {
+        img.remove();
+        if (!row) box.classList.add('empty-pick');
+      };
       box.append(img);
     }
     const bar = el('div', 'dp-bar');
@@ -677,13 +681,9 @@ async function drivePage() {
   }
 
   function paintSrvFilters() {
-    // ⚠ Visible only INSIDE the picker. These filter the server list, and the
-    // list now lives in the dialog - left showing in the column they were a
-    // row of orphaned checkboxes filtering nothing. Keyed off where the node
-    // actually is, because this also runs while the dialog is open (the late
-    // server-list load repaints it) and must not hide it mid-use.
-    srvFilters.style.display =
-      (sel.via === 'server' && srvFilters.closest('.pk-veil')) ? '' : 'none';
+    // shown with the server list, which is inline - only the car and the
+    // single-player track use the card-and-dialog form
+    srvFilters.style.display = sel.via === 'server' ? '' : 'none';
     if (sel.via !== 'server' || srvFilters.dataset.ready) return;
     srvFilters.dataset.ready = '1';
     const sort = el('select');
@@ -994,10 +994,8 @@ async function drivePage() {
         s ? `${s.track || ''} · ${s.players || 0}/${s.max_players || 0}`
           + ` · ${carsLine(s)}`
           + (s.locked ? ' · password' : '') : '',
-        // the filter checkboxes belong WITH the list they filter, so they
-        // travel into the dialog too
-        () => { paintServers();
-                openPicker('Choose a server', trkSearch, trkList, srvFilters); });
+        null, true);
+      showTrackList(true);
       return;
     }
     if (sel.via === 'local') {
@@ -1009,8 +1007,8 @@ async function drivePage() {
           + ` · ${carsLine(s)}`
           + (s.running ? ' · running' : ' · stopped')
           + (s.no_lobby ? ' · private' : '') : '',
-        () => { paintTracks();
-                openPicker('Choose your server', trkSearch, trkList); });
+        null, true);
+      showTrackList(true);
       return;
     }
     const t = trackOf(sel.track_index);
@@ -1019,6 +1017,21 @@ async function drivePage() {
       t ? (t.label || t.name) : 'Pick a track',
       t ? `#${t.index} · ${t.layout || ''}` : '',
       () => { paintTracks(); openPicker('Choose a track', trkSearch, trkList); });
+    showTrackList(false);
+  }
+
+  /* Servers keep the old inline list; a track uses the card + dialog.
+
+     ⚠ Both live in the same column and the same three nodes, so whichever
+     mode paints last decides what is on screen - leaving this to the picker
+     alone meant switching from Public servers back to Single player left the
+     server list sitting under the track card. */
+  function showTrackList(inline) {
+    trkSearch.style.display = inline ? '' : 'none';
+    trkList.style.display = inline ? '' : 'none';
+    trkSearch.placeholder = sel.via === 'server'
+      ? 'Filter name, track, car…'
+      : (sel.via === 'local' ? 'Filter your servers…' : 'Filter tracks…');
   }
 
   function paintVia() {
