@@ -1075,6 +1075,12 @@ def serve():
     from . import version
     version.consume_rollback()
     _rescan_content()
+    # entries written before autofill existed carry no address and a default
+    # port; one pass at startup settles them
+    try:
+        registry.backfill()
+    except Exception as ex:
+        logs.LOG.warning("registry backfill: %s", ex)
     _watch_lobby()
     port = config.CFG["ui_port"]
     # ⚠ 127.0.0.1 made the window work and made content sharing a lie.
