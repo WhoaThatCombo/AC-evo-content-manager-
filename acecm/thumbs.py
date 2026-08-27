@@ -116,7 +116,12 @@ def build_all(force=False):
         for i, c in enumerate(cars, 1):
             _JOB["done"], _JOB["current"] = i, c.get("label") or c["id"]
             try:
-                if render_car(c["id"], force):
+                # ⚠ render_car returns the cached path for a car it did not
+                # render, so counting a truthy result made "made" equal to the
+                # number of cars looked at - a run that rendered 12 reported
+                # 86. Ask whether the file was there BEFORE.
+                had = os.path.isfile(car_path(c["id"]))
+                if render_car(c["id"], force) and (force or not had):
                     _JOB["made"] += 1
             except Exception as ex:
                 logs.LOG.warning("thumb %s: %s", c["id"], ex)

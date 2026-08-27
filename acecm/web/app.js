@@ -2175,6 +2175,38 @@ async function modStrip(p) {
    every preset of that model.                                               */
 let carSel = null;          // selected model id
 let carScope = 'all';       // all | kunos | mods
+let carThumbBuild = false;  // only ever kick one build off per session
+
+/* Fill in car pictures that were never rendered.
+
+   Renders are keyed by MODEL, the same id thumbs/status reports, so the two
+   lists can be compared directly - comparing against preset ids finds
+   everything missing and would rebuild the world. Runs at most once per
+   session, and only when something is actually absent. */
+async function buildMissingCarThumbs(models) {
+  if (carThumbBuild) return;
+  const st = await api('thumbs/status');
+  if (!st || st.error) return;
+  const have = new Set((st.have || []).filter(h => !h.endsWith('@big')));
+  const missing = models.filter(m => m.model && !have.has(m.model));
+  if (!missing.length || st.state === 'running') return;
+  carThumbBuild = true;
+  toast(`Rendering ${missing.length} missing car picture`
+        + (missing.length === 1 ? '' : 's') + ' in the background…');
+  const r = await api('thumbs/build', {});
+  if (!r || r.error) { carThumbBuild = false; return; }
+  const poll = setInterval(async () => {
+    const j = await api('thumbs/status');
+    if (!j || j.state === 'running') return;
+    clearInterval(poll);
+    // repaint so the new pictures actually appear, but only if the user is
+    // still looking at this page
+    if (j.made) {
+      toast(`${j.made} car picture${j.made === 1 ? '' : 's'} rendered`);
+      if (_page === 'cars') carsPage();
+    }
+  }, 2000);
+}
 
 async function carsPage() {
   const [cat, viewer, pr] = await Promise.all([
@@ -2202,6 +2234,14 @@ async function carsPage() {
   });
   const all = [...models.values()].sort((a, b) =>
     (a.brand || '').localeCompare(b.brand || '') || a.label.localeCompare(b.label));
+
+  // ⚠ The list's own image request is make=False on purpose - rendering
+  // inline used to launch evoview per row and steal focus while typing. So a
+  // car with no cached render just shows nothing, for ever, and there was no
+  // sign that a render was all it needed. Build the missing ones once, in the
+  // background: render_car returns immediately for anything already cached,
+  // so this costs only the cars that are actually missing.
+  buildMissingCarThumbs(all);
 
   const wrap = el('div', 'split');
   const leftCol = el('div', 'split-list');
@@ -3120,9 +3160,26 @@ async function uploadDropped(files) {
       if (!r.ok) { prog.hide(); return r; }
       done += f.size || 0;
     }
-    // Unpacking and registering happens on the server with no byte counter.
+    // ⚠ Unpacking is the SLOW half for a big track - thousands of files and
+    // several GB - and it used to show a bare "Installing…" for minutes,
+    // which reads as a hang. The drop request runs for that whole time, so
+    // ask the server separately what it is up to.
     prog.busy('Installing…', 'unpacking and registering the content');
-    return await finishIngest({ id });
+    const watch = setInterval(async () => {
+      const st = await api('drop/status');
+      if (!st || st.state !== 'running') return;
+      if (st.total) {
+        prog.set(st.done / st.total,
+                 `${st.detail} — ${mb(st.done)} of ${mb(st.total)}`);
+      } else {
+        prog.busy('Installing…', st.detail || '');
+      }
+    }, 600);
+    try {
+      return await finishIngest({ id });
+    } finally {
+      clearInterval(watch);
+    }
   } finally {
     prog.hide();
   }
@@ -4001,20 +4058,48 @@ async function contentFrom(s) {
   const r = await api('browser/install',
                       { base: d.base, ids: wanted.map(x => x.e.id) });
   if (!r.ok) { toast(r.error || 'install failed', true); return; }
+  // ⚠ This used to be one line of text in the page, which is why a download
+  // that was working looked like nothing was happening: no bar, no rate, no
+  // idea whether a 4 GB track was moving or stuck. Reuse the same progress
+  // component a window-drop already uses, so both ways of getting content
+  // look and behave the same.
   const bar = $('#brprog');
+  const prog = dropProgress();
+  prog.show('Downloading content…');
+  const started = Date.now();
+  let lastDone = 0, lastAt = Date.now(), rate = 0;
   const poll = setInterval(async () => {
     const st = await api('browser/status');
-    if (bar) bar.textContent = st.total
-      ? `${st.detail} — ${(st.done / 1e6).toFixed(0)}/${(st.total / 1e6).toFixed(0)} MB`
-      : st.detail;
+    const done = st.done || 0, total = st.total || 0;
+    // smooth the rate: per-file completions arrive in lumps, and a raw
+    // instantaneous figure jumps between 0 and silly numbers
+    const now = Date.now();
+    if (done > lastDone) {
+      const inst = (done - lastDone) / Math.max(0.001, (now - lastAt) / 1000);
+      rate = rate ? rate * 0.7 + inst * 0.3 : inst;
+      lastDone = done; lastAt = now;
+    }
+    const left = (rate > 0 && total > done) ? (total - done) / rate : 0;
+    const detail = [
+      st.detail,
+      total ? `${mb(done)} of ${mb(total)}` : null,
+      rate > 0 ? `${mb(rate)}/s` : null,
+      left > 2 ? `${Math.ceil(left)}s left` : null,
+    ].filter(Boolean).join(' · ');
+    if (total) prog.set(done / total, detail);
+    else prog.busy('Installing…', st.detail || '');
+    if (bar) bar.textContent = detail;
     if (st.state === 'done' || st.state === 'error') {
       clearInterval(poll);
-      toast(st.state === 'done' ? 'Content installed — you can join now'
-                                : st.detail, st.state === 'error');
+      prog.hide();
+      const secs = Math.round((Date.now() - started) / 1000);
+      toast(st.state === 'done'
+        ? `Content installed in ${secs}s — you can join now`
+        : st.detail, st.state === 'error');
       brLocal = await api('browser/local');
       browserPage();
     }
-  }, 1000);
+  }, 700);
 }
 
 function fetchHostCard() {
