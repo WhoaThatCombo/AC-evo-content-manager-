@@ -49,6 +49,9 @@ let driveFilter = {
   acecmOnly: false,
 };
 let driveLocal = null;
+// the server a typed address or a favourite resolved to - it is deliberately
+// not in the captured list, so serverOf falls back to this
+let directPicked = null;
 
 function stopDrivePoll() {
   if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
@@ -136,11 +139,28 @@ async function drivePage() {
     return (d.tracks || []).find(t => t.index === idx) || null;
   }
   function serverOf() {
-    return (d.servers || []).find(s =>
+    const hit = (d.servers || []).find(s =>
       (sel.server_id && s.id === sel.server_id)
       || (sel.server_ip && s.server_ip === sel.server_ip
           && Number(s.server_tcp_port) === Number(sel.server_tcp_port))
-    ) || null;
+    );
+    if (hit) return hit;
+    // ⚠ A directly-entered address is NOT in the captured list - that is the
+    // whole point of it. Without this the card kept saying "Pick a public
+    // server" for a server you had just successfully looked up.
+    if (directPicked && directPicked.ip === sel.server_ip
+        && Number(directPicked.tcp) === Number(sel.server_tcp_port)) {
+      const p = directPicked;
+      return {
+        id: '', name: p.name, server_ip: p.ip,
+        server_tcp_port: p.tcp, server_udp_port: p.udp || p.tcp,
+        track: p.track || '', layout: p.layout || '',
+        players: p.players || 0, max_players: p.max_players || 0,
+        locked: !!p.locked, cars: p.cars || [], direct: true,
+        note: p.note || '',
+      };
+    }
+    return null;
   }
   function localOf() {
     return (d.local_servers || []).find(s => s.id === sel.local_id) || null;
@@ -330,13 +350,124 @@ async function drivePage() {
   trkSearch.value = driveFilter.track;
   const srvFilters = el('div', 'drive-srv-filters');
   srvFilters.style.display = 'none';
+  const directBox = el('div', 'drive-direct');
+  directBox.style.display = 'none';
   const trkList = el('div', 'list drive-list');
   // same as the car column: these are the picker's contents, parked here.
   // srvFilters is left alone - paintSrvFilters already owns its visibility
   // and only shows it for the public-server list.
   trkSearch.style.display = 'none';
   trkList.style.display = 'none';
-  trkCol.append(trkHead, trkSearch, srvFilters, trkList);
+  trkCol.append(trkHead, directBox, trkSearch, srvFilters, trkList);
+
+  /* ---- direct connect + favourites --------------------------------------
+     The captured list only exists after launching the game and opening
+     Multiplayer, which is a lot of ceremony for "a friend sent me an IP".
+     Joining never needed the list - the address is enough - so this is about
+     seeing what you are about to join, and keeping the ones you go back to. */
+  let favs = [];
+
+  function selectServer(info) {
+    sel.server_id = '';                 // an address, not a captured entry
+    sel.server_ip = info.ip;
+    sel.server_tcp_port = info.tcp;
+    sel.server_udp_port = info.udp || info.tcp;
+    directPicked = info;
+    paintSelected();
+    paintVia();
+  }
+
+  /* ⚠ Select FIRST, enrich after. Finding out whether a host runs ACECM
+     means waiting on a connection that, for a plain game server, only ends
+     when it times out - seconds during which the card still showed the
+     previous server and the click looked ignored. The address alone is
+     enough to join, so commit to it immediately and fill in the name, track
+     and cars if and when they arrive. */
+  async function lookupAndSelect(target, quiet) {
+    const t = (target || '').trim();
+    if (!t) return null;
+    const m = t.match(/^\s*(?:\w+:\/\/)?\[?([^\]\/\s]+?)\]?(?::(\d+))?\s*$/);
+    if (!m) { toast('type an address, like 1.2.3.4:9700', true); return null; }
+    const ip = m[1], tcp = Number(m[2] || 9700);
+    selectServer({ ip, tcp, udp: tcp, name: `${ip}:${tcp}`, cars: [],
+                   pending: true });
+
+    const r = await api('drive/direct', { target: t });
+    if (!r || !r.ok) { toast((r && r.error) || 'could not read that', true); return null; }
+    // the user may have moved on while we were waiting
+    if (sel.server_ip !== ip || Number(sel.server_tcp_port) !== tcp) return r;
+    selectServer(r);
+    if (!quiet) {
+      toast(r.source === 'list' ? `Found in your list — ${r.name}`
+        : r.source === 'acecm' ? `ACECM host — ${r.name}`
+        : `Ready to join ${r.ip}:${r.tcp} (details unknown)`);
+    }
+    return r;
+  }
+
+  async function paintDirect() {
+    directBox.style.display = sel.via === 'server' ? '' : 'none';
+    if (sel.via !== 'server') return;
+    if (!directBox.dataset.ready) {
+      directBox.dataset.ready = '1';
+      const row = el('div', 'row wrap');
+      const inp = el('input');
+      inp.placeholder = 'Direct connect — 1.2.3.4:9700';
+      inp.style.flex = '1';
+      inp.style.minWidth = '12em';
+      const go = el('button', 'sm primary', 'Connect');
+      const star = el('button', 'sm', '☆');
+      star.title = 'Save this address to favourites';
+      go.onclick = () => lookupAndSelect(inp.value);
+      // Enter is what people actually press after typing an address
+      inp.onkeydown = e => { if (e.key === 'Enter') go.onclick(); };
+      star.onclick = async () => {
+        const t = inp.value.trim()
+          || (sel.server_ip ? `${sel.server_ip}:${sel.server_tcp_port}` : '');
+        if (!t) { toast('type an address first', true); return; }
+        const r = await api('drive/fav/add', { target: t });
+        if (!r || !r.ok) { toast((r && r.error) || 'could not save', true); return; }
+        favs = r.favourites || [];
+        toast('Saved to favourites');
+        paintFavs();
+      };
+      row.append(inp, go, star);
+      directBox.append(row, el('div', 'fav-list'));
+    }
+    if (!favs.length) {
+      const r = await api('drive/fav');
+      favs = (r && r.favourites) || [];
+    }
+    paintFavs();
+  }
+
+  function paintFavs() {
+    const box = directBox.querySelector('.fav-list');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!favs.length) return;
+    box.append(el('div', 'tiny dim fav-title', 'Favourites'));
+    favs.forEach(f => {
+      const r = el('div', 'fav-row'
+        + (sel.server_ip === f.ip && sel.server_tcp_port === f.tcp ? ' on' : ''));
+      const t = el('div', 'grow');
+      t.innerHTML = `<div class="name">${esc(f.name)}</div>`
+        + `<div class="tiny dim">${esc(f.ip)}:${f.tcp}</div>`;
+      // ⚠ look it up again rather than trusting what was saved: the player
+      // count and even the name will have moved on since it was pinned
+      r.onclick = () => lookupAndSelect(`${f.ip}:${f.tcp}`, true);
+      const x = el('button', 'sm', '×');
+      x.title = 'Remove from favourites';
+      x.onclick = async ev => {
+        ev.stopPropagation();
+        const res = await api('drive/fav/remove', { id: f.id });
+        favs = (res && res.favourites) || [];
+        paintFavs();
+      };
+      r.append(t, x);
+      box.append(r);
+    });
+  }
 
   goCol.innerHTML = '<h2>Session</h2>';
   const mode = el('select');
@@ -991,9 +1122,14 @@ async function drivePage() {
       paintHead(trkHead,
         'api/thumb/track?folder=' + encodeURIComponent((s && s.track) || ''),
         s ? s.name : 'Pick a public server',
-        s ? `${s.track || ''} · ${s.players || 0}/${s.max_players || 0}`
-          + ` · ${carsLine(s)}`
-          + (s.locked ? ' · password' : '') : '',
+        // ⚠ A direct address we know nothing about must not borrow the
+        // shape of a real entry - "0/0 · all cars" reads as an empty server
+        // that allows everything, when the truth is we have not been told.
+        s ? ((s.direct && !s.track && !s.max_players)
+             ? `${s.server_ip}:${s.server_tcp_port} · details unknown`
+             : `${s.track || ''} · ${s.players || 0}/${s.max_players || 0}`
+               + ` · ${carsLine(s)}`
+               + (s.locked ? ' · password' : '')) : '',
         null, true);
       showTrackList(true);
       return;
@@ -1035,6 +1171,7 @@ async function drivePage() {
   }
 
   function paintVia() {
+    paintDirect();
     const on = sel.via === 'server' || sel.via === 'local';
     spFields.forEach(n => { n.style.display = on ? 'none' : ''; });
     extras.style.display = on ? 'none' : '';

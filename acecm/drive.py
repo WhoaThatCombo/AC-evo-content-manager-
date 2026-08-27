@@ -12,7 +12,7 @@ import shutil
 import threading
 import time
 
-from . import backend, config, content, gameui, logs, servers
+from . import backend, config, content, contentsync, gameui, logs, servers
 from . import settings as gamesettings
 
 DRIVE_ID = "acecm-drive"
@@ -1339,6 +1339,137 @@ def _public_briefs():
         "error": lst.get("error"),
         "hint": lst.get("hint"),
     }
+
+
+FAVOURITES = os.path.join(config.DATA, "favourites.json")
+
+
+def favourites():
+    """Servers the user pinned, newest first.
+
+    The captured public list is a snapshot that goes stale and is rebuilt by
+    launching the game; a favourite is an address, which does not. So this
+    stores the address and the name it had when it was saved, and looks the
+    rest up fresh each time it is shown.
+    """
+    try:
+        items = json.load(open(FAVOURITES, encoding="utf-8"))
+    except Exception:
+        items = []
+    return {"ok": True, "favourites": [f for f in items if f.get("ip")]}
+
+
+def _save_favourites(items):
+    try:
+        os.makedirs(os.path.dirname(FAVOURITES), exist_ok=True)
+        json.dump(items, open(FAVOURITES, "w", encoding="utf-8"), indent=2)
+    except OSError as ex:
+        logs.LOG.warning("could not write favourites: %s", ex)
+    return items
+
+
+def favourite_add(target, name=""):
+    """Pin an address. Re-adding one updates its name rather than duplicating."""
+    info = direct_lookup(target)
+    if not info.get("ok"):
+        return info
+    ip, tcp = info["ip"], info["tcp"]
+    items = favourites()["favourites"]
+    # ⚠ ip+port is the identity, NOT the name. Server names change (they carry
+    # player counts and Discord invites), and keying on them would pin the
+    # same server twice the moment its name did.
+    items = [f for f in items
+             if not (f.get("ip") == ip and int(f.get("tcp") or 0) == tcp)]
+    items.insert(0, {
+        "id": f"{ip}:{tcp}",
+        "name": (name or info.get("name") or f"{ip}:{tcp}").strip(),
+        "ip": ip, "tcp": tcp, "udp": info.get("udp") or tcp,
+        "added": int(time.time()),
+    })
+    _save_favourites(items)
+    return {"ok": True, "favourites": items, "added": f"{ip}:{tcp}"}
+
+
+def favourite_remove(fid):
+    items = [f for f in favourites()["favourites"] if f.get("id") != fid]
+    _save_favourites(items)
+    return {"ok": True, "favourites": items}
+
+
+def direct_lookup(raw):
+    """Work out what is at a pasted address, so you can join without the list.
+
+    The captured public list only exists after launching the game and opening
+    Multiplayer, which is a lot of ceremony for "my friend sent me an IP". The
+    join itself never needed it - _find_public already falls back to a plain
+    ip+port - so this is about showing what you are about to join.
+
+    Three tiers, best first:
+      * the address is in the captured list -> the real entry, cars and all
+      * the host runs ACECM -> its own registry says the name, and which
+        tracks and mods the server needs
+      * neither -> the address, honestly labelled as unknown. Still joinable;
+        the game is the thing that decides whether it works.
+
+    ⚠ The game port and the ACECM port are different (9700 vs 8092), and
+    typing one where the other belongs is the obvious mistake. The pasted
+    port is used for the GAME; ACECM is probed on its own ports.
+    """
+    host, port, _base = contentsync.parse_target(raw)
+    if not host:
+        return {"ok": False, "error": "type an address, like 1.2.3.4:9700"}
+    tcp = int(port or 9700)
+
+    for s in (backend.server_list().get("servers") or []):
+        if str(s.get("server_ip") or "") == host \
+                and int(s.get("server_tcp_port") or 0) == tcp:
+            return {"ok": True, "source": "list", "ip": host, "tcp": tcp,
+                    "udp": int(s.get("server_udp_port") or tcp),
+                    "name": s.get("server_name") or host,
+                    "track": s.get("track") or "",
+                    "layout": s.get("layout") or "",
+                    "players": s.get("players") or 0,
+                    "max_players": s.get("max_players") or 0,
+                    "locked": bool(s.get("driver_password")),
+                    "cars": _car_ids_of(s)}
+
+    # ⚠ Two ports, briefly - the same trap /api/browser/discover documents.
+    # discover's default is seven ports at four seconds each, so a plain game
+    # server that is not running ACECM took 28 SECONDS to come back and the
+    # window looked hung. The pasted port is the GAME's; ACECM only ever
+    # answers on its own, so probing the rest of the range buys nothing here.
+    try:
+        got = contentsync.discover(host, ports=(8092, 8093), timeout=2.0)
+    except Exception as ex:
+        got = {"ok": False, "error": str(ex)}
+    if got.get("ok"):
+        # an ACECM host can run several servers; prefer the one on this port
+        entries = got.get("servers") or []
+        hit = next((e for e in entries
+                    if int(e.get("port") or 0) == tcp), None) or \
+            (entries[0] if len(entries) == 1 else None)
+        if hit:
+            return {"ok": True, "source": "acecm", "ip": host,
+                    "tcp": int(hit.get("port") or tcp), "udp": tcp,
+                    "name": hit.get("name") or host,
+                    "description": hit.get("description") or "",
+                    "track": ", ".join(hit.get("required_tracks") or []),
+                    "needs_mods": hit.get("required_mods") or [],
+                    "needs_tracks": hit.get("required_tracks") or [],
+                    "content_bytes": hit.get("content_bytes") or 0,
+                    "base": got.get("base") or "",
+                    "cars": []}
+        return {"ok": True, "source": "acecm", "ip": host, "tcp": tcp,
+                "udp": tcp, "name": host, "base": got.get("base") or "",
+                "note": f"{len(entries)} servers shared here - "
+                        f"no entry on port {tcp}",
+                "cars": []}
+
+    return {"ok": True, "source": "unknown", "ip": host, "tcp": tcp,
+            "udp": tcp, "name": f"{host}:{tcp}", "cars": [],
+            "note": "not in your captured list and the host is not sharing "
+                    "through ACECM, so its track and cars are unknown - "
+                    "joining will still work if the address is right"}
 
 
 def public_servers():
