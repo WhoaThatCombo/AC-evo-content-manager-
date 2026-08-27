@@ -84,6 +84,15 @@ def _install_content(body):
             dropped = contentsync.remove_stale(stale) if stale else {}
             if dropped.get("removed"):
                 _INSTALL["removed"] = len(dropped["removed"])
+            # ⚠ THE thing that made downloaded content not show up. Dropping a
+            # mod on the window goes through install.ingest_staging, which
+            # ends in _after_content_change() - but Get content installs files
+            # directly and never told anything to look again. The files were
+            # on disk and correct; every list in the app was still the one
+            # built before they arrived, so the joiner saw no new cars until
+            # they restarted ACECM (which rescans on boot). Same hook, so the
+            # two ways of getting content now behave the same way.
+            install._after_content_change()
             extra = _INSTALL.get("warning")
             _INSTALL.update({"state": "done",
                              "detail": (f"{len(need)} file(s) installed"
@@ -176,6 +185,10 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, realai.worker_status())
             if path == "/api/drive":
                 return _json(self, drive.options())
+            if path == "/api/drop/status":
+                # the /api/drop request itself runs for the whole install, so
+                # this is the only way the page can see inside it
+                return _json(self, {"ok": True, **install.INGEST})
             if path == "/api/drive/servers":
                 return _json(self, drive.public_servers())
             if path == "/api/drive/status":

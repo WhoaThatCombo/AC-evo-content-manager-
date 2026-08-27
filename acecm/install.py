@@ -502,6 +502,27 @@ def install(path, only=None, overwrite=False):
             "warning": "; ".join(notes) or None}
 
 
+# What the long half of an install is doing right now. The drop request
+# itself can run for minutes on a big track pack, so the UI cannot learn
+# anything from it until it returns - it polls this instead.
+INGEST = {"state": "idle", "detail": "", "done": 0, "total": 0}
+
+
+def ingest_begin(what, total=0):
+    INGEST.update({"state": "running", "detail": what,
+                   "done": 0, "total": int(total or 0)})
+
+
+def ingest_step(n, name=""):
+    INGEST["done"] = INGEST.get("done", 0) + int(n or 0)
+    if name:
+        INGEST["detail"] = name
+
+
+def ingest_end(detail=""):
+    INGEST.update({"state": "idle", "detail": detail})
+
+
 def _after_content_change():
     try:
         from . import content
@@ -924,7 +945,15 @@ def _extract_archive(path, dest):
     root = _archive_root(_archive_names(path))
     if low.endswith(".zip"):
         with zipfile.ZipFile(path) as z:
-            for info in z.infolist():
+            infos = z.infolist()
+            # ⚠ Unpacking a track is the long part and used to report nothing:
+            # a Shutoko-sized pack is thousands of files and gigabytes, so the
+            # UI sat on "Installing…" for minutes with no bar and no numbers,
+            # which is indistinguishable from a hang. The sizes are in the zip
+            # directory we have already read, so a total costs nothing.
+            ingest_begin("Unpacking",
+                         sum(i.file_size for i in infos if not i.is_dir()))
+            for info in infos:
                 rel = info.filename.replace("\\", "/").lstrip("/")
                 if not rel or rel.endswith("/") or ".." in rel.split("/"):
                     continue
@@ -941,12 +970,13 @@ def _extract_archive(path, dest):
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with z.open(info) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+                ingest_step(info.file_size, os.path.basename(rel))
         return dest
     import tarfile
     with tarfile.open(path, "r:*") as tar:
-        for info in tar.getmembers():
-            if not info.isfile():
-                continue
+        members = [m for m in tar.getmembers() if m.isfile()]
+        ingest_begin("Unpacking", sum(m.size for m in members))
+        for info in members:
             rel = _archive_rel(info.name, root)
             if not rel:
                 continue
@@ -957,6 +987,7 @@ def _extract_archive(path, dest):
                 continue
             with src, open(target, "wb") as dst:
                 shutil.copyfileobj(src, dst)
+            ingest_step(info.size, os.path.basename(rel))
     return dest
 
 
@@ -1003,7 +1034,11 @@ def install_track_pack(path, folder=None, overwrite=False):
                     shutil.rmtree(dest2)
                 shutil.move(dest, dest2)
                 dest, folder = dest2, want
+    # registering rewrites the client's tables and is not instant either -
+    # total 0 means "no byte count", which the UI shows as a moving bar
+    ingest_begin("Registering in the client tables")
     reg = trackmod.register_client_track(folder, meta)
+    ingest_end()
     _after_content_change()
     return {
         "ok": True,
@@ -1055,7 +1090,11 @@ def install_track_folder(path, folder=None, overwrite=False):
                                  encoding="utf-8"), indent=2)
         except OSError:
             pass
+    # registering rewrites the client's tables and is not instant either -
+    # total 0 means "no byte count", which the UI shows as a moving bar
+    ingest_begin("Registering in the client tables")
     reg = trackmod.register_client_track(folder, meta)
+    ingest_end()
     _after_content_change()
     return {
         "ok": True,
@@ -1120,18 +1159,24 @@ def ingest_staging(did, overwrite=False):
     if not names:
         drop_cleanup(did)
         return {"ok": False, "error": "drop was empty"}
-    if len(names) == 1:
-        r = ingest(os.path.join(d, names[0]), overwrite=overwrite)
-    elif any(n.lower() == "acecm_track.json" for n in names) \
-            or any(n.lower().endswith((".scene", ".track")) for n in names):
-        r = install_track_folder(d, overwrite=overwrite)
-    else:
-        scan = scan_source(d)
-        if scan.get("ok") and scan.get("mods"):
-            r = install(d, overwrite=overwrite)
+    # ⚠ finally, not just on success: a pack that fails half way through
+    # unpacking would otherwise leave the progress state stuck at "running",
+    # and the next drop would show the previous one's numbers.
+    try:
+        if len(names) == 1:
+            r = ingest(os.path.join(d, names[0]), overwrite=overwrite)
+        elif any(n.lower() == "acecm_track.json" for n in names) \
+                or any(n.lower().endswith((".scene", ".track")) for n in names):
+            r = install_track_folder(d, overwrite=overwrite)
         else:
-            r = {"ok": False,
-                 "error": "could not tell if that was a car or a track pack"}
+            scan = scan_source(d)
+            if scan.get("ok") and scan.get("mods"):
+                r = install(d, overwrite=overwrite)
+            else:
+                r = {"ok": False,
+                     "error": "could not tell if that was a car or a track pack"}
+    finally:
+        ingest_end()
     if r.get("need_confirm"):
         r["id"] = did
         return r

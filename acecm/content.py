@@ -243,7 +243,21 @@ def _tracks_uncached():
 
 
 def forget_lists():
-    """Drop cached inventories so the next Drive/Content load sees new files."""
+    """Drop cached inventories so the next Drive/Content load sees new files.
+
+    ⚠ This is THE hook for "content changed" - every install, remove and
+    import ends up here via install._after_content_change(). Anything that
+    caches a content list has to be dropped here too, not only when its own
+    key notices. A stat key cannot see everything: a package restored from a
+    backup keeps its old timestamps, and a rebuild that lands the same bytes
+    at the same size changes nothing observable. Missing this is what makes a
+    freshly installed car not show up until the app is restarted.
+    """
+    try:
+        from . import cache
+        cache.drop("content.cars", "content.tracks")
+    except Exception:
+        pass
     stale = [
         os.path.join(config.DATA, "track_map.json"),
         os.path.join(config.DATA, "viewer", "index.json"),
