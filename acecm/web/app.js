@@ -227,6 +227,12 @@ async function drivePage() {
   // tall scrolling box of ~100 rows, so anything appended after it sits
   // below the fold and is invisible in normal use - which is exactly how
   // it was reported: "where do i pick the livery?"
+  // ⚠ The search box and the list are built here but live in the picker
+  // dialog. They stay in the DOM (hidden) rather than being created on
+  // demand, because paintCars/paintTracks repaint them whether the dialog is
+  // open or not - building them lazily would mean painting into nothing.
+  carSearch.style.display = 'none';
+  carList.style.display = 'none';
   carCol.append(carHead, liveryBox, carSearch, carList);
 
   /* ---- livery -----------------------------------------------------------
@@ -325,6 +331,11 @@ async function drivePage() {
   const srvFilters = el('div', 'drive-srv-filters');
   srvFilters.style.display = 'none';
   const trkList = el('div', 'list drive-list');
+  // same as the car column: these are the picker's contents, parked here.
+  // srvFilters is left alone - paintSrvFilters already owns its visibility
+  // and only shows it for the public-server list.
+  trkSearch.style.display = 'none';
+  trkList.style.display = 'none';
   trkCol.append(trkHead, trkSearch, srvFilters, trkList);
 
   goCol.innerHTML = '<h2>Session</h2>';
@@ -438,16 +449,98 @@ async function drivePage() {
     }
   }
 
-  function paintHead(box, imgSrc, title, sub) {
+  /* The chosen car/track as a card that opens its picker.
+
+     ⚠ `open` is re-bound on EVERY paint. paintHead runs again whenever the
+     selection changes, so a handler attached once outside would be dropped
+     along with the innerHTML it was attached to - the card would open the
+     picker until you picked something, and then never again. */
+  function paintHead(box, imgSrc, title, sub, open) {
     box.innerHTML = '';
-    const img = el('img');
-    img.alt = '';
-    img.src = imgSrc;
-    img.onerror = () => { img.style.visibility = 'hidden'; };
-    const t = el('div');
+    const has = !!imgSrc && !/[?&](id|folder)=(&|$)/.test(imgSrc);
+    box.classList.toggle('empty-pick', !has);
+    if (has) {
+      const img = el('img');
+      img.alt = '';
+      img.src = imgSrc;
+      // a car with no render must not leave a broken-image glyph on the card
+      img.onerror = () => { img.remove(); box.classList.add('empty-pick'); };
+      box.append(img);
+    }
+    const bar = el('div', 'dp-bar');
+    const t = el('div', 'grow');
     t.innerHTML = `<b>${esc(title || 'Nothing selected')}</b>`
-      + `<div class="tiny dim">${esc(sub || '')}</div>`;
-    box.append(img, t);
+      + (sub ? `<div class="dp-sub">${esc(sub)}</div>` : '');
+    bar.append(t);
+    if (open) bar.append(el('span', 'dp-kebab', '⋮'));
+    box.append(bar);
+    box.onclick = open || null;
+    box.title = open ? 'Click to choose' : '';
+  }
+
+  /* One picker, used by both columns. It does NOT rebuild the list: it moves
+     the existing search box and list into a dialog and puts them back on
+     close. That keeps every behaviour they already have - the variant
+     grouping, the server's allowed-cars filter, the incremental repaint -
+     instead of a second implementation that would drift from the first. */
+  function openPicker(title, search, list, extra) {
+    const veil = el('div', 'pk-veil');
+    const box = el('div', 'pk-box');
+    const head = el('div', 'pk-head');
+    const h = el('h3', null, title);
+    const x = el('button', 'pk-x', '×');
+    const body = el('div', 'pk-body');
+
+    const home = list.parentNode;
+    const mark = document.createComment('picker');
+    home.insertBefore(mark, search);
+
+    // they sit hidden in the column between openings; the dialog is the only
+    // place they are meant to be seen
+    const wasSearch = search.style.display, wasList = list.style.display;
+    const wasExtra = extra ? extra.style.display : null;
+    search.style.display = '';
+    list.style.display = '';
+    if (extra) extra.style.display = '';
+    head.append(h, search, x);
+    if (extra) body.append(extra);
+    body.append(list);
+    box.append(head, body);
+    veil.append(box);
+    document.body.append(veil);
+    search.focus();
+
+    const close = () => {
+      // ⚠ put them back where they were, in order, or the next open finds
+      // them detached and the column is left empty
+      mark.parentNode.insertBefore(search, mark);
+      if (extra) mark.parentNode.insertBefore(extra, mark);
+      mark.parentNode.insertBefore(list, mark);
+      mark.remove();
+      search.style.display = wasSearch;
+      list.style.display = wasList;
+      if (extra) extra.style.display = wasExtra;
+      veil.remove();
+      document.removeEventListener('keydown', onKey);
+    };
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    x.onclick = close;
+    veil.onclick = e => { if (e.target === veil) close(); };
+    /* Picking something is the point of the dialog - shut it afterwards.
+
+       ⚠ NOT keyed on row.dataset.id. Only the car rows set it; track and
+       server rows never did, so tracks selected but the dialog stayed open
+       and had to be dismissed by hand. The one row that must NOT close is a
+       car's variant expander, and that is the only row with a caret in it -
+       so ask about the caret rather than about an id that most rows lack.
+       Buttons inside a row (List in browser) stopPropagation, so they never
+       reach this. */
+    list.addEventListener('click', e => {
+      const row = e.target.closest && e.target.closest('.drive-row');
+      if (row && !row.querySelector('.drive-caret')) setTimeout(close, 0);
+    });
+    return close;
   }
 
   function paintCars() {
@@ -584,7 +677,13 @@ async function drivePage() {
   }
 
   function paintSrvFilters() {
-    srvFilters.style.display = sel.via === 'server' ? '' : 'none';
+    // ⚠ Visible only INSIDE the picker. These filter the server list, and the
+    // list now lives in the dialog - left showing in the column they were a
+    // row of orphaned checkboxes filtering nothing. Keyed off where the node
+    // actually is, because this also runs while the dialog is open (the late
+    // server-list load repaints it) and must not hide it mid-use.
+    srvFilters.style.display =
+      (sel.via === 'server' && srvFilters.closest('.pk-veil')) ? '' : 'none';
     if (sel.via !== 'server' || srvFilters.dataset.ready) return;
     srvFilters.dataset.ready = '1';
     const sort = el('select');
@@ -885,7 +984,8 @@ async function drivePage() {
     paintHead(carHead,
       'api/thumb/car?id=' + encodeURIComponent((c && (c.model || c.id)) || ''),
       c ? c.label : 'Pick a car',
-      c ? c.id : '');
+      c ? c.id : '',
+      () => { paintCars(); openPicker('Choose a car', carSearch, carList); });
     if (sel.via === 'server') {
       const s = serverOf();
       paintHead(trkHead,
@@ -893,7 +993,11 @@ async function drivePage() {
         s ? s.name : 'Pick a public server',
         s ? `${s.track || ''} · ${s.players || 0}/${s.max_players || 0}`
           + ` · ${carsLine(s)}`
-          + (s.locked ? ' · password' : '') : '');
+          + (s.locked ? ' · password' : '') : '',
+        // the filter checkboxes belong WITH the list they filter, so they
+        // travel into the dialog too
+        () => { paintServers();
+                openPicker('Choose a server', trkSearch, trkList, srvFilters); });
       return;
     }
     if (sel.via === 'local') {
@@ -904,14 +1008,17 @@ async function drivePage() {
         s ? `${s.track || ''} · :${s.tcp_port}`
           + ` · ${carsLine(s)}`
           + (s.running ? ' · running' : ' · stopped')
-          + (s.no_lobby ? ' · private' : '') : '');
+          + (s.no_lobby ? ' · private' : '') : '',
+        () => { paintTracks();
+                openPicker('Choose your server', trkSearch, trkList); });
       return;
     }
     const t = trackOf(sel.track_index);
     paintHead(trkHead,
       'api/thumb/track?folder=' + encodeURIComponent((t && t.track) || ''),
       t ? (t.label || t.name) : 'Pick a track',
-      t ? `#${t.index} · ${t.layout || ''}` : '');
+      t ? `#${t.index} · ${t.layout || ''}` : '',
+      () => { paintTracks(); openPicker('Choose a track', trkSearch, trkList); });
   }
 
   function paintVia() {
