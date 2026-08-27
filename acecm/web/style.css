@@ -213,6 +213,23 @@ pre.log{
 .drive-pick.empty-pick{aspect-ratio:auto;padding:14px 12px}
 .drive-pick.empty-pick .dp-bar{position:static;background:none;padding:0}
 
+/* ⚠ A SERVER is not a car. Its picture is somebody else's track cover, its
+   name is a long line of text with a Discord invite in it, and it carries a
+   player count and an allowed-cars list - all of which wrapped over the photo
+   and read as a mess. Facts belong in a row; only the car gets the tile. */
+.drive-pick.row-pick{
+  aspect-ratio:auto;display:flex;gap:10px;align-items:center;padding:8px;
+  cursor:default;
+}
+.drive-pick.row-pick:hover{border-color:var(--line)}
+.drive-pick.row-pick img{
+  position:static;width:88px;height:56px;border-radius:7px;flex:none;
+}
+.drive-pick.row-pick .dp-bar{
+  position:static;background:none;padding:0;flex:1;min-width:0;
+}
+.drive-pick.row-pick b{font-size:13px}
+
 /* ---- picker overlay ---------------------------------------------------- */
 .pk-veil{
   position:fixed;inset:0;z-index:60;display:flex;align-items:center;
