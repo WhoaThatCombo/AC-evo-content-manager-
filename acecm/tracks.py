@@ -911,10 +911,13 @@ def _publish(display, folder):
     for e in registry.load():
         if folder in (e.get("required_tracks") or []):
             return {"id": e["id"], "new": False}
+    # ⚠ No ip/port here. Hardcoding them wrote ip='' and port=9700 into every
+    # entry a track import created, so a host with twenty tracks published
+    # twenty entries with no address and the same port - registry.upsert
+    # fills both in from this machine and its server profile.
     entry = registry.upsert({
         "name": f"{display} (hosted here)",
         "description": f"Content for {display} - installed by ACECM",
-        "ip": "", "port": 9700,
         "required_tracks": [folder],
         "public": True,
     })

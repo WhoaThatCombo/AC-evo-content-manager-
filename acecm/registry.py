@@ -24,7 +24,7 @@ import os
 import time
 import uuid
 
-from . import config, install
+from . import config, install, logs
 
 REGISTRY = os.path.join(config.DATA, "registry.json")
 HASHCACHE = os.path.join(config.DATA, "hashes.json")
@@ -117,8 +117,57 @@ def save(items):
     return items
 
 
+def _profile_port(profile_id=""):
+    """The game port a registry entry should advertise.
+
+    A linked profile is the answer when there is one. Otherwise, if this
+    machine runs exactly ONE server, that is unambiguously the server the
+    content belongs to - which covers the common case of a host who added
+    tracks and never touched the registry by hand.
+    """
+    try:
+        from . import servers
+        profs = servers.load()
+    except Exception:
+        return 0
+    if profile_id:
+        hit = next((p for p in profs if p.get("id") == profile_id), None)
+        if hit:
+            return int(hit.get("tcp_port") or 0)
+    if len(profs) == 1:
+        return int(profs[0].get("tcp_port") or 0)
+    return 0
+
+
+def autofill(entry):
+    """Fill in the address and port an entry did not set for itself.
+
+    ⚠ Entries used to be written with ip='' and port=9700 REGARDLESS - every
+    track import added one, so a host with twenty tracks had twenty entries
+    all claiming the same port and no address at all. The published join
+    string came out as "join::9700", and anything trying to work out which
+    server an entry belonged to had nothing to go on.
+
+    Only ever fills what is blank: a host who typed an address or a port
+    meant it, and this must not overwrite them on the next save.
+    """
+    if not (entry.get("ip") or "").strip():
+        try:
+            from . import netutil
+            entry["ip"] = netutil.public_ipv4() or ""
+        except Exception:
+            pass
+    # 9700 is the template default, so it is indistinguishable from "not set"
+    if not entry.get("port") or int(entry.get("port") or 0) == 9700:
+        port = _profile_port(entry.get("profile_id") or "")
+        if port:
+            entry["port"] = port
+    return entry
+
+
 def upsert(entry):
     entry = {**TEMPLATE, **entry}
+    autofill(entry)
     if not entry.get("id"):
         # ⚠ int(time.time()) collides for anything created in the same
         # second - two profiles made together got the SAME id and one
@@ -133,6 +182,28 @@ def upsert(entry):
 def remove(sid):
     save([e for e in load() if e["id"] != sid])
     return {"ok": True}
+
+
+def backfill():
+    """Fill in address and port on entries written before autofill existed.
+
+    Runs at startup. Entries already carrying both are left alone, so this
+    settles after one pass and costs nothing on every later boot.
+    """
+    items = load()
+    if not items:
+        return {"ok": True, "fixed": 0}
+    fixed = []
+    for e in items:
+        before = (e.get("ip") or "", int(e.get("port") or 0))
+        autofill(e)
+        if (e.get("ip") or "", int(e.get("port") or 0)) != before:
+            fixed.append(e.get("id"))
+    if fixed:
+        save(items)
+        logs.LOG.info("registry: filled in address/port on %d entr%s",
+                      len(fixed), "y" if len(fixed) == 1 else "ies")
+    return {"ok": True, "fixed": len(fixed)}
 
 
 # ---------------------------------------------------------------- manifest --
