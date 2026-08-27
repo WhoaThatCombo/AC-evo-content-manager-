@@ -290,10 +290,30 @@ def car_names():
     Client AND server folders. Drive used to read only the server side, so a
     mod that landed on the client (or whose server copy has no .json yet)
     never appeared in the Drive picker even though Content listed it.
+
+    ⚠ A mod with a .json and NO .kspkg contributes nothing. Deleting a car
+    usually removes the package and leaves the little manifest behind, and
+    reading names from that orphan kept the car in the list for ever - it
+    could not load, could not be rendered (there is no package to render
+    from), and picking it is a broken join. The package is what makes a car
+    real; the .json only names it.
+
+    Checked ACROSS sides, not per side: a mod legitimately arrives as a
+    package on one side and a manifest on the other, and requiring both in
+    the same folder would hide cars that are genuinely installed.
     """
+    packaged = set()
+    listings = {}
+    for which in ("server", "client"):
+        listings[which] = installed(which).get("mods", [])
+        for m in listings[which]:
+            if m.get("kspkg"):
+                packaged.add(m["name"])
     names = {}
     for which in ("server", "client"):
-        for m in installed(which).get("mods", []):
+        for m in listings[which]:
+            if m["name"] not in packaged:
+                continue
             for c in m["cars"]:
                 if c.get("id") and c["id"] not in names:
                     names[c["id"]] = c["label"]
