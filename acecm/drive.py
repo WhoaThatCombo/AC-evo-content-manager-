@@ -1458,9 +1458,16 @@ def direct_lookup(raw):
                     "needs_tracks": hit.get("required_tracks") or [],
                     "content_bytes": hit.get("content_bytes") or 0,
                     "base": got.get("base") or "",
+                    # what Get content needs to fetch from this host
+                    "sid": hit.get("id") or "",
                     "cars": []}
+        # ⚠ Several servers behind one ACECM and none on the pasted port. We
+        # cannot tell which one is meant, so offer them ALL to Get content
+        # rather than guessing - fetching content for a server you did not
+        # mean is slow, not wrong.
         return {"ok": True, "source": "acecm", "ip": host, "tcp": tcp,
                 "udp": tcp, "name": host, "base": got.get("base") or "",
+                "sids": [e.get("id") for e in entries if e.get("id")],
                 "note": f"{len(entries)} servers shared here - "
                         f"no entry on port {tcp}",
                 "cars": []}
