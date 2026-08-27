@@ -1445,9 +1445,15 @@ def direct_lookup(raw):
     if got.get("ok"):
         # an ACECM host can run several servers; prefer the one on this port
         entries = got.get("servers") or []
-        hit = next((e for e in entries
-                    if int(e.get("port") or 0) == tcp), None) or \
-            (entries[0] if len(entries) == 1 else None)
+        # ⚠ Only accept a port match when it is UNAMBIGUOUS. A registry entry
+        # defaults to 9700 and nothing forces a host to change it, so a
+        # machine running several servers usually has every entry claiming
+        # 9700 - taking "the first one on that port" would confidently fetch
+        # the wrong server's content. One match means one match; anything
+        # else falls through to offering them all.
+        onport = [e for e in entries if int(e.get("port") or 0) == tcp]
+        hit = onport[0] if len(onport) == 1 else (
+            entries[0] if len(entries) == 1 else None)
         if hit:
             return {"ok": True, "source": "acecm", "ip": host,
                     "tcp": int(hit.get("port") or tcp), "udp": tcp,
@@ -1465,11 +1471,18 @@ def direct_lookup(raw):
         # cannot tell which one is meant, so offer them ALL to Get content
         # rather than guessing - fetching content for a server you did not
         # mean is slow, not wrong.
+        ambiguous = len(onport) > 1
         return {"ok": True, "source": "acecm", "ip": host, "tcp": tcp,
                 "udp": tcp, "name": host, "base": got.get("base") or "",
                 "sids": [e.get("id") for e in entries if e.get("id")],
-                "note": f"{len(entries)} servers shared here - "
-                        f"no entry on port {tcp}",
+                "names": [e.get("name") or e.get("id") for e in entries],
+                "note": (f"{len(onport)} of this host's {len(entries)} servers "
+                         f"claim port {tcp}, so which one you mean is not "
+                         f"clear - Get content will fetch what they all need"
+                         if ambiguous else
+                         f"{len(entries)} servers shared here and none lists "
+                         f"port {tcp} - Get content will fetch what they all "
+                         f"need"),
                 "cars": []}
 
     return {"ok": True, "source": "unknown", "ip": host, "tcp": tcp,
