@@ -563,20 +563,39 @@ def remove(name, sides=None):
         dirs.append(mods_dir())
     if "client" in want:
         dirs.append(client_mods_dir())
-    gone = []
+    gone, stuck = [], []
     for d in dirs:
         if not d or not os.path.isdir(d):
             continue
         for ext in (".kspkg", ".json"):
             p = os.path.join(d, name + ext)
-            if os.path.exists(p):
+            if not os.path.exists(p):
+                continue
+            # ⚠ Never let one file stop the rest. These used to be bare
+            # os.remove calls, so a .kspkg the game or server still had open
+            # raised on the first file and abandoned everything after it -
+            # leaving a HALF-PAIR, which is the state this function exists to
+            # avoid. A lone .json goes on declaring its car with no package
+            # behind it (see car_names).
+            try:
                 os.remove(p)
                 gone.append(p)
+            except OSError as ex:
+                stuck.append(f"{p} ({ex.strerror or ex})")
     _unshare_name(mod=name)
     try:
         _refresh_lobby()
     except Exception:
         pass
+    # ⚠ Deleting is a content change like any other. Without this the car
+    # stayed in every list until ACECM was restarted, which reads as the
+    # delete having silently failed.
+    _after_content_change()
+    if stuck:
+        return {"ok": False, "removed": gone,
+                "error": "could not delete " + "; ".join(stuck)
+                         + " - close the game and stop the server, then "
+                           "remove it again"}
     return {"ok": bool(gone), "removed": gone}
 
 
