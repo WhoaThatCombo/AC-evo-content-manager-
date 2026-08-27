@@ -857,19 +857,44 @@ def _pid_on_port(port):
     return None
 
 
-def log_tail(profile, lines=120):
+def log_tail(profile, lines=120, since=0):
+    """The end of a server's log, or only what is new since `since` bytes.
+
+    `since` is what makes following it cheap: the viewer polls every couple of
+    seconds, and re-reading 200 KB to resend the same 120 lines each time is
+    pure waste. Pass the `size` from the previous reply and get back only what
+    has been written since, with the new size to pass next time.
+
+    ⚠ A log that got SMALLER was rotated or the server restarted, and the byte
+    offset the caller is holding now points into different content. Say so
+    (`reset`) and send the tail instead - continuing from the old offset
+    silently splices the middle of one run onto another.
+    """
     path = config.server_log(profile.get("log", "vai_server.log"))
     if not os.path.exists(path):
-        return {"lines": [], "error": "no log yet"}
+        return {"lines": [], "error": "no log yet", "size": 0}
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             size = fh.tell()
-            fh.seek(max(0, size - 200_000))
-            text = fh.read().decode("utf-8", "replace")
+            since = int(since or 0)
+            reset = since > size          # rotated or restarted
+            if since and not reset:
+                if since == size:
+                    return {"lines": [], "size": size, "reset": False}
+                fh.seek(since)
+                raw = fh.read()
+            else:
+                fh.seek(max(0, size - 200_000))
+                raw = fh.read()
+            text = raw.decode("utf-8", "replace")
     except OSError as ex:
-        return {"lines": [], "error": str(ex)}
+        return {"lines": [], "error": str(ex), "size": 0}
     keep = [l for l in text.splitlines()
             # the vAI message spam drowns everything useful
             if "ServerWorldTime" not in l]
-    return {"lines": keep[-lines:]}
+    # only the first read is trimmed - an incremental one is already short,
+    # and cutting it would drop lines the caller has never seen
+    if not since or reset:
+        keep = keep[-lines:]
+    return {"lines": keep, "size": size, "reset": bool(reset or not since)}
