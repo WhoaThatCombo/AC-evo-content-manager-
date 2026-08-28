@@ -561,6 +561,41 @@ def start(profile):
             logs.LOG.warning("auto-redeclare before start: %s", ex)
         bad = _custom_track_problem(profile)
         if bad:
+            # redeclare only puts back a row for a track whose FILES are
+            # already on the server's disk - it does nothing for one that
+            # was imported on the client and simply never deployed here at
+            # all. If that is what we are looking at, deploy it now rather
+            # than sending back an error that names the exact button in
+            # Content the user would otherwise have to go click themselves.
+            try:
+                from . import tracks as trackdeploy
+                want = (profile.get("custom_track") or "").strip().lower()
+                match = next((t for t in trackdeploy.importable()
+                             if t.get("ok")
+                             and (t.get("display_name") or "").strip().lower()
+                                 == want),
+                            None)
+                if match:
+                    dep = trackdeploy.deploy_native(
+                        match["path"], folder=match["folder"],
+                        # the NAME ON THE PROFILE is what has to resolve, not
+                        # necessarily what the client's own tracks.table
+                        # happens to call it - deploying under any other name
+                        # would leave _custom_track_problem finding nothing
+                        display_name=profile.get("custom_track"))
+                    if dep.get("ok"):
+                        logs.LOG.info(
+                            "auto-deployed '%s' (%s) before start - it was "
+                            "imported but never hosted here",
+                            profile.get("custom_track"), match["folder"])
+                    else:
+                        logs.LOG.warning(
+                            "auto-deploy of '%s' before start failed: %s",
+                            profile.get("custom_track"), dep.get("error"))
+            except Exception as ex:
+                logs.LOG.warning("auto-deploy before start: %s", ex)
+            bad = _custom_track_problem(profile)
+        if bad:
             return {"ok": False, "error": bad}
 
     # ⚠ The client and the server read car mods from DIFFERENT folders, so a
