@@ -270,6 +270,23 @@ def _game_running(exe=None):
     return bool(winproc.pids_named("AssettoCorsaEVO"))
 
 
+def _is_elevated():
+    """Are we running as admin?
+
+    ⚠ Decides whether launching the game ourselves can work at all. steam_api
+    checks ownership against the TOKEN OF THE PROCESS THAT STARTED THE GAME,
+    so a game started by an elevated ACECM is refused with "User has not
+    permission to run this product". Unknown counts as elevated: guessing
+    wrong in that direction only costs us the flags, guessing wrong the other
+    way costs the user a launch that silently never happens.
+    """
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return True
+
+
 def apply_redirect():
     """Overwrite the Kunos client URL slot with our local backend URL.
 
@@ -1210,6 +1227,13 @@ def launch_game(extra_args=None):
     # Steam relaunches with Arguments: 1 and drops argv. gflags still
     # reads FLAGS_* from the environment, so string flags like
     # startup_gamemode have to live here, not only on the command line.
+    # ⚠ A flag with no value was silently dropped here. `-no_intro` is a
+    # gflags BOOLEAN - it carries no "=value" - so the `"=" in a` gate meant
+    # it never became FLAGS_no_intro and never reached the game by any route
+    # except argv, which Steam throws away. Every recorded boot still shows
+    # the intro for exactly this reason. gflags reads a bool from the
+    # environment as the string "true".
+    flag_names = []
     for a in extra_args:
         if a.startswith("--"):
             a = a[2:]
@@ -1217,8 +1241,11 @@ def launch_game(extra_args=None):
             a = a[1:]
         if "=" in a:
             k, v = a.split("=", 1)
-            if k and v and k.isidentifier():
-                env["FLAGS_" + k] = v
+        else:
+            k, v = a, "true"
+        if k and v and k.isidentifier():
+            env["FLAGS_" + k] = v
+            flag_names.append(k)
     cwd = os.path.dirname(exe)
     flagfile = os.path.join(config.DATA, "evo.flags")
     try:
@@ -1235,8 +1262,15 @@ def launch_game(extra_args=None):
         open(flagfile, "w", encoding="ascii").write("\n".join(lines) + "\n")
         extra_args.append(f"--flagfile={flagfile}")
         extra_args.append(f"-flagfile={flagfile}")
-        extra_args.append("--fromenv=startup_gamemode,load_single_car,backend")
-        extra_args.append("--tryfromenv=startup_gamemode,load_single_car,backend")
+        # ⚠ Name every flag we actually set, not a hardcoded three. gflags
+        # only pulls a flag out of the environment if it is listed here, so a
+        # flag set in env but missing from this list is ignored - which is
+        # what happened to everything except the three that were written out
+        # by hand.
+        names = ",".join(sorted(set(
+            ["startup_gamemode", "load_single_car", "backend"] + flag_names)))
+        extra_args.append(f"--fromenv={names}")
+        extra_args.append(f"--tryfromenv={names}")
     except OSError:
         pass
     # steam:// is a no-op (or a permission toast) if Steam is still
@@ -1256,7 +1290,50 @@ def launch_game(extra_args=None):
     # opens. steam:// goes through the unelevated Steam client, which is
     # the same path as the Play button. rdata already has our lobby URL;
     # Steam still drops argv.
-    via, cmd = _start_via_steam(appid)
+    # ⚠ Only launch it ourselves when there is something to gain. steam://
+    # delivers NEITHER argv nor environment - explorer hands the URL to the
+    # already-running Steam, which spawns the game from its own environment -
+    # so every flag was being dropped on the floor. Starting the exe directly
+    # is the only route that carries them, but it is refused when our token
+    # cannot claim ownership, so it is used only when flags are actually
+    # wanted and only when we are not elevated, and it falls back the moment
+    # it does not take.
+    # ⚠ Strip the dashes before comparing. Every one of these is appended in
+    # BOTH -x and --x form, so matching only the double-dash spelling left
+    # the single-dash copy in the list and made "no flags wanted" impossible -
+    # the direct path was taken on every launch, including ones with nothing
+    # to deliver.
+    _plumbing = ("flagfile", "fromenv", "tryfromenv")
+    want_flags = [a for a in extra_args
+                  if not a.lstrip("-").startswith(_plumbing)]
+    via = None
+    tried_direct = None
+    if want_flags and not _is_elevated():
+        env["SteamAppId"] = appid
+        env["SteamGameId"] = appid
+        cmd = [exe, f"-backend={url}", f"--backend={url}"]
+        cmd.extend(extra_args)
+        try:
+            subprocess.Popen(cmd, cwd=cwd, env=env)
+            # ⚠ Wait, then check it is STILL there. The process exists within
+            # half a second of Popen whether or not Steam will accept it -
+            # the refusal comes later, once steam_api has initialised and
+            # checked ownership. Breaking out at the first sight of the
+            # process would call a launch that is about to be refused a
+            # success, and never fall back.
+            time.sleep(8)
+            if _game_running():
+                via = "exe"
+                tried_direct = "ok"
+            else:
+                tried_direct = "refused or exited within 8s"
+        except OSError as ex:
+            tried_direct = f"failed: {ex}"
+        if not via:
+            logs.LOG.info("direct launch %s - falling back to Steam "
+                          "(flags will not reach the game)", tried_direct)
+    if not via:
+        via, cmd = _start_via_steam(appid)
     if not via:
         env["SteamAppId"] = appid
         env["SteamGameId"] = appid
@@ -1268,11 +1345,19 @@ def launch_game(extra_args=None):
                   rdata_patched=probe_client_url().get("rdata_patched"),
                   inspector_patched=probe_inspector().get("inspector_patched"),
                   steam=steam,
+                  # ⚠ via=exe is the ONLY route that carries these. Anything
+                  # else means they were prepared and thrown away, which is
+                  # exactly the thing that went unnoticed for 85 boots - so
+                  # say plainly whether they landed.
+                  flags_delivered=(via == "exe"),
+                  direct_launch=tried_direct,
                   flags_env={k: env[k] for k in env if k.startswith("FLAGS_")})
     return {"ok": True, "via": via, "backend": url,
             "rdata_patched": probe_client_url().get("rdata_patched"),
             "inspector_patched": probe_inspector().get("inspector_patched"),
             "patch": patch, "inspector": inspector, "steam": steam,
+            "flags_delivered": via == "exe",
+            "direct_launch": tried_direct,
             "flags_env": {k: env[k] for k in env if k.startswith("FLAGS_")}}
 
 
