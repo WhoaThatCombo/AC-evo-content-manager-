@@ -1846,7 +1846,16 @@ function editor(prof, trk, opts, extra) {
     const s = el('select');
     const stock = el('optgroup');
     stock.label = 'Stock tracks';
-    trk.forEach(t => {
+    // ⚠ NOT trk.forEach - trk is content.tracks(), which also carries a
+    // synthetic entry per imported track (index 10000+n, so Drive's picker
+    // can offer them too) alongside the real ones. Those same tracks are
+    // ALSO in "Deployed tracks" below, by name, which is the only address
+    // the server understands for one. Listing them here too let this exact
+    // synthetic index be picked and saved as track_index with no
+    // custom_track set - a number events_practice.json has maybe 40 entries
+    // for, not 10000+ - so the launcher's events[EVENT_IDX] died before it
+    // ever reached the CUSTOM_EVENT it needed.
+    trk.filter(t => !t.mod).forEach(t => {
       const o = el('option', null, esc(t.label));
       o.value = 'idx:' + t.index;
       if (!prof.custom_track && String(t.index) === String(prof.track_index))

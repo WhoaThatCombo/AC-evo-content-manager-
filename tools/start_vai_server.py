@@ -176,7 +176,23 @@ def main():
         "EVENTS_FILE",
         "events_race_weekend.json" if "RACE" in GAME_MODE.upper()
         else "events_practice.json")
-    ev = _load_catalog(events_file)["events"][EVENT_IDX]
+    catalog_events = _load_catalog(events_file)["events"]
+    event_idx = EVENT_IDX
+    if not (0 <= event_idx < len(catalog_events)):
+        # ⚠ Recover, do not just die. A profile can hold a STALE index - the
+        # Servers page used to be able to save one that was never a real
+        # event index at all (a Drive-picker-internal placeholder for an
+        # imported track, meant to travel with CUSTOM_EVENT, not instead of
+        # it) - and refusing to start over it left someone with a server that
+        # would never come up until they noticed and re-picked the track by
+        # hand. Falling back to event 0 is visibly wrong in the log rather
+        # than invisibly wrong as a crash with no server at all.
+        print(f"EVENT_IDX={event_idx} is out of range for {events_file} "
+              f"({len(catalog_events)} events) - falling back to event 0. "
+              f"Re-pick the track for this server if it does not race what "
+              f"you expect.")
+        event_idx = 0
+    ev = catalog_events[event_idx]
     # ⚠ A custom track is not IN events_*.json - those list the stock events
     # only, so an index can never name one. CUSTOM_EVENT carries the whole
     # event as JSON instead:
