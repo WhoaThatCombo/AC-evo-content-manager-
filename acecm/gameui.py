@@ -395,6 +395,46 @@ def hud_page():
     return None
 
 
+_BACK_TO_PIT = """
+(function(){
+  if (typeof ksUI === 'undefined') return 'no-ksUI';
+  try {
+    ksUI.requestNoResponse('GameMode', 'BackToPit');
+    return 'sent';
+  } catch (e) { return 'error:' + String((e && (e.message || e)) || e); }
+})()
+"""
+
+
+def back_to_pit():
+    """Send the car to the pitlane, right now.
+
+    Exactly what the pause menu's "Go to Pitlane" does - `onPitlane` is
+    `ksUI.requestNoResponse('GameMode','BackToPit')`. Nothing is faked and no
+    input is synthesised; the game's own command is called directly.
+
+    ⚠ The MENU BUTTON is gated, the command is not. Its data-bind-if hides it
+    unless a session is running and time_in_pits <= 0, which is why you cannot
+    reach it from the wheel mid-lap. The command underneath has no such check,
+    which is what makes this work while moving - measured going from 167 km/h
+    to a standstill in the pitlane.
+
+    ⚠ Verified in single-player Practice only. BackToPit is fire-and-forget
+    (requestNoResponse), so in multiplayer the SERVER decides whether to
+    honour it and there is nothing here that can force it - a server that
+    ignores it will simply do nothing, with no error to report.
+    """
+    page = hud_page()
+    if not page:
+        return {"ok": False, "error": "not in a session"}
+    r = js_value(evaluate(_BACK_TO_PIT, page=page, timeout=6, attempts=2))
+    if not r or not r.get("ok"):
+        return {"ok": False, "error": (r or {}).get("error") or "no answer"}
+    val = r.get("value")
+    return {"ok": val == "sent", "state": val,
+            "error": None if val == "sent" else str(val)}
+
+
 def set_mph(on=True):
     """Show the speedometer in mph. Returns what the page reported."""
     page = hud_page()

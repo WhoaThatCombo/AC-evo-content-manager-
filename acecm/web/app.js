@@ -3017,6 +3017,52 @@ async function settingsPage() {
   hlab.append(hbox, document.createTextNode(' Speedometer in mph'));
   hrow.append(hlab);
   hud.append(hrow);
+
+  // ---- back to pits on a button -----------------------------------------
+  hud.append(el('h2', null, 'Back to pits'));
+  hud.append(el('div', 'tiny dim',
+    'Sends the car to the pitlane immediately, even at speed. The game can '
+    + 'already do this — its own button just lives in the pause menu and is '
+    + 'hidden while you are on track. Bind a wheel, button box or controller '
+    + 'button to reach it without pausing.'));
+  const prow = el('div', 'row wrap');
+  prow.style.marginTop = '8px';
+  const bound = el('span', 'pill ' + (cfg.pit_btn_mask ? 'on' : 'off'));
+  bound.innerHTML = '<i class="dot"></i>'
+    + esc(cfg.pit_btn_label || 'not bound');
+  const bind = el('button', 'sm primary', 'Bind a button');
+  bind.onclick = async () => {
+    const was = bind.textContent;
+    bind.disabled = true;
+    bind.textContent = 'Press it now…';
+    const r = await apiLong('pit/capture', { seconds: 6 }, 20000);
+    bind.disabled = false;
+    bind.textContent = was;
+    if (!r || !r.ok) { toast((r && r.error) || 'nothing pressed', true); return; }
+    const s = await api('pit/bind',
+      { kind: r.kind, id: r.id, mask: r.mask, label: r.label });
+    if (s && s.error) { toast(s.error, true); return; }
+    toast('Bound to ' + r.label);
+    settingsPage();
+  };
+  const clear = el('button', 'sm', 'Clear');
+  clear.onclick = async () => {
+    await api('pit/bind', { kind: '', id: '', mask: 0, label: '' });
+    toast('Binding cleared');
+    settingsPage();
+  };
+  const test = el('button', 'sm', 'Test now');
+  test.title = 'Send the car to the pits right now';
+  test.onclick = async () => {
+    const r = await api('pit/go', {});
+    toast(r && r.ok ? 'Sent to pits'
+                    : ((r && r.error) || 'not in a session'), !(r && r.ok));
+  };
+  prow.append(bound, bind, clear, test);
+  hud.append(prow);
+  hud.append(el('div', 'tiny dim',
+    'Verified in single-player. In multiplayer the server decides whether to '
+    + 'honour it, so it may simply do nothing.'));
   p.append(hud);
 
   // Install to a permanent folder + Start Menu shortcut, so the exe never has
