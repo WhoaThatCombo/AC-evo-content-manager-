@@ -976,10 +976,24 @@ def _track_conflict(folder, dest, incoming_sizes, label=None):
     }
 
 
+def _content_ok(rel):
+    """Is this a file type game content is actually made of?
+
+    Same allowlist Get content uses. A dropped archive is a file the user
+    chose rather than one a stranger pushed, so this is a lighter touch: it
+    keeps an executable from riding along inside a track pack without
+    refusing archives that carry a readme.
+    """
+    from .contentsync import _content_allowed
+    return _content_allowed(rel)
+
+
 def _extract_archive(path, dest):
-    """Unpack a track pack into dest. Members cannot escape dest."""
+    """Unpack a track pack into dest. Members cannot escape dest, and only
+    content file types are written - see _content_ok."""
     from .contentsync import _under
     os.makedirs(dest, exist_ok=True)
+    skipped = []
     low = path.lower()
     root = _archive_root(_archive_names(path))
     if low.endswith(".zip"):
@@ -996,6 +1010,14 @@ def _extract_archive(path, dest):
                 rel = info.filename.replace("\\", "/").lstrip("/")
                 if not rel or rel.endswith("/") or ".." in rel.split("/"):
                     continue
+                # ⚠ SKIP, do not fail. A track zip from the wild often carries
+                # a readme or a preview picture, and refusing the whole
+                # archive over one of those would break installs that are
+                # perfectly fine. The track still lands; what is not content
+                # simply does not.
+                if not _content_ok(rel):
+                    skipped.append(rel)
+                    continue
                 if os.path.basename(rel) == "acecm_track.json":
                     target = _under(dest, "acecm_track.json")
                 else:
@@ -1010,6 +1032,7 @@ def _extract_archive(path, dest):
                 with z.open(info) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
                 ingest_step(info.file_size, os.path.basename(rel))
+        _log_skipped(path, skipped)
         return dest
     import tarfile
     with tarfile.open(path, "r:*") as tar:
@@ -1019,6 +1042,9 @@ def _extract_archive(path, dest):
             rel = _archive_rel(info.name, root)
             if not rel:
                 continue
+            if not _content_ok(rel):
+                skipped.append(rel)
+                continue
             target = _under(dest, *[p for p in rel.split("/") if p])
             os.makedirs(os.path.dirname(target), exist_ok=True)
             src = tar.extractfile(info)
@@ -1027,7 +1053,24 @@ def _extract_archive(path, dest):
             with src, open(target, "wb") as dst:
                 shutil.copyfileobj(src, dst)
             ingest_step(info.size, os.path.basename(rel))
+    _log_skipped(path, skipped)
     return dest
+
+
+def _log_skipped(path, skipped):
+    """Say what was left out, loudly enough to notice but not to alarm.
+
+    ⚠ Worth logging by name. Most of these are readmes, and a silent skip
+    would look like a broken install if someone went looking for one - but an
+    .exe in a track pack is worth being able to point at afterwards.
+    """
+    if not skipped:
+        return
+    from . import logs
+    logs.LOG.warning("%s: skipped %d non-content file(s): %s",
+                     os.path.basename(path), len(skipped),
+                     ", ".join(skipped[:8])
+                     + (" …" if len(skipped) > 8 else ""))
 
 
 def install_track_pack(path, folder=None, overwrite=False):
