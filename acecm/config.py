@@ -42,6 +42,10 @@ DEFAULTS = {
     # letting the process die a few seconds in, so finding out costs a wait.
     # Paying that once is fine; paying it on every launch is not.
     "direct_launch_refused": False,
+    # EVO has no units setting; the speedometer is hard-wired to km/h. This
+    # redraws it in mph in the running HUD - nothing on disk changes, so a
+    # launch straight from Steam is unaffected.
+    "hud_mph": False,
     # Dedicated server install. Empty = look for it on first run; a shipped
     # build cannot assume the developer's own folder layout.
     "server_dir": "",

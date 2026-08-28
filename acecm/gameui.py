@@ -282,6 +282,104 @@ _GOTO = """
 })()
 """
 
+# ---- speedometer in mph -------------------------------------------------
+# EVO has no units setting: "mph" appears nowhere in the client binary and
+# nowhere in its UI code, and the speedo is hard-wired as
+#
+# <div class="value" data-bind-value="{{ModelCurrentCar.display_speed_kmh}}">
+# <div class="unit">km/h</div>
+#
+# ⚠ DISPLAY ONLY. display_speed_kmh is also read by the pit limiter
+# (`slow-down` above 60, `moving` above 20). Converting the underlying value
+# would quietly move the pit-limiter warnings to 37 and 12 mph, so the number
+# the engine binds is left exactly as it is and only what is drawn changes.
+#
+# ⚠ The engine owns the bound div and rewrites it every frame. Rather than
+# fight it - which means either a write loop or reading back our own output
+# and converting twice - the bound div is hidden and a clone we own is shown
+# next to it. The engine keeps writing km/h where nobody can see it, and we
+# read that and write mph. Same element, same classes, so it inherits the
+# same styling and looks unchanged.
+_MPH = """
+(function(){
+  var host = document.querySelector('.speed .value[data-bind-value]');
+  if (!host) return 'no-speedo';
+  var box = host.parentNode;
+  if (box.querySelector('.acecm-mph')) return 'already';
+  var mirror = host.cloneNode(false);
+  mirror.className = host.className + ' acecm-mph';
+  mirror.removeAttribute('data-bind-value');
+  host.style.display = 'none';
+  box.insertBefore(mirror, host.nextSibling);
+  var unit = box.querySelector('.unit');
+  if (unit) unit.textContent = 'mph';
+  var paint = function(){
+    var n = parseFloat((host.textContent || '').trim());
+    mirror.textContent = isFinite(n) ? String(Math.round(n * 0.621371)) : '';
+  };
+  paint();
+  // the engine writes into host, never into mirror, so this cannot see its
+  // own output and needs no re-entry guard
+  new MutationObserver(paint).observe(
+      host, {childList: true, characterData: true, subtree: true});
+  return 'mph-on';
+})()
+"""
+
+_MPH_OFF = """
+(function(){
+  var box = document.querySelector('.speed');
+  if (!box) return 'no-speedo';
+  var m = box.querySelector('.acecm-mph');
+  if (m) m.remove();
+  var host = box.querySelector('.value[data-bind-value]');
+  if (host) host.style.display = '';
+  var unit = box.querySelector('.unit');
+  if (unit) unit.textContent = 'km/h';
+  return 'mph-off';
+})()
+"""
+
+
+def hud_page():
+    """The inspector page that is the HUD, specifically.
+
+    ⚠ NOT menu_page(). That returns the first view matching menu.html,
+    singleplayer.html OR ingame.html, so with the menu still alive it hands
+    back the menu - and the HUD script would silently find no speedometer.
+
+    ⚠ TWO documents, not one. The view is ingame.html while you are in the
+    pit menu and becomes hud.html once you are actually driving - same view
+    id, different page. Matching only ingame.html found the HUD in the pits
+    and lost it the moment it mattered.
+
+    ⚠ Also not the car's dashboard. A car's own displays are separate views
+    (content/cars/<car>/displays/display.html) with their own speed readouts,
+    and those are part of the car's modelled interior - not ours to rewrite.
+    """
+    try:
+        views = list_views()
+    except Exception:
+        return None
+    for v in views:
+        url = (v.get("url") or "").lower()
+        if "uiresources/hud.html" in url or "uiresources/ingame.html" in url:
+            return str(v.get("id") or "0")
+    return None
+
+
+def set_mph(on=True):
+    """Show the speedometer in mph. Returns what the page reported."""
+    page = hud_page()
+    if not page:
+        return {"ok": False, "error": "the HUD is not open"}
+    r = js_value(evaluate(_MPH if on else _MPH_OFF, page=page,
+                          timeout=8, attempts=2))
+    if not r or not r.get("ok"):
+        return {"ok": False, "error": (r or {}).get("error") or "no answer"}
+    return {"ok": True, "state": r.get("value")}
+
+
 _START = """
 (async function(){
   if ((location.href||'').indexOf('singleplayer') < 0) return 'not-on-sp';
