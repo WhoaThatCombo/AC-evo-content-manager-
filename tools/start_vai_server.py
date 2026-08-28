@@ -316,8 +316,31 @@ def main():
     # MUST go to a file THIS process keeps open until the exe exits —
     # ACECM's last_start.log is closed when Start returns and must not
     # be inherited.
+    # ⚠ Sanitise the environment, and do it HERE rather than only in the
+    # caller. When ACECM is frozen this script IS ACECM re-invoked with
+    # --tool, so it unpacks a fresh %TEMP%\_MEIxxxxxx of its own and puts it
+    # on PATH - cleaning the environment before starting this process buys
+    # nothing, because this process creates the problem again.
+    #
+    # The server then resolves VCRUNTIME140.dll out of OUR bundle instead of
+    # the one beside it. A crash dump of somebody's server showed exactly
+    # that, followed by an unhandled C++ exception, while the same server
+    # started from Kunos's own launcher was fine. Reproduced here before the
+    # fix and confirmed gone after it.
+    child_env = dict(os.environ)
+    _path = child_env.get("PATH") or child_env.get("Path") or ""
+    if _path:
+        _keep = [x for x in _path.split(os.pathsep) if x and "_MEI" not in x.upper()]
+        for _k in ("PATH", "Path"):
+            if _k in child_env:
+                child_env[_k] = os.pathsep.join(_keep)
+    for _k in ("_MEIPASS", "_MEIPASS2", "_PYI_APPLICATION_HOME_DIR",
+               "_PYI_ARCHIVE_FILE", "_PYI_PARENT_PROCESS_LEVEL"):
+        child_env.pop(_k, None)
+
     log_f = open(LOG, "w", encoding="utf-8", errors="replace")
-    popen_kw = {"cwd": SRV, "stdout": log_f, "stderr": subprocess.STDOUT}
+    popen_kw = {"cwd": SRV, "stdout": log_f, "stderr": subprocess.STDOUT,
+                "env": child_env}
     if sys.platform == "win32":
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW

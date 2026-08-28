@@ -141,6 +141,41 @@ def stage_tools():
     return have, missing
 
 
+_CRT_FILTER = '''
+# --- injected by build.py: never ship the Visual C++ runtime -------------
+# See the note in build.py. A bundled CRT is inherited by every child
+# process ACECM starts and crashed a user's dedicated server.
+_CRT = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
+        "concrt140.dll")
+a.binaries = TOC([(n, p, t) for (n, p, t) in a.binaries
+                  if os.path.basename(n).lower() not in _CRT])
+'''
+
+
+def _rebuild_without_crt(args):
+    """Strip the CRT out of the spec PyInstaller wrote, then build from it."""
+    spec = os.path.join(HERE, "ACECM.spec")
+    if not os.path.isfile(spec):
+        print("  ! no spec to patch - CRT may still be bundled")
+        return 0
+    src = open(spec, encoding="utf-8").read()
+    if "injected by build.py" in src:
+        return 0
+    if "pyz = PYZ(" not in src:
+        print("  ! spec shape unexpected - not patching")
+        return 0
+    if "import os" not in src.split("\n")[0:6]:
+        src = "import os\n" + src
+    src = src.replace("pyz = PYZ(", _CRT_FILTER + "\npyz = PYZ(", 1)
+    open(spec, "w", encoding="utf-8").write(src)
+    print("re-running PyInstaller without the bundled CRT ...")
+    r = subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm",
+                        "--distpath", DIST,
+                        "--workpath", os.path.join(HERE, "build_tmp"),
+                        spec], cwd=HERE)
+    return r.returncode
+
+
 def build(clean=False):
     have, missing = stage_tools()
     if not have:
@@ -201,6 +236,26 @@ def build(clean=False):
     r = subprocess.run(args, cwd=HERE)
     if r.returncode:
         return r.returncode
+    # ⚠ Second pass, and it is not optional. PyInstaller bundles the Visual
+    # C++ runtime and unpacks it into %TEMP%\_MEIxxxxxx, so every program
+    # ACECM starts resolves its C runtime out of OUR folder instead of its
+    # own. A crash dump of somebody's dedicated server showed it running
+    # _MEI133842\VCRUNTIME140.dll and dying with an unhandled C++ exception;
+    # the same server from Kunos's own launcher, same machine, same ports,
+    # was fine. We bundle 14.42 while a current Windows has 14.51, so the
+    # server ran MSVCP140 14.51 against VCRUNTIME140 14.42.
+    #
+    # There is no command-line switch to drop a bundled DLL, and PyInstaller
+    # rewrites the spec on every CLI run - so edit the spec it just wrote and
+    # build once more from it.
+    #
+    # ⚠ Safe HERE specifically: the game and its server both link MSVCP140
+    # from System32, which only the VC++ redistributable installs, so anyone
+    # who can run AC EVO already has the matched runtime. Not a safe default
+    # for an app whose users might not.
+    rc = _rebuild_without_crt(args)
+    if rc:
+        return rc
     exe = os.path.join(DIST, "ACECM.exe")
     if os.path.isfile(exe):
         mb = os.path.getsize(exe) / 1024 / 1024

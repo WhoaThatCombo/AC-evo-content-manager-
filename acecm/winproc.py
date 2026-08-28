@@ -4,8 +4,45 @@ ACECM used to spawn powershell.exe for Get-Process / Get-CimInstance. Each
 call flashed a console and Windows toasted it. Toolhelp / psapi stay in-process.
 """
 import ctypes
+import os
 import struct
 from ctypes import wintypes
+
+
+def child_env(env=None):
+    """A copy of the environment safe to hand to a program that is not us.
+
+    ⚠ A FROZEN ACECM unpacks itself into %TEMP%\\_MEIxxxxxx and that folder
+    ends up on PATH, so every child we start searches OUR bundle for DLLs
+    before its own. Proven from a crash dump of somebody's dedicated server:
+    it had loaded
+
+        C:\\Users\\<them>\\AppData\\Local\\Temp\\_MEI133842\\VCRUNTIME140.dll
+
+    - ACECM's C runtime, not the one beside the server exe - and died with an
+    unhandled C++ exception. The same server started from Kunos's own
+    launcher on the same machine, with the same ports, was fine. Nothing was
+    wrong with their firewall; we were poisoning the child's DLL search path.
+
+    ⚠ Matched by CONTENT, not by comparing with sys._MEIPASS. A user can be
+    running a second copy of ACECM, and an entry from ITS bundle is just as
+    wrong for our child as one from ours.
+    """
+    out = dict(os.environ if env is None else env)
+    path = out.get("PATH") or out.get("Path") or ""
+    if path:
+        keep = [p for p in path.split(os.pathsep)
+                if p and "_MEI" not in p.upper()]
+        for key in ("PATH", "Path"):
+            if key in out:
+                out[key] = os.pathsep.join(keep)
+    # PyInstaller's own breadcrumbs. A frozen child of a frozen parent reads
+    # these and can decide it is running inside our bundle.
+    for key in ("_MEIPASS", "_MEIPASS2", "_PYI_APPLICATION_HOME_DIR",
+                "_PYI_ARCHIVE_FILE", "_PYI_PARENT_PROCESS_LEVEL"):
+        out.pop(key, None)
+    return out
+
 
 CREATE_NO_WINDOW = 0x08000000
 TH32CS_SNAPPROCESS = 0x00000002

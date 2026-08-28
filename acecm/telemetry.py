@@ -296,7 +296,9 @@ def start(profile_id, baseline_ai=False):
     if not os.path.isfile(script):
         return {"ok": False, "error": f"not found: {script}"}
 
-    env = dict(os.environ)
+    # never hand a child our frozen bundle's PATH - see winproc.child_env
+    from . import winproc as _wp
+    env = _wp.child_env()
     # ⚠ Tell the tool WHERE the server is. A frozen build unpacks these
     # scripts into a temp folder, so a tool that resolves the server dir
     # from its own __file__ finds nothing there - no exe, no events
