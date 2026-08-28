@@ -2993,6 +2993,32 @@ async function settingsPage() {
   const p = $('#page');
   p.innerHTML = '';
 
+  // ---- in-game HUD -------------------------------------------------------
+  const hud = el('div', 'card');
+  hud.innerHTML = '<h2>In-game HUD</h2>'
+    + '<div class="tiny dim" style="margin-bottom:10px">EVO has no units '
+    + 'setting — the speedometer is hard-wired to km/h. This redraws it in '
+    + 'mph while the game is running, and looks the same otherwise. Nothing '
+    + 'on disk changes, so launching straight from Steam is unaffected.</div>';
+  const hrow = el('div', 'row wrap');
+  const hlab = el('label', 'ctl');
+  const hbox = el('input');
+  hbox.type = 'checkbox';
+  hbox.checked = !!cfg.hud_mph;
+  hbox.onchange = async () => {
+    const r = await api('config', { hud_mph: hbox.checked });
+    if (r && r.error) { toast(r.error, true); hbox.checked = !hbox.checked; return; }
+    // apply straight away if a session is up, rather than at the next poll
+    const now = await api('hud/mph', { on: hbox.checked });
+    toast(now && now.ok
+      ? (hbox.checked ? 'Speedometer set to mph' : 'Speedometer back to km/h')
+      : (hbox.checked ? 'Saved — applies when the HUD is up' : 'Saved'));
+  };
+  hlab.append(hbox, document.createTextNode(' Speedometer in mph'));
+  hrow.append(hlab);
+  hud.append(hrow);
+  p.append(hud);
+
   // Install to a permanent folder + Start Menu shortcut, so the exe never has
   // to be hunted down again.
   const ins = await api('install');

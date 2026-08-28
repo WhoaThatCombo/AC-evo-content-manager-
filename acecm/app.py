@@ -17,7 +17,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
 from . import (backend, config, content, contentsync, detect, drive,
-               hooking, install,
+               gameui, hooking, install,
                installer,
                logs, lobby, netutil, overview, patching, penalties, realai,
                version,
@@ -722,6 +722,8 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("id") or body.get("local_id")))
             if path == "/api/config":
                 return _json(self, config.save(body))
+            if path == "/api/hud/mph":
+                return _json(self, gameui.set_mph(bool(body.get("on"))))
             return _json(self, {"error": "unknown endpoint"}, 404)
         except Exception as ex:
             logs.exception(f"POST {self.path}", ex, body=body)
@@ -961,6 +963,31 @@ def _watch_lobby():
     threading.Thread(target=run, daemon=True).start()
 
 
+def _watch_hud():
+    """Keep the HUD showing mph while the setting is on.
+
+    ⚠ Re-applied rather than applied once. The HUD page is torn down and
+    rebuilt every time you leave and re-enter a session, taking our element
+    with it, so a single injection lasts exactly one session. The script
+    itself is idempotent - it answers 'already' when its element is there -
+    so simply asking again is the whole recovery mechanism.
+
+    Only ever touches a game that is already running with the inspector open,
+    which is one ACECM started. A launch straight from Steam is untouched.
+    """
+    def run():
+        while True:
+            try:
+                if config.CFG.get("hud_mph") and gameui.listening():
+                    if gameui.hud_page():
+                        gameui.set_mph(True)
+            except Exception as ex:
+                logs.LOG.debug("hud mph: %s", ex)
+            time.sleep(5)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _rescan_content():
     """Forget what content we THINK exists, and look again.
 
@@ -1086,6 +1113,7 @@ def serve():
     except Exception as ex:
         logs.LOG.warning("registry backfill: %s", ex)
     _watch_lobby()
+    _watch_hud()
     port = config.CFG["ui_port"]
     # ⚠ 127.0.0.1 made the window work and made content sharing a lie.
     # Get content probes this HTTP port on the game server's IP. Bound
