@@ -23,7 +23,7 @@ Settings, server profiles, logs, and thumbnails live in `%LOCALAPPDATA%\ACECM`. 
 ```
 ACECM.exe              native window (default)
 ACECM.exe --browser    open in your default browser
-ACECM.exe --headless   API only (for Studio or another client)
+ACECM.exe --headless   API only
 ```
 
 ## Quick start
@@ -104,10 +104,6 @@ Leave **proxy** on unless you need a fully offline lobby.
 | Dedicated TCP / HTTP | `default_tcp_port` 9700, `default_http_port` 8080 |
 
 Detect walks Steam libraries for `AssettoCorsaEVO.exe` and `AssettoCorsaEVOServer.exe`. Settings overrides always win.
-
-## Companion UI — ACECM Studio
-
-Studio is a separate Drive-first UI that uses this same local API: cached car lists and thumbnails, and an in-app first-run guide. It does not live in this repository and does not modify ACECM. Run ACECM as usual, or `ACECM.exe --headless` if Studio should own the window, then start Studio (`python studio.py` → http://127.0.0.1:8765).
 
 ## Build from source
 
