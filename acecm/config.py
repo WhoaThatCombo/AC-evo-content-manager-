@@ -36,6 +36,12 @@ else:
 DATA = os.environ.get("ACECM_DATA") or os.path.join(ROOT, "data")
 
 DEFAULTS = {
+    # ⚠ Remembered, not re-tested every launch. Starting the game ourselves is
+    # the only way to pass it flags, but Steam refuses it when our token
+    # cannot claim ownership (elevated, or Family Share) - and it refuses by
+    # letting the process die a few seconds in, so finding out costs a wait.
+    # Paying that once is fine; paying it on every launch is not.
+    "direct_launch_refused": False,
     # Dedicated server install. Empty = look for it on first run; a shipped
     # build cannot assume the developer's own folder layout.
     "server_dir": "",
