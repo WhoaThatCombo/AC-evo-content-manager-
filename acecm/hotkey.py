@@ -171,6 +171,76 @@ def capture(seconds=6.0):
     return {"ok": False, "error": "no button pressed"}
 
 
+# ---- keyboard ------------------------------------------------------------
+_VK = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12}
+for _c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789":
+    _VK[_c.lower()] = ord(_c)
+for _n in range(1, 13):
+    _VK[f"f{_n}"] = 0x6F + _n
+
+
+def parse_combo(text):
+    """'ctrl+y' -> ([0x11], 0x59). Unknown names give (None, None)."""
+    parts = [p.strip().lower() for p in str(text or "").split("+") if p.strip()]
+    if not parts:
+        return None, None
+    mods, key = [], None
+    for p in parts:
+        if p in ("ctrl", "shift", "alt"):
+            mods.append(_VK[p])
+        elif p in _VK:
+            key = _VK[p]
+        else:
+            return None, None
+    return (mods, key) if key else (None, None)
+
+
+def _down(vk):
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        return bool(user32.GetAsyncKeyState(int(vk)) & 0x8000)
+    except Exception:
+        return False
+
+
+def combo_held(text):
+    """Is this key combination held right now?
+
+    ⚠ GetAsyncKeyState, not RegisterHotKey. RegisterHotKey would take the
+    combination system-wide and away from everything else, and needs a
+    message loop; this only asks what is currently down, so nothing is
+    reserved and the game is unaffected.
+    """
+    mods, key = parse_combo(text)
+    if not key:
+        return False
+    return all(_down(m) for m in mods) and _down(key)
+
+
+def game_focused():
+    """Is the game the window in front?
+
+    ⚠ The keyboard combination is only honoured when it is. GetAsyncKeyState
+    is not focus-aware - it reports the key wherever it was pressed - and
+    ctrl+y is 'redo' in most editors, so without this, hitting redo in a text
+    editor would teleport the car of a session running behind it. A bound
+    wheel/controller button needs no such check: nothing else on the desktop
+    is listening to it.
+    """
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, buf, 256)
+        return "assetto corsa evo" in (buf.value or "").lower()
+    except Exception:
+        return False
+
+
 _STATE = {"last": {}, "started": False}
 
 
@@ -206,6 +276,17 @@ def watch():
                         if held and not _STATE["last"].get(key):
                             _fire()
                         _STATE["last"][key] = held
+                # ⚠ The keyboard is checked even with a button bound, not
+                # instead of it. They are alternatives, not a choice: the
+                # default combination has to keep working for someone who
+                # later binds a wheel button, and for anyone with no
+                # controller plugged in at all.
+                combo = config.CFG.get("pit_key")
+                if combo:
+                    held = combo_held(combo) and game_focused()
+                    if held and not _STATE["last"].get("kbd"):
+                        _fire()
+                    _STATE["last"]["kbd"] = held
             except Exception as ex:
                 logs.LOG.debug("pit button: %s", ex)
             time.sleep(0.05)

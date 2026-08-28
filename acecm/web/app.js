@@ -3060,6 +3060,27 @@ async function settingsPage() {
   };
   prow.append(bound, bind, clear, test);
   hud.append(prow);
+
+  const krow = el('div', 'row wrap');
+  krow.style.marginTop = '8px';
+  const kin = el('input');
+  kin.value = cfg.pit_key || '';
+  kin.placeholder = 'ctrl+y';
+  kin.style.maxWidth = '10em';
+  const ksave = el('button', 'sm', 'Save key');
+  ksave.onclick = async () => {
+    const r = await api('config', { pit_key: kin.value.trim() });
+    toast(r && r.error ? r.error
+          : (kin.value.trim() ? 'Keyboard shortcut set' : 'Keyboard shortcut off'),
+          !!(r && r.error));
+  };
+  krow.append(el('span', 'tiny dim', 'Keyboard '), kin, ksave);
+  hud.append(krow);
+  hud.append(el('div', 'tiny dim',
+    'The keyboard shortcut only fires while the game is the window in front, '
+    + 'so it cannot go off while you are typing elsewhere. A bound '
+    + 'wheel/controller button works whatever has focus. Leave the key box '
+    + 'empty to turn the shortcut off.'));
   hud.append(el('div', 'tiny dim',
     'Verified in single-player. In multiplayer the server decides whether to '
     + 'honour it, so it may simply do nothing.'));

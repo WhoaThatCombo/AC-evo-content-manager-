@@ -53,6 +53,12 @@ DEFAULTS = {
     "pit_btn_id": "",
     "pit_btn_mask": 0,
     "pit_btn_label": "",
+    # ⚠ On by default, and deliberately an awkward combination. It is read
+    # with GetAsyncKeyState rather than reserved system-wide, so it still
+    # fires while the game has focus without being taken away from anything
+    # else - but that also means it is seen wherever you press it, so a
+    # single letter would go off while typing. Empty disables it.
+    "pit_key": "ctrl+y",
     # Dedicated server install. Empty = look for it on first run; a shipped
     # build cannot assume the developer's own folder layout.
     "server_dir": "",
