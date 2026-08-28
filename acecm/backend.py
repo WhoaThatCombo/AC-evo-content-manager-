@@ -1220,6 +1220,13 @@ def launch_game(extra_args=None):
     # help if Steam does not relaunch the process; rdata is the real fix.
     env["FLAGS_backend"] = url
     extra_args = list(extra_args or [])
+    # ⚠ Always, not per caller. The intro is a timed sequence you can click
+    # past, not loading - which is why skipping it is worth about 5s of a 30s
+    # boot and why every caller wanted it. Three of them remembered to ask;
+    # the plain Launch button did not. Default it here so there is one place
+    # that decides, and let a caller opt out by passing it themselves.
+    if not any("no_intro" in a for a in extra_args):
+        extra_args.append("-no_intro")
     if any("ai_player_car" in a for a in extra_args):
         env["FLAGS_ai_player_car"] = "true"
     if any("ai_enable_evo_next" in a for a in extra_args):
@@ -1308,7 +1315,9 @@ def launch_game(extra_args=None):
                   if not a.lstrip("-").startswith(_plumbing)]
     via = None
     tried_direct = None
-    if want_flags and not _is_elevated():
+    if config.CFG.get("direct_launch_refused"):
+        tried_direct = "skipped (refused before)"
+    elif want_flags and not _is_elevated():
         env["SteamAppId"] = appid
         env["SteamGameId"] = appid
         cmd = [exe, f"-backend={url}", f"--backend={url}"]
@@ -1330,8 +1339,14 @@ def launch_game(extra_args=None):
         except OSError as ex:
             tried_direct = f"failed: {ex}"
         if not via:
-            logs.LOG.info("direct launch %s - falling back to Steam "
-                          "(flags will not reach the game)", tried_direct)
+            # remember it, so the wait is paid once rather than every launch
+            try:
+                config.save({"direct_launch_refused": True})
+            except Exception:
+                pass
+            logs.LOG.info("direct launch %s - falling back to Steam, and not "
+                          "trying again (flags will not reach the game)",
+                          tried_direct)
     if not via:
         via, cmd = _start_via_steam(appid)
     if not via:
