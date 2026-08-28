@@ -46,6 +46,13 @@ DEFAULTS = {
     # redraws it in mph in the running HUD - nothing on disk changes, so a
     # launch straight from Steam is unaffected.
     "hud_mph": False,
+    # A wheel/box/controller button that sends the car to the pitlane. The
+    # game's own "Go to Pitlane" is in the pause menu and its button is
+    # hidden while you are on track, so it cannot be reached when it matters.
+    "pit_btn_kind": "",      # "joy" (DirectInput) or "pad" (XInput)
+    "pit_btn_id": "",
+    "pit_btn_mask": 0,
+    "pit_btn_label": "",
     # Dedicated server install. Empty = look for it on first run; a shipped
     # build cannot assume the developer's own folder layout.
     "server_dir": "",

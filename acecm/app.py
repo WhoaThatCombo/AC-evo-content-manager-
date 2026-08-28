@@ -17,7 +17,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
 from . import (backend, config, content, contentsync, detect, drive,
-               gameui, hooking, install,
+               gameui, hooking, hotkey, install,
                installer,
                logs, lobby, netutil, overview, patching, penalties, realai,
                version,
@@ -475,6 +475,8 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, backend.log(mode))
             if path == "/api/config":
                 return _json(self, config.public_cfg())
+            if path == "/api/pit/devices":
+                return _json(self, {"ok": True, "devices": hotkey.devices()})
             return self._static(path)
         except Exception as ex:
             # ⚠ Log the TRACEBACK. This used to return a one-line message and
@@ -724,6 +726,18 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, config.save(body))
             if path == "/api/hud/mph":
                 return _json(self, gameui.set_mph(bool(body.get("on"))))
+            if path == "/api/pit/go":
+                return _json(self, gameui.back_to_pit())
+            if path == "/api/pit/capture":
+                # blocks while the user presses something - short by design,
+                # the UI shows "press a button" for exactly this long
+                return _json(self, hotkey.capture(float(body.get("seconds") or 6)))
+            if path == "/api/pit/bind":
+                return _json(self, config.save({
+                    "pit_btn_kind": body.get("kind") or "",
+                    "pit_btn_id": body.get("id") if body.get("id") is not None else "",
+                    "pit_btn_mask": int(body.get("mask") or 0),
+                    "pit_btn_label": body.get("label") or ""}))
             return _json(self, {"error": "unknown endpoint"}, 404)
         except Exception as ex:
             logs.exception(f"POST {self.path}", ex, body=body)
@@ -1114,6 +1128,7 @@ def serve():
         logs.LOG.warning("registry backfill: %s", ex)
     _watch_lobby()
     _watch_hud()
+    hotkey.watch()
     port = config.CFG["ui_port"]
     # ⚠ 127.0.0.1 made the window work and made content sharing a lie.
     # Get content probes this HTTP port on the game server's IP. Bound
