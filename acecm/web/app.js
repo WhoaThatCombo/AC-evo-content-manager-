@@ -1620,6 +1620,44 @@ async function serversPage() {
       logTimerId = setInterval(pullLog, 2000);
       openLogTimers.push(stopLog);
     };
+
+    /* Capture the log to hand someone, without them hunting for the file or
+       reading it off screen. Clipboard first - that is what actually gets
+       pasted into a bug report or a Discord message - a download only when
+       the clipboard is refused. Always the FULL log (since=0), independent
+       of whatever the live view above has polled so far: opening this after
+       a crash and getting only the tail from when you happened to click
+       Logs would cut off exactly the part that explains it. */
+    const capture = el('button', 'sm', 'Copy log');
+    capture.title = 'Copy the full server log, to paste into a bug report';
+    capture.onclick = async () => {
+      const was = capture.textContent;
+      capture.disabled = true;
+      capture.textContent = 'Copying…';
+      try {
+        const r = await api(`server/log?id=${prof.id}&since=0`);
+        const text = (r && r.lines || []).join('\n')
+          || (r && r.error) || '(log is empty)';
+        try {
+          await navigator.clipboard.writeText(text);
+          capture.textContent = 'Copied!';
+        } catch (e) {
+          const blob = new Blob([text], { type: 'text/plain' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `${(prof.name || 'server').replace(/[^\w-]+/g, '_')}`
+                     + `-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.log`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+          capture.textContent = 'Downloaded';
+        }
+      } catch (e) {
+        toast('Could not read the log', true);
+        capture.textContent = was;
+      } finally {
+        setTimeout(() => { capture.disabled = false; capture.textContent = was; }, 1800);
+      }
+    };
     const del = el('button', 'sm danger', 'Delete');
     del.onclick = async () => {
       if (!confirm('Delete "' + prof.name + '"?')) return;
@@ -1671,7 +1709,7 @@ async function serversPage() {
     more.append(el('summary', 'tiny dim', 'More — logs, telemetry, AI worker, delete'));
     const extra = el('div', 'row wrap');
     extra.style.marginTop = '8px';
-    extra.append(logs, tOn, tOff, tView, tLink, wAI, tpill, del);
+    extra.append(logs, capture, tOn, tOff, tView, tLink, wAI, tpill, del);
     more.append(extra, pre);
     row.append(start, stop, edit);
     card.append(row, more);
