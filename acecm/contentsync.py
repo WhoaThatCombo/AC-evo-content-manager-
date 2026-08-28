@@ -556,6 +556,35 @@ def _under(root, *parts):
     return dest
 
 
+# What a content download is allowed to put on your disk.
+#
+# ⚠ An ALLOWLIST, not a blocklist. Get content installs files chosen by
+# whoever is hosting - the manifest, the sizes and the hashes all come from
+# them, so a hash proves the transfer was not corrupted and says nothing at
+# all about whether the file was meant to be there. Containment (_under,
+# destination, the tar data filter) already stops a host writing outside the
+# content folders; this stops them putting something that has no business
+# being content INSIDE them, like an .exe or a .dll dropped next to a mod for
+# somebody to find later.
+#
+# Measured, not guessed: a real track folder here is exactly texture,
+# texturemips, mesh, material, scene, track, aisplinedata, trackcontrolpoints,
+# track_layout and reference, and a car mod is a .kspkg beside its .json.
+# Nothing legitimate has no extension. `bin` is here for the containers.bin
+# some track packages carry - inert data, like the rest.
+CONTENT_EXTS = frozenset("""
+    texture texturemips mesh material scene track aisplinedata
+    trackcontrolpoints track_layout reference kspkg json bin
+""".split())
+
+
+def _content_allowed(rel):
+    """Is this a file type content is actually made of?"""
+    name = (rel or "").replace("\\", "/").rsplit("/", 1)[-1]
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return bool(ext) and ext in CONTENT_EXTS
+
+
 def destination(rel):
     """Where a manifest path belongs here.
 
@@ -567,6 +596,10 @@ def destination(rel):
     parts = [p for p in rel.split("/") if p and p != "."]
     if not parts or ".." in parts:
         raise ValueError("bad content path")
+    if not _content_allowed(parts[-1]):
+        raise ValueError(
+            f"refusing {parts[-1]!r}: content is only "
+            f"{', '.join(sorted(CONTENT_EXTS))}")
     if parts[0] == "mods":
         if len(parts) != 2:
             raise ValueError("bad mod path")
@@ -645,8 +678,25 @@ def fetch_track_pack(base, sid, folder, files, progress=None):
     if want and got != want:
         os.remove(tmp)
         raise ValueError(f"pack checksum mismatch for {folder}")
+    # ⚠ This path never goes through destination(), so it needs the same two
+    # guards itself. filter="data" is Python's hardened extractor - absolute
+    # paths, .. traversal, symlinks, device files and setuid bits are all
+    # refused - and the wrapper adds the type allowlist on top, so a pack
+    # cannot smuggle in a file kind that content is not made of.
+    def _safe(member, path):
+        member = tarfile.data_filter(member, path)
+        if member is None:
+            return None
+        if member.isdir():
+            return member
+        if not _content_allowed(member.name):
+            logs.LOG.warning("track pack %s: skipping %s (not a content file)",
+                             folder, member.name)
+            return None
+        return member
+
     with tarfile.open(tmp, "r:") as tar:
-        tar.extractall(dest_dir, filter="data")
+        tar.extractall(dest_dir, filter=_safe)
     try:
         os.remove(tmp)
     except OSError:
