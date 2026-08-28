@@ -528,7 +528,9 @@ def start(mode="proxy"):
     # through the dispatcher so a frozen build re-invokes itself rather than
     # looking for a Python that is not there.
     tool = os.path.splitext(os.path.basename(script))[0]
-    env = dict(os.environ)
+    # same reason as servers.start: never hand a child our bundle's PATH
+    from . import winproc as _wp
+    env = _wp.child_env()
     # The proxy loads the game's protobuf schemas and its TLS keypair; in a
     # shipped build neither sits next to the script, so point at both.
     from . import lobby, protos as protolib
@@ -1214,7 +1216,9 @@ def launch_game(extra_args=None):
             logs.LOG.warning("auto-redeclare client tracks before launch: %s", ex)
 
     url = netutil.backend_ws_url(config.CFG["backend_port"])
-    env = dict(os.environ)
+    # same reason as servers.start: never hand a child our bundle's PATH
+    from . import winproc as _wp
+    env = _wp.child_env()
     appid = str(config.CFG.get("steam_appid") or "3058630")
     # Belt and braces: still pass the flag AND FLAGS_backend. They only
     # help if Steam does not relaunch the process; rdata is the real fix.

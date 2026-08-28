@@ -380,7 +380,9 @@ def open_car(car_id, paint=""):
     if base and os.path.abspath(base) != os.path.abspath(pkg):
         cmd += ["--base", base]
 
-    env = dict(os.environ)
+    # never hand a child our frozen bundle's PATH - see winproc.child_env
+    from . import winproc as _wp
+    env = _wp.child_env()
     if paint:
         env["EVOVIEW_PAINT"] = paint
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0

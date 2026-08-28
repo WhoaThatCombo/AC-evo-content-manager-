@@ -645,7 +645,11 @@ def start(profile):
     # Claim the ports BEFORE launching, so a second click within the startup
     # window is refused even though nothing is listening yet.
     _LAUNCHING[tcp] = _LAUNCHING[http] = now
-    env = dict(os.environ)
+    # ⚠ NOT dict(os.environ). A frozen ACECM has its own _MEI unpack folder
+    # on PATH, and a child that inherits it loads OUR DLLs instead of its own
+    # - a crash dump showed a dedicated server running ACECM's VCRUNTIME140.
+    from . import winproc as _wp
+    env = _wp.child_env()
     # ⚠ Tell the tool WHERE the server is. A frozen build unpacks these
     # scripts into a temp folder, so a tool that resolves the server dir
     # from its own __file__ finds nothing there - no exe, no events
