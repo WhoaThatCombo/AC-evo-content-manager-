@@ -302,32 +302,59 @@ _GOTO = """
 # same styling and looks unchanged.
 _MPH = """
 (function(){
-  var host = document.querySelector('.speed .value[data-bind-value]');
-  if (!host) return 'no-speedo';
-  var box = host.parentNode;
-  if (box.querySelector('.acecm-mph')) return 'already';
-  var mirror = host.cloneNode(false);
-  mirror.className = host.className + ' acecm-mph';
-  mirror.removeAttribute('data-bind-value');
-  host.style.display = 'none';
-  box.insertBefore(mirror, host.nextSibling);
-  var unit = box.querySelector('.unit');
-  if (unit) unit.textContent = 'mph';
-  var paint = function(){
-    var n = parseFloat((host.textContent || '').trim());
-    mirror.textContent = isFinite(n) ? String(Math.round(n * 0.621371)) : '';
+  if (window.__acecmMph) { window.__acecmMph.on = true; return 'already'; }
+  var S = window.__acecmMph = {on: true, timer: null};
+  var K = 0.621371;
+  function attach(){
+    if (!S.on) return;
+    var host = document.querySelector('.speed .value[data-bind-value]');
+    if (!host) return;                                  // HUD not built yet
+    var box = host.parentNode;
+    if (box.querySelector('.acecm-mph')) return;         // still attached
+    var mirror = host.cloneNode(false);
+    mirror.className = host.className + ' acecm-mph';
+    mirror.removeAttribute('data-bind-value');
+    host.style.display = 'none';
+    box.insertBefore(mirror, host.nextSibling);
+    var unit = box.querySelector('.unit');
+    if (unit) unit.textContent = 'mph';
+    var paint = function(){
+      var n = parseFloat((host.textContent || '').trim());
+      mirror.textContent = isFinite(n) ? String(Math.round(n * K)) : '';
+    };
+    paint();
+    new MutationObserver(paint).observe(
+        host, {childList: true, characterData: true, subtree: true});
+  }
+  S.detach = function(){
+    S.on = false;
+    if (S.timer) { clearInterval(S.timer); S.timer = null; }
+    var box = document.querySelector('.speed');
+    if (!box) return;
+    var m = box.querySelector('.acecm-mph');
+    if (m) m.remove();
+    var h = box.querySelector('.value[data-bind-value]');
+    if (h) h.style.display = '';
+    var u = box.querySelector('.unit');
+    if (u) u.textContent = 'km/h';
   };
-  paint();
-  // the engine writes into host, never into mirror, so this cannot see its
-  // own output and needs no re-entry guard
-  new MutationObserver(paint).observe(
-      host, {childList: true, characterData: true, subtree: true});
+  attach();
+  // Pitting, a respawn or a session restart rebuilds the HUD and takes our
+  // element with it. Re-attach from INSIDE the page so the gap is half a
+  // second rather than a round trip.
+  //
+  // A poll, deliberately, not a MutationObserver on the tree: this HUD
+  // rewrites text every frame, so a subtree observer would fire constantly
+  // for something that changes a handful of times per session. The early-out
+  // above makes each tick two querySelectors.
+  S.timer = setInterval(attach, 500);
   return 'mph-on';
 })()
 """
 
 _MPH_OFF = """
 (function(){
+  if (window.__acecmMph) { window.__acecmMph.detach(); return 'mph-off'; }
   var box = document.querySelector('.speed');
   if (!box) return 'no-speedo';
   var m = box.querySelector('.acecm-mph');
