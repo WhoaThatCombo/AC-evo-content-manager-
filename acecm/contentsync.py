@@ -778,10 +778,17 @@ def install_files(need, status):
     lock = threading.Lock()
     if rest:
         status["detail"] = f"{len(rest)} leftover file(s)"
+        base = moved
+        inflight = {}
 
         def one(entry):
-            contentsync_fetch = fetch
-            contentsync_fetch(entry)
+            def tick(done, _size):
+                with lock:
+                    inflight[id(entry)] = done
+                    set_done(base + sum(inflight.values()))
+            fetch(entry, tick)
+            with lock:
+                inflight.pop(id(entry), None)
             return entry
 
         workers = 8 if len(rest) > 1 else 1
