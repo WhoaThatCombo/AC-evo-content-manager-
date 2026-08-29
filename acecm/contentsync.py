@@ -786,7 +786,7 @@ def install_files(need, status):
                 with lock:
                     inflight[id(entry)] = done
                     set_done(base + sum(inflight.values()))
-            fetch(entry, tick)
+            fetch_ranged(entry, tick)
             with lock:
                 inflight.pop(id(entry), None)
             return entry
@@ -840,6 +840,92 @@ def fetch(entry, progress=None):
             done += len(chunk)
             if progress:
                 progress(done, size)
+    got = registry.file_digest(tmp)
+    if entry.get("sha256") and got != entry["sha256"]:
+        os.remove(tmp)
+        raise ValueError(f"checksum mismatch for {entry['path']} "
+                         f"(got {got[:12]}, expected {entry['sha256'][:12]})")
+    os.replace(tmp, dest)
+    return dest
+
+
+RANGED_MIN = 64 * 1024 * 1024   # below this, one stream is not worth splitting
+RANGED_PARTS = 6
+
+
+def fetch_ranged(entry, progress=None, parts=RANGED_PARTS):
+    """Same as fetch(), but as several parallel byte-range GETs.
+
+    One TCP stream is capped by whatever the worst hop on the real path does
+    to it - packet loss or a small window there caps throughput far below
+    what either end's link is rated for, no matter how fast this server or
+    the disk is (loopback tests of the same file moved at ~950 MB/s). Several
+    independent connections each get their own congestion window, so this
+    routes around that ceiling instead of fixing it.
+
+    Falls back to the plain fetch() on anything that is not a clean set of
+    206 responses - an older host, a proxy that strips Range, whatever.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    dest = entry.get("dest") or destination(entry["path"])
+    dest = os.path.abspath(dest)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    size = entry.get("size") or 0
+    url = entry.get("url") or ""
+    if "/api/registry/file" not in url:
+        raise ValueError("refusing a content URL that is not this host's share")
+    if size < RANGED_MIN:
+        return fetch(entry, progress)
+
+    tmp = dest + ".part"
+    with open(tmp, "wb") as fh:
+        fh.truncate(size)
+
+    bounds = []
+    step = -(-size // parts)  # ceil
+    for i in range(parts):
+        a = i * step
+        b = min(a + step, size) - 1
+        if a <= b:
+            bounds.append((a, b))
+
+    lock = threading.Lock()
+    got_bytes = {}
+
+    def one(a, b):
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "ACECM", "Range": f"bytes={a}-{b}"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            if r.status != 206:
+                raise ValueError("host did not honour Range")
+            with open(tmp, "r+b") as fh:
+                fh.seek(a)
+                pos = a
+                while pos <= b:
+                    chunk = r.read(min(1 << 20, b - pos + 1))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    pos += len(chunk)
+                    with lock:
+                        got_bytes[(a, b)] = pos - a
+                        if progress:
+                            progress(sum(got_bytes.values()), size)
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(bounds)) as pool:
+            futs = [pool.submit(one, a, b) for a, b in bounds]
+            for fut in as_completed(futs):
+                fut.result()
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return fetch(entry, progress)
+
     got = registry.file_digest(tmp)
     if entry.get("sha256") and got != entry["sha256"]:
         os.remove(tmp)
