@@ -274,11 +274,37 @@ async function drivePage() {
       // silent meant the picker looked missing for almost every car you
       // clicked, which is exactly how it was reported.
       if (!owned) {
+        /* ⚠ Offer the fix instead of only naming the problem. A livery is
+           stored per owned car, so this used to be a dead end for almost
+           every car in the list. ACECM can write the missing record from
+           the state the GAME itself ships for that car, which is what this
+           button does - for every car at once, not just this one. */
         const why = el('div', 'livery-head livery-none');
-        why.textContent = 'no livery — you do not own this car';
-        why.title = 'Liveries are stored per owned car. Buy or unlock it '
-          + 'in-game and its colours appear here.';
-        liveryBox.append(why);
+        why.textContent = 'no livery — this car has no garage record';
+        const fix = el('button', 'sm', 'Add liveries for all cars');
+        fix.style.marginTop = '6px';
+        fix.title = 'Writes a garage record for every car that has none, '
+          + "using the game's own default for that car. Cars you already "
+          + 'own are left untouched.';
+        fix.onclick = async ev => {
+          ev.stopPropagation();
+          fix.disabled = true;
+          const was = fix.textContent;
+          fix.textContent = 'Adding…';
+          try {
+            const r = await api('livery/populate', {});
+            if (!r || !r.ok) {
+              toast((r && r.error) || 'could not add liveries', true);
+              return;
+            }
+            toast(`Added ${r.count} car(s) to the garage`);
+            drawLivery(carId);
+          } finally {
+            fix.disabled = false;
+            fix.textContent = was;
+          }
+        };
+        liveryBox.append(why, fix);
         return;
       }
       const info = await api('livery?model=' + encodeURIComponent(model));
