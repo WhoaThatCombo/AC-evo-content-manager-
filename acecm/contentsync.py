@@ -472,11 +472,50 @@ def plan(base, server_id):
     stale = stale_files(man)
     return {"ok": True, "server": man.get("server", {}),
             "need": need, "have": len(have),
+            # present on disk but not loadable - needs the tables written,
+            # not the bytes downloaded again
+            "needs_register": unregistered_tracks(man),
             "bytes": sum(f.get("size", 0) for f in need),
             # files the host has deleted since we last synced - removed after
             # the new files are safely in place, never before
             "stale": stale,
             "missing_on_host": man.get("missing_locally") or []}
+
+
+def manifest_track_folders(man):
+    """Track folders this manifest is about."""
+    out = set()
+    for f in man.get("files") or []:
+        parts = (f.get("path") or "").replace("\\", "/").split("/")
+        if len(parts) >= 3 and parts[0] == "tracks" and parts[1]:
+            out.add(parts[1])
+    return out
+
+
+def unregistered_tracks(man):
+    """Track folders whose FILES are here but which the game cannot load.
+
+    ⚠ Having the bytes is not having the track. A track is usable only once
+    it is written into the client's tracks.table, and that write patches
+    content.kspkg - which FAILS while the game is running, because the file
+    is locked. Registration failing was only ever a warning, so the download
+    reported success, the files were on disk, and from then on plan() compared
+    files, found them all present, and answered "you already have everything
+    this host offers" - forever. The track never appeared in game and no
+    amount of retrying could fix it, because nothing was left to download.
+
+    So this is checked as part of "do I have it", not just file presence.
+    """
+    folders = manifest_track_folders(man)
+    if not folders:
+        return []
+    here = set(installed_tracks())
+    try:
+        known = set(track_map().values())
+    except Exception as ex:
+        logs.LOG.info("register check: %s", ex)
+        return []
+    return sorted(f for f in folders if f in here and f not in known)
 
 
 def stale_files(man):
@@ -769,7 +808,7 @@ def _register_downloaded_track(folder, dest_dir=None):
     return r
 
 
-def install_files(need, status):
+def install_files(need, status, register=()):
     """Install a plan: one tar per track, then leftover files in parallel.
 
     A track is thousands of tiny files. One stream uses a gigabit uplink;
@@ -846,13 +885,20 @@ def install_files(need, status):
                     status["detail"] = f"{i}/{len(rest)} {entry['path']}"
 
     warns = []
-    for folder in tracks:
+    for folder in sorted(set(tracks) | set(register or ())):
         status["detail"] = f"registering {folder} in client tables"
         r = _register_downloaded_track(folder)
         if not r.get("ok"):
             warns.append(r.get("error") or folder)
     if warns:
-        status["warning"] = "; ".join(warns)
+        # ⚠ Say what this actually costs. Registration is what makes a track
+        # loadable, and it is patching content.kspkg - so the usual cause is
+        # the game holding that file open. Reported as a bare warning, this
+        # looked like a successful install of a track that never showed up.
+        status["warning"] = (
+            "downloaded, but could not add to the game's track list: "
+            + "; ".join(warns)
+            + " - close Assetto Corsa EVO and press Get content again")
     status["files"] = installed
     return installed
 

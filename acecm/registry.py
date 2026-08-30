@@ -418,7 +418,7 @@ def resolve(sid, rel):
     return None                      # not declared -> not served
 
 
-_SIZES = {"key": None, "at": 0.0, "bytes": {}}
+_SIZES = {"key": None, "at": 0.0, "bytes": {}, "busy": False}
 _SIZES_TTL = 300.0
 
 
@@ -437,17 +437,53 @@ def _public_sizes(entries, base_url):
     Sizes only move when content is added or removed, so they do not need
     recomputing per request.
     """
+    import threading
     import time as _time
     key = tuple(sorted(
         (e["id"], tuple(e.get("required_mods") or []),
          tuple(e.get("required_tracks") or [])) for e in entries))
     now = _time.monotonic()
-    if _SIZES["key"] == key and (now - _SIZES["at"]) < _SIZES_TTL:
+    fresh = _SIZES["key"] == key and (now - _SIZES["at"]) < _SIZES_TTL
+    if fresh:
         return _SIZES["bytes"]
-    got = {}
-    for e in entries:
-        m = manifest(e["id"], base_url, digests=False)
-        got[e["id"]] = m.get("total_bytes", 0) if m.get("ok") else 0
+
+    def compute():
+        got = {}
+        for e in entries:
+            m = manifest(e["id"], base_url, digests=False)
+            got[e["id"]] = m.get("total_bytes", 0) if m.get("ok") else 0
+        return got
+
+    # ⚠ Never recompute on the request path when something usable is already
+    # cached. Blocking here is what the 4s probe timeout trips over, and a
+    # plain TTL brought that back every time it expired - the request that
+    # happened to land on the expiry paid 7.5s and was dropped, so fetching
+    # worked most of the time and failed the rest. Answer with what we have
+    # and refresh behind it; slightly stale sizes are cosmetic, a dropped
+    # probe is not.
+    if _SIZES["bytes"]:
+        # ⚠ `busy` only stops a SECOND refresh being started. It must not send
+        # this request off to compute synchronously instead - that reinstates
+        # the very block being avoided, and measurably so: a probe arriving
+        # while a refresh ran took 10.09s and was dropped, right after an
+        # expired-cache probe had been served in 0.03s.
+        if not _SIZES.get("busy"):
+            _SIZES["busy"] = True
+
+            def refresh():
+                try:
+                    _SIZES.update(key=key, at=_time.monotonic(),
+                                  bytes=compute())
+                except Exception as ex:
+                    from . import logs
+                    logs.LOG.info("refreshing share sizes: %s", ex)
+                finally:
+                    _SIZES["busy"] = False
+
+            threading.Thread(target=refresh, daemon=True).start()
+        return _SIZES["bytes"]
+
+    got = compute()
     _SIZES.update(key=key, at=now, bytes=got)
     return got
 
