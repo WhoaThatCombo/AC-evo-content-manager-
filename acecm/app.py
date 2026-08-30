@@ -51,6 +51,7 @@ def _install_content(body):
     ids = body.get("ids") or ([body["id"]] if body.get("id") else [])
     need, seen, errors = [], set(), []
     stale = []
+    reg = []
     for sid in ids:
         p = contentsync.plan(base, sid)
         if not p.get("ok"):
@@ -63,6 +64,33 @@ def _install_content(body):
         for f in (p.get("stale") or []):
             if f not in stale:
                 stale.append(f)
+        for f in (p.get("needs_register") or []):
+            if f not in reg:
+                reg.append(f)
+    # ⚠ Files present but the track not in the game's list is NOT "you already
+    # have everything". That state is reached whenever registration failed -
+    # usually the game was open and holding content.kspkg - and because there
+    # was nothing left to download, every retry answered "you already have
+    # everything this host offers" while the track stayed unloadable. There is
+    # no download to do here, only the tables to write.
+    if not need and reg:
+        _INSTALL.update({"state": "running", "detail": "adding to the game's "
+                         "track list", "done": 0, "total": 0, "files": []})
+
+        def fix():
+            try:
+                contentsync.install_files([], _INSTALL, register=reg)
+                install._after_content_change()
+                warn = _INSTALL.get("warning")
+                _INSTALL.update({"state": "error" if warn else "done",
+                                 "detail": warn or
+                                 f"{len(reg)} track(s) added to the game"})
+            except Exception as ex:
+                logs.LOG.exception("registering downloaded tracks")
+                _INSTALL.update({"state": "error", "detail": str(ex)})
+
+        threading.Thread(target=fix, daemon=True).start()
+        return {"ok": True, "files": 0, "bytes": 0, "registering": reg}
     if not need and stale:
         # nothing to download, but the host has removed files since last time
         got = contentsync.remove_stale(stale)
@@ -79,7 +107,7 @@ def _install_content(body):
 
     def run():
         try:
-            contentsync.install_files(need, _INSTALL)
+            contentsync.install_files(need, _INSTALL, register=reg)
             # ⚠ AFTER the downloads, never before: a failed install must not
             # leave the joiner with files deleted and nothing to replace them.
             dropped = contentsync.remove_stale(stale) if stale else {}

@@ -4605,14 +4605,25 @@ async function contentFrom(s) {
   const plans = await Promise.all(d.servers.map(e =>
     api(`browser/plan?base=${encodeURIComponent(d.base)}`
         + `&id=${encodeURIComponent(e.id)}`).then(p => ({ e, p }))));
-  const wanted = plans.filter(x => x.p.ok && (x.p.need || []).length);
+  /* ⚠ "need" is only the missing BYTES. A track whose files are all here but
+     which never made it into the game's track list needs no download and is
+     still not usable, so counting only need meant answering "you already have
+     everything" to someone who could not load the track. */
+  const wanted = plans.filter(x => x.p.ok && ((x.p.need || []).length
+                                   || (x.p.needs_register || []).length));
   if (!wanted.length) {
     toast('You already have everything this host offers'); return;
   }
-  const files = wanted.reduce((a, x) => a + x.p.need.length, 0);
+  const files = wanted.reduce((a, x) => a + (x.p.need || []).length, 0);
+  const fixing = wanted.reduce((a, x) => a + (x.p.needs_register || []).length, 0);
   const mb = (wanted.reduce((a, x) => a + (x.p.bytes || 0), 0) / 1e6).toFixed(0);
-  if (!confirm(wanted.map(x => '• ' + x.e.name).join('\n')
+  if (!files && fixing) {
+    if (!confirm(fixing + ' track(s) are already downloaded but missing from '
+        + "the game's track list.\n\nAdd them now? "
+        + '(Assetto Corsa EVO must be closed.)')) return;
+  } else if (!confirm(wanted.map(x => '• ' + x.e.name).join('\n')
       + `\n\nMissing ${files} file(s), ${mb} MB.`
+      + (fixing ? `\n${fixing} track(s) also need adding to the game.` : '')
       + `\n\nDownload from ${d.base} and install?`)) return;
   const r = await api('browser/install',
                       { base: d.base, ids: wanted.map(x => x.e.id) });
