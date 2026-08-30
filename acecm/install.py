@@ -549,6 +549,13 @@ def _after_content_change():
         content.forget_lists()
     except Exception:
         pass
+    # the share list caches how big each entry is; adding or removing content
+    # is exactly when that stops being true
+    try:
+        from . import registry
+        registry.forget_public_sizes()
+    except Exception:
+        pass
 
 
 def remove(name, sides=None):
