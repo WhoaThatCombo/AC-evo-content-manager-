@@ -651,30 +651,72 @@ def fetch_track_pack(base, sid, folder, files, progress=None):
     os.makedirs(dest_dir, exist_ok=True)
     tmp = dest_dir.rstrip("\\/") + ".tar.part"
     done = 0
-    req = urllib.request.Request(url, headers={"User-Agent": "ACECM"})
+    want = ""
+    ranged_ok = False
+    # ⚠ Ask for one byte first. It settles three things in a single trip -
+    # whether this host has the endpoint at all (404), the pack's real total
+    # size (from Content-Range) and its checksum - WITHOUT committing to pull
+    # a gigabyte down one connection. Tracks are the BIG download, so this is
+    # the path that most needs to escape a single stream's ceiling; it was
+    # still one stream after single files had moved to ranges, which left the
+    # largest transfers as the slowest ones. A host too old to answer 206
+    # just sends the whole tar and we stream it the old way.
+    probe = urllib.request.Request(
+        url, headers={"User-Agent": "ACECM", "Range": "bytes=0-0"})
     try:
-        r = urllib.request.urlopen(req, timeout=600)
+        pr = urllib.request.urlopen(probe, timeout=600)
     except urllib.error.HTTPError as ex:
         if ex.code == 404:
             raise FileNotFoundError("host has no pack endpoint") from ex
         raise
     try:
-        with r, open(tmp, "wb") as fh:
-            want = (r.headers.get("X-ACECM-SHA256") or "").strip()
-            while True:
-                chunk = r.read(1 << 20)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, int(r.headers.get("Content-Length") or 0))
-    except Exception:
+        want = (pr.headers.get("X-ACECM-SHA256") or "").strip()
+        total = 0
+        if pr.status == 206:
+            cr = pr.headers.get("Content-Range") or ""
+            if "/" in cr:
+                try:
+                    total = int(cr.rsplit("/", 1)[1])
+                except ValueError:
+                    total = 0
+    finally:
+        pr.close()
+
+    if total >= RANGED_MIN:
         try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
+            _ranged_to_file(url, total, tmp, progress)
+            ranged_ok = True
+        except Exception as ex:
+            logs.LOG.info("ranged pack %s fell back to one stream: %s",
+                          folder, ex)
+
+    if not ranged_ok:
+        req = urllib.request.Request(url, headers={"User-Agent": "ACECM"})
+        try:
+            r = urllib.request.urlopen(req, timeout=600)
+        except urllib.error.HTTPError as ex:
+            if ex.code == 404:
+                raise FileNotFoundError("host has no pack endpoint") from ex
+            raise
+        try:
+            with r, open(tmp, "wb") as fh:
+                want = (r.headers.get("X-ACECM-SHA256") or "").strip()
+                while True:
+                    chunk = r.read(READ_CHUNK)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done,
+                                 int(r.headers.get("Content-Length") or 0))
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
     got = registry.file_digest(tmp)
     if want and got != want:
         os.remove(tmp)
@@ -859,33 +901,19 @@ RANGED_PARTS = 16
 READ_CHUNK = 4 * 1024 * 1024
 
 
-def fetch_ranged(entry, progress=None, parts=RANGED_PARTS):
-    """Same as fetch(), but as several parallel byte-range GETs.
+def _ranged_to_file(url, size, tmp, progress=None, parts=RANGED_PARTS):
+    """Pull `size` bytes of `url` into `tmp` over several parallel ranges.
 
-    One TCP stream is capped by whatever the worst hop on the real path does
-    to it - packet loss or a small window there caps throughput far below
-    what either end's link is rated for, no matter how fast this server or
-    the disk is (loopback tests of the same file moved at ~950 MB/s). Several
-    independent connections each get their own congestion window, so this
-    routes around that ceiling instead of fixing it.
+    Shared by single files and track packs - a track is the bigger download
+    of the two, so having this only on the file path left the transfers that
+    hurt most still running down one connection.
 
-    Falls back to the plain fetch() on anything that is not a clean set of
-    206 responses - an older host, a proxy that strips Range, whatever.
+    Raises if the host does not answer 206; the caller decides what the
+    fallback is.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    dest = entry.get("dest") or destination(entry["path"])
-    dest = os.path.abspath(dest)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    size = entry.get("size") or 0
-    url = entry.get("url") or ""
-    if "/api/registry/file" not in url:
-        raise ValueError("refusing a content URL that is not this host's share")
-    if size < RANGED_MIN:
-        return fetch(entry, progress)
-
-    tmp = dest + ".part"
     with open(tmp, "wb") as fh:
         fh.truncate(size)
 
@@ -934,6 +962,41 @@ def fetch_ranged(entry, progress=None, parts=RANGED_PARTS):
             futs = [pool.submit(one, a, b) for a, b in bounds]
             for fut in as_completed(futs):
                 fut.result()
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return tmp
+
+
+def fetch_ranged(entry, progress=None, parts=RANGED_PARTS):
+    """Same as fetch(), but as several parallel byte-range GETs.
+
+    One TCP stream is capped by whatever the worst hop on the real path does
+    to it - packet loss or a small window there caps throughput far below
+    what either end's link is rated for, no matter how fast this server or
+    the disk is (loopback tests of the same file moved at ~950 MB/s). Several
+    independent connections each get their own congestion window, so this
+    routes around that ceiling instead of fixing it.
+
+    Falls back to the plain fetch() on anything that is not a clean set of
+    206 responses - an older host, a proxy that strips Range, whatever.
+    """
+    dest = entry.get("dest") or destination(entry["path"])
+    dest = os.path.abspath(dest)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    size = entry.get("size") or 0
+    url = entry.get("url") or ""
+    if "/api/registry/file" not in url:
+        raise ValueError("refusing a content URL that is not this host's share")
+    if size < RANGED_MIN:
+        return fetch(entry, progress)
+
+    tmp = dest + ".part"
+    try:
+        _ranged_to_file(url, size, tmp, progress, parts)
     except Exception:
         try:
             os.remove(tmp)

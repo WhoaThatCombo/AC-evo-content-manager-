@@ -829,19 +829,46 @@ class Handler(BaseHTTPRequestHandler):
             return _json(self, {"error": "no files for that track"}, 404)
         size = os.path.getsize(packed)
         sha = registry.track_pack_sha(folder)
-        self.send_response(200)
+        # ⚠ Tracks are the BIG download - roughly a gigabyte against a car
+        # mod's few hundred megabytes - so this is the path that most needs
+        # to escape a single stream's throughput ceiling. It served the whole
+        # tar in one shot while single files had already moved to ranges,
+        # which left the largest transfers as the slowest ones.
+        start, end = 0, size - 1
+        status = 200
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            try:
+                a, b = rng[6:].split("-", 1)
+                start = int(a) if a else 0
+                end = int(b) if b else size - 1
+                end = min(end, size - 1)
+            except ValueError:
+                start, end = 0, size - 1
+            if 0 <= start <= end < size:
+                status = 206
+            else:
+                start, end = 0, size - 1
+        length = end - start + 1
+        self.send_response(status)
         self.send_header("Content-Type", "application/x-tar")
-        self.send_header("Content-Length", str(size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         if sha:
             self.send_header("X-ACECM-SHA256", sha)
         self.send_header("Content-Disposition",
                          f'attachment; filename="{folder}.tar"')
         self.end_headers()
         with open(packed, "rb") as fh:
-            while True:
-                chunk = fh.read(1 << 22)
+            fh.seek(start)
+            left = length
+            while left > 0:
+                chunk = fh.read(min(1 << 22, left))
                 if not chunk:
                     break
+                left -= len(chunk)
                 try:
                     self.wfile.write(chunk)
                 except (BrokenPipeError, ConnectionResetError):
