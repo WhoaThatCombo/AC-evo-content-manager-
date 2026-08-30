@@ -945,25 +945,34 @@ def _allow_share_port(port):
     name = f"ACECM-share-{int(port)}"
     old = f"ACECM-content-{int(port)}"
     try:
-        # Drop the old any-profile rule if we created one. Public Wi‑Fi
-        # does not need this port open.
         subprocess.run(
             ["netsh", "advfirewall", "firewall", "delete", "rule",
              f"name={old}"],
             capture_output=True, text=True, timeout=8)
-        r = subprocess.run(
-            ["netsh", "advfirewall", "firewall", "show", "rule",
+        # ⚠ REPLACE the rule, never skip because one exists. This used to
+        # return as soon as a rule of this name was found, so a rule left
+        # over from an earlier build - scoped to a profile this machine is
+        # no longer on - could never be repaired, and sharing stayed broken
+        # with nothing in the log to say why.
+        subprocess.run(
+            ["netsh", "advfirewall", "firewall", "delete", "rule",
              f"name={name}"],
             capture_output=True, text=True, timeout=8)
-        if r.returncode == 0 and name in (r.stdout or ""):
-            return
+        # ⚠ Not private-only. The people you share with are by definition NOT
+        # on your network, so their traffic arrives on whatever profile the
+        # internet-facing adapter carries - and Windows files a plain Ethernet
+        # link as Public unless somebody has said otherwise. A private-only
+        # rule therefore reads as "he can see the server but Get content says
+        # the port is closed", on a machine whose firewall looks configured.
+        # The exposure is the share GETs only: admin routes refuse any peer
+        # that is not loopback.
         r = subprocess.run(
             ["netsh", "advfirewall", "firewall", "add", "rule",
              f"name={name}", "dir=in", "action=allow", "protocol=TCP",
-             f"localport={int(port)}", "profile=private"],
+             f"localport={int(port)}", "profile=any"],
             capture_output=True, text=True, timeout=8)
         if r.returncode == 0:
-            logs.LOG.info("firewall: allowed inbound TCP %s on private networks",
+            logs.LOG.info("firewall: allowed inbound TCP %s (all profiles)",
                           port)
         else:
             logs.LOG.warning("firewall: could not open TCP %s (need admin?): %s",
