@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.13.2"
+VERSION = "0.13.3"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -389,6 +389,16 @@ def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True,
             args += f" --updated {ver}"
         if okflag:
             args += f' --okflag "{okflag}"'
+        # ⚠ Keep the launch MODE across an update. A headless server that
+        # updated itself used to relaunch WITHOUT --headless: it came back in
+        # window mode, which on a box nobody sits at either opens a stray
+        # window or fails to start, and window mode does not turn remote
+        # administration on - so the server went dark and its operator had to
+        # restart it by hand. The running process still carries the flag it
+        # was started with, so carry it through to the copy that replaces it.
+        for flag in ("--headless", "--no-ui", "--browser"):
+            if flag in sys.argv and flag not in args:
+                args += f" {flag}"
     lines = [
         "@echo off\r\n",
         # ⚠ Delayed expansion is required: %VAR% inside a parenthesised
