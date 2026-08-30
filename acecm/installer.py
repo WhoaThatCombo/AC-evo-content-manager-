@@ -202,6 +202,45 @@ def _shortcuts(target, desktop=True):
     return made
 
 
+def headless_shortcut(desktop=True):
+    """A shortcut that starts ACECM as a server, with no window.
+
+    ⚠ Points at the INSTALLED copy, not at wherever this process happens to be
+    running from. A shortcut to a file in Downloads (or to a build in a source
+    tree) breaks the moment that file moves, and the whole point of this one is
+    that somebody double-clicks it months later on a machine nobody sits at.
+    """
+    target = installed_exe()
+    if not os.path.isfile(target):
+        # not installed yet - a shortcut to a copy that may be deleted is
+        # worse than none, so say what to do instead of making a dud
+        running = running_exe()
+        if not running:
+            return {"ok": False,
+                    "error": "no installed ACECM.exe to point at - use "
+                             "Install to a permanent folder first"}
+        target = running
+    made, failed = [], []
+    for link, want in ((_start_menu().replace(f"{APP}.lnk",
+                                              f"{APP} Server.lnk"), True),
+                       (_desktop().replace(f"{APP}.lnk",
+                                           f"{APP} Server.lnk"), desktop)):
+        if not want:
+            continue
+        try:
+            _shortcut(link, target, args="--headless",
+                      desc=f"{APP} as a headless server (remote admin)")
+            made.append(link)
+        except Exception as ex:
+            logs.LOG.warning("headless shortcut %s: %s", link, ex)
+            failed.append(str(ex))
+    if not made:
+        return {"ok": False,
+                "error": "; ".join(failed) or "could not write the shortcut"}
+    logs.LOG.info("headless shortcut(s): %s", ", ".join(made))
+    return {"ok": True, "made": made, "target": target}
+
+
 def restart(delay=0.8):
     """Quit this process. Relaunch after this PID is gone.
 

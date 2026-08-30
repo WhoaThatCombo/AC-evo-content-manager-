@@ -17,7 +17,8 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-from . import (backend, config, content, contentsync, detect, drive,
+from . import (auth, backend, config, content, contentsync, detect, drive,
+               push as pushmod,
                gameui, hooking, hotkey, install,
                installer,
                logs, lobby, netutil, overview, patching, penalties, realai,
@@ -177,6 +178,11 @@ def _json(handler, obj, code=200):
 # machine's admin console (Drive, patches, update, settings) and must not
 # answer on 0.0.0.0.
 _SHARE_GET = frozenset((
+    # ⚠ Readable with no token ON PURPOSE. A page cannot be asked for a
+    # credential it does not yet know is required, so the "do I need one?"
+    # question has to be answerable by anyone. It reveals only whether remote
+    # administration is on, never the token.
+    "/api/auth",
     "/api/registry/list",
     "/api/registry/manifest",
     "/api/registry/file",
@@ -206,7 +212,24 @@ class Handler(BaseHTTPRequestHandler):
         ip = (self.client_address or ("",))[0]
         return ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
+    def _admin_ok(self, q=None):
+        """May this request use the admin routes?
+
+        Loopback always may - the desktop app on this machine must not need a
+        token to manage itself. Anyone else needs one, and only when remote
+        administration has been turned on at all.
+        """
+        return self._peer_local() or auth.ok(self.headers, q)
+
     def _deny_remote(self):
+        if auth.enabled():
+            return _json(self, {
+                "ok": False,
+                "need_token": True,
+                "error": "this ACECM is managed remotely - send the admin "
+                         "token as X-ACECM-Token, ?token=... or the "
+                         "acecm_token cookie",
+            }, 401)
         return _json(self, {
             "ok": False,
             "error": "that action is only allowed from this PC",
@@ -216,7 +239,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path, _, qs = self.path.partition("?")
         q = urllib.parse.parse_qs(qs)
-        if not self._peer_local() and path not in _SHARE_GET:
+        # ⚠ Static files are served to anyone. The page has to LOAD before it
+        # can ask for a token - refusing index.html and app.js meant a remote
+        # browser got a bare 401 and no way to authenticate. They carry no
+        # secrets; every /api/ route below is still gated.
+        if (path.startswith("/api/") and path not in _SHARE_GET
+                and not self._admin_ok(q)):
             return self._deny_remote()
         try:
             if path == "/api/state":
@@ -470,6 +498,15 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/detect":
                 return _json(self, detect.all_paths(
                     (q.get("refresh") or ["0"])[0] == "1"))
+            if path == "/api/auth":
+                # Deliberately readable without a token: a page has to be able
+                # to ask whether it needs one before it can have one.
+                return _json(self, {
+                    "ok": True,
+                    "remote_admin": auth.enabled(),
+                    "authorised": self._admin_ok(q),
+                    "local": self._peer_local(),
+                })
             if path == "/api/version":
                 return _json(self, {"name": version.NAME,
                                     "version": version.VERSION,
@@ -517,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
     # --------------------------------------------------------------- POST --
     def do_POST(self):
         path, _, qs = self.path.partition("?")
-        if not self._peer_local():
+        if not self._admin_ok(urllib.parse.parse_qs(qs)):
             return self._deny_remote()
         # Drag-drop streams the file; do not parse it as JSON.
         if path == "/api/drop/part":
@@ -569,6 +606,70 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("direction") or "to_server",
                     bool(body.get("force")),
                     body.get("names")))
+            if path == "/api/server_shortcut":
+                if not self._peer_local():
+                    return self._deny_remote()
+                return _json(self, installer.headless_shortcut(
+                    desktop=bool(body.get("desktop", True))))
+            if path == "/api/auth/rotate":
+                if not self._peer_local():
+                    return self._deny_remote()
+                return _json(self, {"ok": True, "token": auth.rotate()})
+            if path == "/api/auth/remote":
+                if not self._peer_local():
+                    return self._deny_remote()
+                on = bool(body.get("on"))
+                config.save({"remote_admin": on})
+                return _json(self, {"ok": True, "remote_admin": on,
+                                    "token": auth.token() if on else ""})
+            if path == "/api/push/plan":
+                prof = next((x for x in servers.load()
+                             if x.get("id") == body.get("id")), None)
+                if not prof:
+                    return _json(self, {"ok": False, "error": "no such profile"})
+                p = pushmod.plan(prof)
+                return _json(self, {
+                    "ok": True,
+                    "mods": [n for n, _ in p["mods"]],
+                    "tracks": p["tracks"],
+                    "missing": p["missing"],
+                })
+            if path == "/api/push/send":
+                # ⚠ In a thread, reported through the same progress bar every
+                # other long content job uses. A track is a gigabyte; holding
+                # the request open for it would time out the browser and leave
+                # the user with no idea whether it was still going.
+                prof = next((x for x in servers.load()
+                             if x.get("id") == body.get("id")), None)
+                if not prof:
+                    return _json(self, {"ok": False, "error": "no such profile"})
+                if _INSTALL.get("state") == "running":
+                    return _json(self, {"ok": False,
+                                        "error": "a content job is already running"})
+                base = body.get("base") or ""
+                tok = body.get("token") or ""
+                _INSTALL.update({"state": "running", "detail": "sending",
+                                 "done": 0, "total": 0, "files": []})
+
+                def run_push():
+                    def tick(sent, total):
+                        _INSTALL["done"] = sent
+                        _INSTALL["total"] = total
+                    try:
+                        r = pushmod.send(prof, base, tok, progress=tick)
+                        if r.get("ok"):
+                            _INSTALL.update({
+                                "state": "done",
+                                "detail": "sent " + ", ".join(r.get("sent") or [])})
+                        else:
+                            _INSTALL.update({"state": "error",
+                                             "detail": r.get("error") or "failed"})
+                    except Exception as ex:
+                        logs.LOG.exception("pushing content to %s", base)
+                        _INSTALL.update({"state": "error", "detail": str(ex)})
+
+                threading.Thread(target=run_push, daemon=True).start()
+                return _json(self, {"ok": True, "started": True})
             if path == "/api/app/restart":
                 return _json(self, installer.restart())
             if path == "/api/livery/apply":
@@ -1336,6 +1437,12 @@ def main(mode="window", okflag=None, relaunch=False):
     """
     global _JUST_UPDATED
     _JUST_UPDATED = bool(okflag) or bool(relaunch)
+    # ⚠ A headless copy exists to be reached from somewhere else, so remote
+    # administration is turned on for it - but it is still the TOKEN that
+    # grants access, never the mode. A desktop install is left alone.
+    if mode == "headless" and not config.CFG.get("remote_admin"):
+        config.save({"remote_admin": True})
+        config.CFG["remote_admin"] = True
     try:
         srv, url = serve()
     except AlreadyRunning as ex:
@@ -1384,6 +1491,27 @@ def main(mode="window", okflag=None, relaunch=False):
                     "no native window (WebView2 missing) - ACECM is a desktop app")
             ui.run(url)              # blocks until the window is closed
             return
+        if mode == "headless":
+            # ⚠ Tailscale FIRST. lan_ipv4() asks the routing table which
+            # address reaches the internet, which is the ordinary NIC - so on
+            # a machine administered over a tailnet the banner was printing
+            # the one address the other end cannot route to.
+            port_n = config.CFG["ui_port"]
+            addrs = []
+            try:
+                from . import netutil
+                ts = netutil.tailscale_ipv4()
+                if ts:
+                    addrs.append(("tailscale", f"http://{ts}:{port_n}"))
+                lan_ip = netutil.lan_ipv4()
+                if lan_ip and lan_ip != ts:
+                    addrs.append(("lan", f"http://{lan_ip}:{port_n}"))
+            except Exception as ex:
+                logs.LOG.info("working out this machine's addresses: %s", ex)
+            addrs.append(("local", url))
+            # ⚠ Force ASCII - see the note in auth.banner.
+            print(auth.banner(url, addrs).encode("ascii", "replace")
+                  .decode("ascii"), flush=True)
         if mode == "browser":
             threading.Timer(0.6, lambda: os.startfile(url)).start()   # noqa: S606
         try:
