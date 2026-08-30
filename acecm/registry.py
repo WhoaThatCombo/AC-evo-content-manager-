@@ -310,6 +310,30 @@ def _track_sig(files):
     return f"{n}:{total}:{latest}"
 
 
+_PACK_LOCKS = {}
+_PACK_LOCKS_GUARD = None
+
+
+def _pack_lock(folder):
+    """One build at a time per track.
+
+    ⚠ A joiner now pulls the pack as several parallel range requests, so six
+    handlers can ask for the same track at once. Without this they each miss
+    the cache and rebuild a gigabyte-sized tar simultaneously - six times the
+    disk and CPU for one download, and the first bytes do not move until one
+    of them wins.
+    """
+    global _PACK_LOCKS_GUARD
+    import threading
+    if _PACK_LOCKS_GUARD is None:
+        _PACK_LOCKS_GUARD = threading.Lock()
+    with _PACK_LOCKS_GUARD:
+        lk = _PACK_LOCKS.get(folder)
+        if lk is None:
+            lk = _PACK_LOCKS[folder] = threading.Lock()
+        return lk
+
+
 def ensure_track_pack(folder):
     """One uncompressed tar of a track folder, rebuilt only when files change.
 
@@ -319,6 +343,11 @@ def ensure_track_pack(folder):
     folder = (folder or "").strip().replace("\\", "/").strip("/")
     if not folder or "/" in folder or folder in (".", ".."):
         return None
+    with _pack_lock(folder):
+        return _build_track_pack(folder)
+
+
+def _build_track_pack(folder):
     files = _track_files(folder)
     if not files:
         return None
