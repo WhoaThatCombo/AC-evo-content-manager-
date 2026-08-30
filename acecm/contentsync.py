@@ -23,6 +23,7 @@ rather than implying a download exists.
 """
 import json
 import os
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -849,8 +850,13 @@ def fetch(entry, progress=None):
     return dest
 
 
-RANGED_MIN = 64 * 1024 * 1024   # below this, one stream is not worth splitting
-RANGED_PARTS = 6
+# ⚠ These are tuned for "saturate a gigabit link", not for politeness. A
+# single stream between two gigabit fibre lines was measuring under 1 MB/s;
+# the ceiling is per-connection, so the cure is more connections and bigger
+# reads, not a faster server (loopback already does ~950 MB/s).
+RANGED_MIN = 8 * 1024 * 1024    # below this, one stream is not worth splitting
+RANGED_PARTS = 16
+READ_CHUNK = 4 * 1024 * 1024
 
 
 def fetch_ranged(entry, progress=None, parts=RANGED_PARTS):
@@ -896,15 +902,24 @@ def fetch_ranged(entry, progress=None, parts=RANGED_PARTS):
 
     def one(a, b):
         req = urllib.request.Request(
-            url, headers={"User-Agent": "ACECM", "Range": f"bytes={a}-{b}"})
+            url, headers={"User-Agent": "ACECM", "Range": f"bytes={a}-{b}",
+                          "Accept-Encoding": "identity"})
         with urllib.request.urlopen(req, timeout=600) as r:
             if r.status != 206:
                 raise ValueError("host did not honour Range")
+            # A big receive buffer lets the window open past the default,
+            # which is what actually limits a long-distance stream.
+            try:
+                sock = r.fp.raw._sock
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 22)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
             with open(tmp, "r+b") as fh:
                 fh.seek(a)
                 pos = a
                 while pos <= b:
-                    chunk = r.read(min(1 << 20, b - pos + 1))
+                    chunk = r.read(min(READ_CHUNK, b - pos + 1))
                     if not chunk:
                         break
                     fh.write(chunk)
