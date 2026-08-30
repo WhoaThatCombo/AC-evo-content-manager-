@@ -185,9 +185,33 @@ def local(refresh=False):
 
 
 def _get(url, timeout=TIMEOUT):
+    """GET JSON, and keep the host's own words when it fails.
+
+    ⚠ urllib turns a 500 into "HTTP Error 500: Internal Server Error" and
+    drops the body - but the body is where ACECM puts the actual exception.
+    That left the only visible symptom as "manifest unreadable: HTTP Error
+    500", which says nothing about what went wrong on the host and cannot be
+    acted on from the machine seeing it.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": "ACECM"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read() or b"{}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as ex:
+        detail = ""
+        try:
+            body = ex.read().decode("utf-8", "replace")
+            try:
+                got = json.loads(body)
+                detail = got.get("error") or got.get("detail") or ""
+            except ValueError:
+                detail = body.strip()[:300]
+        except Exception:
+            pass
+        if detail:
+            raise urllib.error.URLError(
+                f"the host answered {ex.code}: {detail}") from ex
+        raise
 
 
 def parse_target(raw):
@@ -452,7 +476,10 @@ def plan(base, server_id):
         # cache and return promptly.
         man = _get(f"{base}/api/registry/manifest?id={server_id}", timeout=600)
     except Exception as ex:
-        return {"ok": False, "error": f"manifest unreadable: {ex}"}
+        # URLError renders as "<urlopen error ...>"; the reason is the part
+        # that actually tells the user what the host said.
+        return {"ok": False,
+                "error": f"manifest unreadable: {getattr(ex, 'reason', ex)}"}
     if not man.get("ok"):
         return {"ok": False, "error": man.get("error") or "no manifest"}
 
