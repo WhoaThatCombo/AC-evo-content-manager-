@@ -67,6 +67,34 @@ def advertise_ip(peer=None, lan=None, loopback="127.0.0.1"):
     return lan or loopback
 
 
+def tailscale_ipv4():
+    """This machine's Tailscale address, if it is on a tailnet.
+
+    ⚠ Not the same as lan_ipv4(). That one asks the routing table which source
+    address reaches the public internet, which is the ordinary LAN NIC - so a
+    machine reached over Tailscale advertises an address the other end cannot
+    route to. Tailscale hands out 100.64.0.0/10 (the CGNAT range it claims),
+    so an address in that block is the one to hand someone.
+
+    Read straight off the interfaces rather than by running the tailscale CLI,
+    which need not be on PATH and would cost a subprocess on every start.
+    """
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return ""
+    for info in infos:
+        ip = info[4][0]
+        try:
+            first, second = (int(x) for x in ip.split(".")[:2])
+        except ValueError:
+            continue
+        # 100.64.0.0/10 is 100.64.x.x - 100.127.x.x
+        if first == 100 and 64 <= second <= 127:
+            return ip
+    return ""
+
+
 def our_ips(lan=None):
     """Every address we should treat as 'this machine's server'."""
     out = {"127.0.0.1", "localhost", "::1"}

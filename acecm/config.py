@@ -45,6 +45,9 @@ DEFAULTS = {
     # EVO has no units setting; the speedometer is hard-wired to km/h. This
     # redraws it in mph in the running HUD - nothing on disk changes, so a
     # launch straight from Steam is unaffected.
+    # Remote administration. Off for a desktop install; --headless turns it
+    # on, because a server you cannot reach is not a server. See auth.py.
+    "remote_admin": False,
     # opt-in: see backend.fast_boot_flags
     "fast_boot": False,
     "hud_mph": False,

@@ -5,13 +5,45 @@ const el = (t, c, h) => { const e = document.createElement(t);
 const esc = s => String(s ?? '').replace(/[&<>"]/g,
   c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+/* Admin token, for an ACECM being managed from another machine.
+   Taken from ?token=... the first time (so a pasted link just works), then
+   kept so later navigations do not ask again. Locally there is no token and
+   none is needed - the server lets loopback straight through. */
+const TOKEN_KEY = 'acecm_token';
+function adminToken() {
+  try {
+    const q = new URLSearchParams(location.search).get('token');
+    if (q) {
+      localStorage.setItem(TOKEN_KEY, q);
+      // keep it out of the address bar and out of the back/forward history
+      history.replaceState(null, '', location.pathname);
+      return q;
+    }
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch (e) { return ''; }
+}
+function askForToken() {
+  const t = prompt('This ACECM is managed remotely. Paste its admin token:');
+  if (!t) return false;
+  try { localStorage.setItem(TOKEN_KEY, t.trim()); } catch (e) {}
+  return true;
+}
 async function api(path, body) {
   const opt = body ? { method: 'POST', body: JSON.stringify(body) } : {};
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 12000);
+  const tok = adminToken();
+  const headers = tok ? { 'X-ACECM-Token': tok } : {};
   try {
-    const r = await fetch('/api/' + path, { ...opt, signal: ctrl.signal });
+    const r = await fetch('/api/' + path,
+                          { ...opt, headers, signal: ctrl.signal });
     const j = await r.json().catch(() => ({ error: 'bad response' }));
+    /* 401 means the token is missing or stale. Ask once and retry, rather
+       than showing the same error on every panel of the page. */
+    if (r.status === 401 && j && j.need_token) {
+      if (askForToken()) return api(path, body);
+      return j;
+    }
     if (j && j.error) toast(j.error, true);
     return j;
   } catch (e) {
@@ -1685,6 +1717,39 @@ async function serversPage() {
         setTimeout(() => { capture.disabled = false; capture.textContent = was; }, 1800);
       }
     };
+    /* Send this server's content to an ACECM running ON the server box.
+       ACECM already knows what the profile needs - the modded cars and the
+       custom track - so this is one button rather than a file-by-file copy. */
+    const send = el('button', 'sm', 'Send content to server');
+    send.title = 'Upload the mods and track this server needs to a remote '
+               + 'ACECM (started with --headless)';
+    send.onclick = async () => {
+      const p = await api('push/plan', { id: prof.id });
+      if (!p || !p.ok) { toast((p && p.error) || 'could not work out what to send', true); return; }
+      const items = [...(p.mods || []), ...(p.tracks || [])];
+      if (!items.length) {
+        toast('Nothing modded about this server - there is nothing to send');
+        return;
+      }
+      if ((p.missing || []).length) {
+        toast('not installed here: ' + p.missing.join(', '), true);
+      }
+      const last = localStorage.getItem('acecm_push_base') || '';
+      const base = prompt('Address of the ACECM on the server box:', last
+                          || 'http://100.x.y.z:8092');
+      if (!base) return;
+      localStorage.setItem('acecm_push_base', base.trim());
+      const tok = prompt("That server's admin token (blank if it is this PC):",
+                         localStorage.getItem('acecm_push_token') || '');
+      if (tok === null) return;
+      localStorage.setItem('acecm_push_token', tok.trim());
+      const list = items.map(x => '• ' + x).join('\n');
+      if (!confirm('Send to ' + base + ':\n\n' + list)) return;
+      const r = await api('push/send', { id: prof.id, base: base.trim(), token: tok.trim() });
+      if (!r || !r.ok) { toast((r && r.error) || 'could not start', true); return; }
+      toast('Sending ' + items.length + ' item(s) - watch the bar');
+      progKick();
+    };
     const del = el('button', 'sm danger', 'Delete');
     del.onclick = async () => {
       if (!confirm('Delete "' + prof.name + '"?')) return;
@@ -3066,6 +3131,45 @@ async function settingsPage() {
   const cfg = await api('config');
   const p = $('#page');
   p.innerHTML = '';
+
+  // ---- run as a server ---------------------------------------------------
+  const srvcard = el('div', 'card');
+  srvcard.innerHTML = '<h2>Run as a server</h2>'
+    + '<div class="tiny dim" style="margin-bottom:10px">Starts ACECM with no '
+    + 'window, so a machine you do not sit at can host modded content and be '
+    + 'managed from your phone or laptop. It prints a link with its own '
+    + 'access token &mdash; over Tailscale or your LAN.<br><br>'
+    + 'The same app, not a cut-down panel: server profiles, start/stop, track '
+    + 'deploy and drag-drop upload all work remotely. From a profile, '
+    + '<b>Send content to server</b> uploads the mods and track it needs.</div>';
+  const srow = el('div', 'row wrap');
+  const mk = el('button', 'sm primary', 'Create server shortcut');
+  mk.title = 'Start Menu + Desktop shortcut that launches ACECM --headless';
+  mk.onclick = async () => {
+    const was = mk.textContent;
+    mk.disabled = true; mk.textContent = 'Creating...';
+    try {
+      const r = await api('server_shortcut', { desktop: true });
+      if (!r || !r.ok) { toast((r && r.error) || 'could not create it', true); return; }
+      toast('Created "ACECM Server" in the Start Menu and on the Desktop');
+    } finally {
+      mk.disabled = false; mk.textContent = was;
+    }
+  };
+  const tokbtn = el('button', 'sm', 'Show admin token');
+  tokbtn.title = 'The token a remote browser needs';
+  tokbtn.onclick = async () => {
+    const a = await api('auth');
+    if (!a || !a.remote_admin) {
+      toast('Remote admin is off - it turns on when ACECM runs as a server');
+      return;
+    }
+    const r = await api('auth/rotate');
+    if (r && r.token) prompt('Admin token (a NEW one - the old is now dead):', r.token);
+  };
+  srow.append(mk, tokbtn);
+  srvcard.append(srow);
+  p.append(srvcard);
 
   // ---- faster loading ----------------------------------------------------
   const boot = el('div', 'card');
