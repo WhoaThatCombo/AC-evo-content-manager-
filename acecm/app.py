@@ -1203,6 +1203,11 @@ def serve():
     from . import version
     version.consume_rollback()
     _rescan_content()
+    # ⚠ Off the request path, in the background. Sizing every shared entry
+    # walks thousands of files; doing it inside the first /api/registry/list
+    # meant a joiner's 4s probe timed out and the host looked like it was not
+    # running ACECM until they had retried enough times.
+    threading.Thread(target=registry.warm_public_list, daemon=True).start()
     # entries written before autofill existed carry no address and a default
     # port; one pass at startup settles them
     try:

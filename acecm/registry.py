@@ -418,14 +418,62 @@ def resolve(sid, rel):
     return None                      # not declared -> not served
 
 
+_SIZES = {"key": None, "at": 0.0, "bytes": {}}
+_SIZES_TTL = 300.0
+
+
+def _public_sizes(entries, base_url):
+    """content_bytes per entry id, cached.
+
+    ⚠ This is what made "fetch content right after a server starts" fail for
+    the first few tries. Sizing an entry means walking its whole track folder
+    - Shutoku alone is 14,965 files - and that was redone on EVERY request,
+    warm or cold, taking ~7.5s for this machine's 19 entries. discover() gives
+    up after 4s, so the probe was dropped mid-response and the host looked
+    like it was not running ACECM. Retrying only worked once the OS directory
+    cache happened to bring one attempt under the timeout, which is exactly
+    the "takes several attempts" people saw.
+
+    Sizes only move when content is added or removed, so they do not need
+    recomputing per request.
+    """
+    import time as _time
+    key = tuple(sorted(
+        (e["id"], tuple(e.get("required_mods") or []),
+         tuple(e.get("required_tracks") or [])) for e in entries))
+    now = _time.monotonic()
+    if _SIZES["key"] == key and (now - _SIZES["at"]) < _SIZES_TTL:
+        return _SIZES["bytes"]
+    got = {}
+    for e in entries:
+        m = manifest(e["id"], base_url, digests=False)
+        got[e["id"]] = m.get("total_bytes", 0) if m.get("ok") else 0
+    _SIZES.update(key=key, at=now, bytes=got)
+    return got
+
+
+def forget_public_sizes():
+    """Drop the size cache - call when content on this host changes."""
+    _SIZES.update(key=None, at=0.0, bytes={})
+
+
+def warm_public_list(base_url=""):
+    """Compute the sizes off the request path, so the first probe is fast."""
+    try:
+        public_list(base_url)
+    except Exception as ex:
+        from . import logs
+        logs.LOG.info("warming the share list: %s", ex)
+
+
 def public_list(base_url=""):
     """What a player's sync tool fetches first."""
     out = []
-    for e in load():
-        if not e.get("public", True):
-            continue
+    entries = [e for e in load() if e.get("public", True)]
+    sizes = _public_sizes(entries, base_url)
+    for e in entries:
         # size only - hashing every server's content to draw a list is minutes
-        m = manifest(e["id"], base_url, digests=False)
+        m = {"ok": True, "total_bytes": sizes.get(e["id"], 0)}
         out.append({
             "id": e["id"], "name": e["name"], "description": e.get("description", ""),
             "ip": e.get("ip", ""), "port": e.get("port", 9700),
