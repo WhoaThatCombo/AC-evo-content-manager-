@@ -1125,6 +1125,47 @@ def game_backend_seen():
     return info
 
 
+def fast_boot_flags(already=()):
+    """Flags that cut boot time, off unless the user turns them on.
+
+    Found by reading the client's own gflag table - these are the game's,
+    not ours, and each says what it does in its own help string:
+
+      skip_cars_preload       "skip the preload for in order to reload the
+                              assets at runtime" - the car assets are loaded
+                              when something needs them instead of all at boot
+      quick_gamemode_swap     "Enable fast game mode swap when track is
+                              unchanged" - a fast path the game ships switched
+                              off
+      no_idle_camera_sequence "Disable idle camera sequence"
+
+    ⚠ Off by default, and deliberately. skip_cars_preload MOVES work rather
+    than removing it - the boot is shorter and the first use of a car pays for
+    it - so whether it is a win depends on what you are doing, and that is the
+    user's call, not a default. The intro skip is different: nothing loads
+    during it, so it is always on.
+    """
+    want = []
+    if not config.CFG.get("fast_boot"):
+        return want
+    for name in ("skip_cars_preload", "quick_gamemode_swap",
+                 "no_idle_camera_sequence"):
+        if not any(name in a for a in already):
+            want.append("-" + name)
+    return want
+
+
+def loading_report_flag(path=""):
+    """Ask the game's own LoadingProfiler to write a breakdown.
+
+    The client carries a profiler that reports where boot time actually goes
+    ("[LoadingProfiler] report saved to '{}'"). Measuring beats guessing at
+    which of the flags above is worth having on.
+    """
+    path = path or os.path.join(config.DATA, "loading_report")
+    return f"-loading_report={path}"
+
+
 def launch_game(extra_args=None):
     """Start the client, rewriting rdata first so Steam cannot skip us.
 
@@ -1231,6 +1272,7 @@ def launch_game(extra_args=None):
     # that decides, and let a caller opt out by passing it themselves.
     if not any("no_intro" in a for a in extra_args):
         extra_args.append("-no_intro")
+    extra_args.extend(fast_boot_flags(extra_args))
     if any("ai_player_car" in a for a in extra_args):
         env["FLAGS_ai_player_car"] = "true"
     if any("ai_enable_evo_next" in a for a in extra_args):

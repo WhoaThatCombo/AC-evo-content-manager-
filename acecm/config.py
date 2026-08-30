@@ -45,6 +45,8 @@ DEFAULTS = {
     # EVO has no units setting; the speedometer is hard-wired to km/h. This
     # redraws it in mph in the running HUD - nothing on disk changes, so a
     # launch straight from Steam is unaffected.
+    # opt-in: see backend.fast_boot_flags
+    "fast_boot": False,
     "hud_mph": False,
     # A wheel/box/controller button that sends the car to the pitlane. The
     # game's own "Go to Pitlane" is in the pause menu and its button is

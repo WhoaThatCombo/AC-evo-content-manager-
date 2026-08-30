@@ -3067,6 +3067,34 @@ async function settingsPage() {
   const p = $('#page');
   p.innerHTML = '';
 
+  // ---- faster loading ----------------------------------------------------
+  const boot = el('div', 'card');
+  boot.innerHTML = '<h2>Faster loading</h2>'
+    + '<div class="tiny dim" style="margin-bottom:10px">Three switches the '
+    + 'game already has and ships turned off, named in its own flag list: it '
+    + 'stops preloading every car at boot and loads them when needed, takes '
+    + 'the fast path when swapping mode on the same track, and skips the idle '
+    + 'camera sequence. The intro is always skipped and is separate from '
+    + 'this.<br><br><b>This moves work rather than deleting it</b> — boot is '
+    + 'shorter and the first use of a car pays for it, so it is worth timing '
+    + 'both ways for how you actually play. Only applies when ACECM launches '
+    + 'the game; starting from Steam is unaffected.</div>';
+  const brow = el('div', 'row wrap');
+  const blab = el('label', 'ctl');
+  const bbox = el('input');
+  bbox.type = 'checkbox';
+  bbox.checked = !!cfg.fast_boot;
+  bbox.onchange = async () => {
+    const r = await api('config', { fast_boot: bbox.checked });
+    if (r && r.error) { toast(r.error, true); bbox.checked = !bbox.checked; return; }
+    toast(bbox.checked
+      ? 'Faster loading on — applies next time ACECM launches the game'
+      : 'Back to the game default');
+  };
+  blab.append(bbox, document.createTextNode(' Skip car preloading and the idle camera'));
+  brow.append(blab);
+  boot.append(brow);
+
   // ---- in-game HUD -------------------------------------------------------
   const hud = el('div', 'card');
   hud.innerHTML = '<h2>In-game HUD</h2>'
@@ -3158,6 +3186,7 @@ async function settingsPage() {
   hud.append(el('div', 'tiny dim',
     'Verified in single-player. In multiplayer the server decides whether to '
     + 'honour it, so it may simply do nothing.'));
+  p.append(boot);
   p.append(hud);
 
   // Install to a permanent folder + Start Menu shortcut, so the exe never has
