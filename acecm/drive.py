@@ -785,6 +785,7 @@ def _run(pick):
         threading.Thread(target=_ensure_backend, daemon=True).start()
         _set(phase="launching_game",
              hint=f"launching {wrote['mode']} at {wrote['track']}")
+        _JOB["t_launch"] = time.time()
         launched = backend.launch_game(extra_args=extra)
         _JOB["launch"] = {k: launched.get(k)
                           for k in ("ok", "error", "via", "backend",
@@ -951,6 +952,28 @@ def _ui_failed(poked, where):
     return False
 
 
+def _boot_took(what):
+    """Log how long the game took to get somewhere, in seconds.
+
+    ⚠ Worth having as a NUMBER. "It seemed faster" is not something two
+    launches can be compared on, and working the answer out afterwards means
+    reading timestamps out of the log by hand - which is what the first
+    comparison of the fast-boot flags needed. The log now says it outright.
+
+    Not a benchmark on its own: a launch a minute after the last one has the
+    game's files in the OS cache and will beat a cold one whatever the flags
+    say. Compare like with like.
+    """
+    t0 = _JOB.get("t_launch")
+    if not t0:
+        return None
+    took = time.time() - t0
+    flags = "fast_boot" if config.CFG.get("fast_boot") else "default"
+    logs.LOG.info("drive TIMING: %s after %.1fs (%s)", what, took, flags)
+    _JOB.setdefault("timing", {})[what] = round(took, 1)
+    return took
+
+
 def _enter_and_start(pick=None):
     """Set car / conditions once, open SP once, press Start once.
 
@@ -970,6 +993,7 @@ def _enter_and_start(pick=None):
         return {"ok": True, "started": "already"}
     if state != "ready":
         return {"ok": False, "error": _menu_not_ready_error("Start")}
+    _boot_took("menu ready")
     pick = pick or {}
     model = _car_model(pick.get("car"))
     if not backend._game_running():
@@ -1012,6 +1036,7 @@ def _enter_and_start(pick=None):
     except OSError as ex:
         return {"ok": False, "error": "Start failed: " + str(ex)}
     logs.LOG.info("drive ui start: %s", started)
+    _boot_took("session started")
     gameui.focus_game()
     val = str((started or {}).get("value") or "")
     if not (started and started.get("ok")):
