@@ -138,7 +138,60 @@ def stage_tools():
               "build (cargo build --release in the evoview checkout)")
     for m in missing:
         print(f"  ! missing entirely: {m}")
+    check_catalogue()
     return have, missing
+
+
+def check_catalogue():
+    """Refuse to ship a cars.json that has MODS in it.
+
+    ⚠ tools/cars.json is bundled into the exe and is the list every fresh
+    install reads before it has a game to read from. It was captured on a dev
+    machine that had car mods installed, so ten mod cars - a Bugatti Bolide, a
+    Tesla Model S Plaid, Ferraris - shipped to everyone as real entries. On a
+    clean install they showed up in Drive and could not be driven, because no
+    such car exists in the game.
+
+    A mod car is easy to tell apart: it lives in its own package, so it has no
+    car folder inside the game's content.kspkg. That is what is checked here -
+    on a machine with no game installed the check simply says so and passes.
+    """
+    import json
+    cat = os.path.join(TOOLS, "cars.json")
+    if not os.path.isfile(cat):
+        return
+    sys.path.insert(0, HERE)
+    try:
+        from acecm import kspkg, viewer as vw
+        pkg = vw.package()
+    except Exception as ex:
+        print(f"  catalogue: not checked ({ex})")
+        return
+    if not pkg or not os.path.isfile(pkg):
+        print("  catalogue: not checked (no game install here)")
+        return
+    sep = chr(92)
+    folders = set()
+    for path, _s, _o in kspkg.iter_entries(pkg):
+        low = path.lower().replace("/", sep)
+        parts = low.split(sep)
+        if len(parts) > 2 and parts[0] == "content" and parts[1] == "cars":
+            folders.add(parts[2])
+    try:
+        cars = json.load(open(cat, encoding="utf-8"))["cars"]
+    except Exception as ex:
+        raise SystemExit(f"tools/cars.json is unreadable: {ex}")
+    from acecm import carsmap
+    presets = set(carsmap.table().get("presets") or {})
+    bad = [c for c in cars
+           if c.get("name") not in presets and c.get("name") not in folders]
+    if bad:
+        names = ", ".join(f"{c.get('name')} ({c.get('display_name')})"
+                          for c in bad[:12])
+        raise SystemExit(
+            f"tools/cars.json holds {len(bad)} car(s) the game does not have "
+            f"- these are mods and must not ship: {names}")
+    print(f"  catalogue: {len(cars)} cars, all present in the game")
 
 
 _CRT_FILTER = '''
