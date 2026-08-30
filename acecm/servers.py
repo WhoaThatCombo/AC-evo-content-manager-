@@ -851,9 +851,12 @@ def stop(profile_id=None):
     from . import winproc
     if not profile_id:
         pids = list(_server_pids())
-        for pid in pids:
-            winproc.kill(pid)
-        return {"ok": True, "stopped": pids, "scope": "all"}
+        stopped = [pid for pid in pids if winproc.kill(pid)]
+        stuck = [pid for pid in pids if pid not in stopped]
+        if stuck:
+            return {"ok": False, "stopped": stopped, "scope": "all",
+                    "error": _denied_msg(stuck)}
+        return {"ok": True, "stopped": stopped, "scope": "all"}
 
     prof = next((p for p in load() if p.get("id") == profile_id), None)
     if not prof:
@@ -871,11 +874,29 @@ def stop(profile_id=None):
                 "error": "could not tell which process is this server - it may "
                          "have been started outside ACECM. Use Stop all, or "
                          "close it from Task Manager"}
-    winproc.kill(pid)
+    if not winproc.kill(pid):
+        return {"ok": False, "stopped": [], "scope": prof.get("name"),
+                "error": _denied_msg([pid])}
     r = runtime()
     r.pop(profile_id, None)
     _save_runtime(r)
     return {"ok": True, "stopped": [pid], "scope": prof.get("name")}
+
+
+def _denied_msg(pids):
+    """Why a kill failed, in terms the user can act on.
+
+    Almost always elevation: a server launched by an ACECM running as
+    administrator outlives it, and a later ordinary ACECM has no rights over
+    it. Saying "could not stop" alone sends people to Task Manager, where the
+    same thing happens for the same unexplained reason.
+    """
+    ids = ", ".join(str(p) for p in pids)
+    return ("could not stop the server (PID " + ids + "). It was most likely "
+            "started by an ACECM running as administrator, so this one has no "
+            "rights over it. Restart ACECM as administrator and stop it again, "
+            "or end AssettoCorsaEVOServer.exe in Task Manager (also as "
+            "administrator).")
 
 
 def _pid_on_port(port):

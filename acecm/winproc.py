@@ -188,11 +188,40 @@ def working_set(pid):
 
 
 def kill(pid):
+    """Force-kill a process tree. True if it is gone afterwards.
+
+    ⚠ Report the OUTCOME, do not just fire and forget. A server started by
+    an ELEVATED ACECM cannot be killed by a later non-elevated one - taskkill
+    answers "Access is denied" and exits non-zero. Ignoring that made Stop
+    report success while the server kept running, kept holding 9700, and the
+    next launch then refused the port.
+    """
     import subprocess
-    subprocess.run(
+    r = subprocess.run(
         ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
         capture_output=True, timeout=20,
         creationflags=CREATE_NO_WINDOW)
+    if not alive(pid):
+        return True
+    if r.returncode == 0:
+        # taskkill is asynchronous; give the tree a moment to unwind
+        import time
+        for _ in range(20):
+            time.sleep(0.1)
+            if not alive(pid):
+                return True
+    return not alive(pid)
+
+
+def kill_denied(pid):
+    """True when this process exists but we lack the rights to kill it."""
+    import subprocess
+    r = subprocess.run(
+        ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+        capture_output=True, timeout=20,
+        creationflags=CREATE_NO_WINDOW)
+    out = (r.stdout or b"") + (r.stderr or b"")
+    return alive(pid) and b"denied" in out.lower()
 
 
 def kill_named(*names):
