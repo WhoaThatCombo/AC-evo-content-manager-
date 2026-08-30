@@ -462,25 +462,26 @@ async function drivePage() {
          always here and says so plainly when the answer is no. */
       const get = el('button', 'sm', 'Get content');
       get.title = 'Download the tracks and mods this server needs';
+      /* ⚠ Go through contentFrom, the SAME path the browser list uses.
+         This used to ask drive/direct instead, which answers the question
+         "what am I about to join?" - and for any server present in the
+         captured list it answers from that list and returns early, without
+         ever asking the host whether it runs ACECM. So it came back with no
+         base, and a favourite was told its host "is not sharing content
+         through ACECM" while the identical server, found by searching the
+         browser, downloaded fine. Favouriting a server is how you get it
+         into that list, so this failed for essentially every favourite. */
       get.onclick = async ev => {
         ev.stopPropagation();
         get.disabled = true;
         const was = get.textContent;
         get.textContent = 'Checking…';
         try {
-          const info = await api('drive/direct', { target: `${f.ip}:${f.tcp}` });
-          if (!info || !info.ok) { toast('could not reach that host', true); return; }
-          if (info.source !== 'acecm' || !info.base) {
-            toast(`${f.name} is not sharing content through ACECM — `
-                  + 'the host has to run it and allow TCP 8092', true);
-            return;
-          }
-          const ids = info.sid ? [info.sid] : (info.sids || []);
-          if (!ids.length) { toast('that host lists no content', true); return; }
-          const r = await api('browser/install', { base: info.base, ids });
-          if (!r.ok) { toast(r.error || 'could not start', true); return; }
-          toast(`Fetching ${r.files} file(s), ${mb(r.bytes || 0)}`);
-          progKick();          // the global bar takes it from here
+          await contentFrom({
+            server_ip: f.ip,
+            server_tcp_port: f.tcp,
+            track: '',
+          });
         } finally {
           get.disabled = false;
           get.textContent = was;
