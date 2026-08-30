@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import shutil
+import socket
 import socketserver
 import subprocess
 import threading
@@ -838,7 +839,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         with open(packed, "rb") as fh:
             while True:
-                chunk = fh.read(1 << 20)
+                chunk = fh.read(1 << 22)
                 if not chunk:
                     break
                 try:
@@ -895,7 +896,7 @@ class Handler(BaseHTTPRequestHandler):
             fh.seek(start)
             left = length
             while left > 0:
-                chunk = fh.read(min(1 << 20, left))
+                chunk = fh.read(min(1 << 22, left))
                 if not chunk:
                     break
                 left -= len(chunk)
@@ -977,6 +978,21 @@ class App(socketserver.ThreadingTCPServer):
     # port silently and requests land on whichever wins - that cost real
     # debugging time on the telemetry tools.
     allow_reuse_address = False
+    # A content fetch opens many range requests at once; the default backlog
+    # of 5 would refuse most of them and they would retry, which reads as a
+    # slow download rather than as a refusal.
+    request_queue_size = 128
+
+    def process_request(self, request, client_address):
+        # Big send buffer + no Nagle: the transfer is one long stream of
+        # full-size writes, so waiting to coalesce them only adds latency,
+        # and a small buffer caps how far the window can open on a long path.
+        try:
+            request.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 22)
+            request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        return super().process_request(request, client_address)
 
 
 def _watch_lobby():
