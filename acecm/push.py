@@ -228,3 +228,114 @@ def _why(ex, what):
     except Exception:
         pass
     return f"{what}: HTTP {ex.code}"
+
+# ---------------------------------------------------------- server build --
+# ⚠ What must NEVER leave this machine, or must never land on theirs.
+#
+# serverConfig holds `account.printabledriveraccount` plus that machine's
+# telemetry and logs - it is the operator's own state, not part of the build,
+# and copying it over someone else's would replace their configuration with
+# yours (and hand them your account file).
+#
+# The .bak files are ACECM's own safety copies. On this machine they are
+# 327 MB of content.kspkg alone, and they mean nothing on another box.
+SERVER_SKIP_DIRS = {"serverconfig", "results", "logs", "crashdumps"}
+SERVER_SKIP_EXT = (".log", ".old", ".tmp", ".part")
+
+
+def _server_skip(rel):
+    low = rel.replace("\\", "/").lower()
+    head = low.split("/", 1)[0]
+    if head in SERVER_SKIP_DIRS:
+        return True
+    if ".bak" in low:                      # .bak_pretrack, .bak_precar, ...
+        return True
+    return low.endswith(SERVER_SKIP_EXT)
+
+
+def server_build_files(root=None):
+    """Every file that belongs to a dedicated-server build, and its size."""
+    from . import config
+    root = root or config.server_dir()
+    if not root or not os.path.isdir(root):
+        return "", []
+    out = []
+    for base, dirs, files in os.walk(root):
+        rel_dir = os.path.relpath(base, root)
+        rel_dir = "" if rel_dir == "." else rel_dir
+        dirs[:] = [d for d in dirs
+                   if not _server_skip(os.path.join(rel_dir, d))]
+        for f in files:
+            rel = os.path.join(rel_dir, f) if rel_dir else f
+            if _server_skip(rel):
+                continue
+            try:
+                out.append((rel, os.path.getsize(os.path.join(base, f))))
+            except OSError:
+                pass
+    return root, out
+
+
+def server_build_plan(root=None):
+    root, files = server_build_files(root)
+    return {"ok": bool(files), "root": root, "files": len(files),
+            "bytes": sum(n for _r, n in files)}
+
+
+def send_server_build(base, token="", progress=None, root=None):
+    """Ship this machine's dedicated-server build to a remote ACECM.
+
+    ⚠ Sent as ONE zip, stored, and never applied while their server is
+    running - replacing an exe under a live process is how you get a half
+    updated install and a server that will not start.
+    """
+    import tempfile
+    import zipfile
+
+    reach = check(base, token)
+    if not reach.get("ok"):
+        return reach
+    root, files = server_build_files(root)
+    if not files:
+        return {"ok": False, "error": "no dedicated server files here to send"}
+
+    total = sum(n for _r, n in files)
+    tmp = os.path.join(tempfile.gettempdir(), "acecm_server_build.zip")
+    packed = 0
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED,
+                             compresslevel=1) as z:
+            for rel, n in files:
+                z.write(os.path.join(root, rel), rel)
+                packed += n
+                if progress:
+                    # packing is half the wait; report it as the first half
+                    progress(packed // 2, total)
+    except Exception as ex:
+        logs.LOG.exception("packing the server build")
+        return {"ok": False, "error": f"could not pack the build: {ex}"}
+
+    did = str(uuid.uuid4())
+    zsize = os.path.getsize(tmp)
+    try:
+        def tick(sent, _t):
+            if progress:
+                progress(total // 2 + int(sent / max(zsize, 1) * total / 2),
+                         total)
+        _r, _sent = _send_file(base, token, did, tmp, tick, 0, zsize)
+        r = _post_json(base, "/api/server_build", token, {"id": did},
+                       timeout=3600)
+    except urllib.error.HTTPError as ex:
+        return {"ok": False, "error": _why(ex, "server build")}
+    except Exception as ex:
+        return {"ok": False, "error": f"sending the server build: {ex}"}
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    if not r.get("ok"):
+        return {"ok": False, "error": r.get("error") or "the server refused it"}
+    logs.LOG.info("sent a %d-file server build to %s", len(files), base)
+    return {"ok": True, "files": len(files), "bytes": zsize,
+            "applied": r.get("applied"), "root": r.get("root")}
