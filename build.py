@@ -264,7 +264,13 @@ def build(clean=False):
     for mod in ("google.protobuf", "numpy", "capstone", "acecm", "acecm.cli",
             "webview", "webview.platforms.edgechromium", "clr_loader",
             "pythonnet", "cryptography", "websockets",
-            "texture2ddecoder", "PIL", "PIL.Image"):
+            "texture2ddecoder", "PIL", "PIL.Image",
+            # ⚠ certifi is imported inside version._ssl_context, so the
+            # scanner never sees it - and without its cacert.pem a machine
+            # whose Windows store cannot build the chain to github.com fails
+            # every update check with CERTIFICATE_VERIFY_FAILED. PyInstaller's
+            # certifi hook ships the .pem once the module is named here.
+            "certifi"):
         args += ["--hidden-import", mod]
     # ⚠ protobuf's well-known types (any_pb2, timestamp_pb2, ...) are GENERATED
     # modules imported at runtime, so PyInstaller's scanner never sees them and

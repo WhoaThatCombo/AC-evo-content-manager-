@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.13.1"
+VERSION = "0.13.2"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -54,8 +54,45 @@ class _DropAuthOnHop(urllib.request.HTTPRedirectHandler):
         return new
 
 
+_CTX = None
+
+
+def _ssl_context():
+    """Trust the Windows store AND a bundled CA list, not one or the other.
+
+    ⚠ A frozen build cannot rely on the machine's certificates alone. On a
+    Windows install that has never had to fetch an intermediate, verifying
+    github.com fails with
+
+        [SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
+
+    and the updater simply stops working - which is exactly how one server box
+    got stuck on an old build with no way to move.
+
+    ⚠ Nor can it rely on the bundled list alone: a machine behind a corporate
+    proxy or an antivirus that intercepts TLS presents its own root, which is
+    in the Windows store and never in certifi. Loading both means either route
+    can satisfy the chain, and neither case needs a human to diagnose it.
+    """
+    global _CTX
+    if _CTX is not None:
+        return _CTX
+    import ssl
+    ctx = ssl.create_default_context()      # the OS store
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception as ex:                 # no bundle: the OS store stands
+        logs.LOG.info("no bundled CA list (%s); using the system store", ex)
+    _CTX = ctx
+    return ctx
+
+
 def _opener():
-    return urllib.request.build_opener(_DropAuthOnHop)
+    import ssl as _ssl                      # noqa: F401  (context type only)
+    return urllib.request.build_opener(
+        _DropAuthOnHop,
+        urllib.request.HTTPSHandler(context=_ssl_context()))
 
 
 def _newer(a, b):
