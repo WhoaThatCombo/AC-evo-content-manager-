@@ -3156,6 +3156,29 @@ async function settingsPage() {
       mk.disabled = false; mk.textContent = was;
     }
   };
+  /* Update a remote box's dedicated-server BUILD from this machine's copy.
+     For a server that is not installed through Steam and so cannot update
+     itself. Excludes serverConfig - that is the other machine's own account
+     and configuration, not part of the build. */
+  const sb = el('button', 'sm', 'Update a server’s build');
+  sb.title = "Send this PC's dedicated-server files to a remote ACECM";
+  sb.onclick = async () => {
+    const base = prompt('Address of the ACECM on the server box:',
+                        localStorage.getItem('acecm_push_base') || 'http://100.x.y.z:8092');
+    if (!base) return;
+    localStorage.setItem('acecm_push_base', base.trim());
+    const tok = prompt("That server's admin token:",
+                       localStorage.getItem('acecm_push_token') || '');
+    if (tok === null) return;
+    localStorage.setItem('acecm_push_token', tok.trim());
+    const warn = 'Their serverConfig is left alone. Their server must be stopped.';
+    if (!confirm('Send this PC\u2019s dedicated-server build to '
+                 + base + '?' + '\n\n' + warn)) return;
+    const r = await api('push/server_build', { base: base.trim(), token: tok.trim() });
+    if (!r || !r.ok) { toast((r && r.error) || 'could not start', true); return; }
+    toast('Packing ' + (r.files || '?') + ' file(s) - watch the bar');
+    progKick();
+  };
   const tokbtn = el('button', 'sm', 'Show admin token');
   tokbtn.title = 'The token a remote browser needs';
   tokbtn.onclick = async () => {
@@ -3167,7 +3190,7 @@ async function settingsPage() {
     const r = await api('auth/rotate');
     if (r && r.token) prompt('Admin token (a NEW one - the old is now dead):', r.token);
   };
-  srow.append(mk, tokbtn);
+  srow.append(mk, sb, tokbtn);
   srvcard.append(srow);
   p.append(srvcard);
 

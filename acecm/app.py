@@ -135,6 +135,62 @@ def _install_content(body):
     return {"ok": True, "files": len(need), "bytes": p["bytes"]}
 
 
+def _apply_server_build(did):
+    """Unpack an uploaded dedicated-server build over this machine's copy.
+
+    ⚠ Refuses while a server is RUNNING. Replacing an exe under a live
+    process leaves a half-updated install and a server that will not start,
+    and the operator would have no idea why.
+
+    ⚠ Every entry is checked to land inside the server folder. A zip can name
+    a path full of ".." segments, and this endpoint writes wherever it is
+    told - so it is told only once, by this function.
+    """
+    import zipfile
+    root = config.server_dir()
+    if not root or not os.path.isdir(root):
+        return {"ok": False, "error": "no dedicated server folder on this "
+                                      "machine to update"}
+    live = list(servers._server_pids())
+    if live:
+        return {"ok": False,
+                "error": f"a dedicated server is running (pid {live[0]}) - "
+                         "stop it before updating the build"}
+    d = install.drop_staging(did, create=False)
+    if not d or not os.path.isdir(d):
+        return {"ok": False, "error": "nothing was uploaded"}
+    zips = [f for f in os.listdir(d) if f.lower().endswith(".zip")]
+    if not zips:
+        return {"ok": False, "error": "the upload was not a build archive"}
+    src = os.path.join(d, zips[0])
+    root_abs = os.path.abspath(root)
+    wrote, skipped = 0, []
+    try:
+        with zipfile.ZipFile(src) as z:
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                dest = os.path.abspath(os.path.join(root_abs, info.filename))
+                if os.path.commonpath([root_abs, dest]) != root_abs:
+                    skipped.append(info.filename)
+                    continue
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with z.open(info) as fh, open(dest, "wb") as out:
+                    shutil.copyfileobj(fh, out, 1 << 20)
+                wrote += 1
+    except Exception as ex:
+        logs.LOG.exception("applying a server build")
+        return {"ok": False, "error": f"could not unpack: {ex}"}
+    finally:
+        install.drop_cleanup(did)
+    if skipped:
+        logs.LOG.warning("server build: refused %d path(s) outside the "
+                         "server folder: %s", len(skipped), skipped[:3])
+    logs.LOG.info("applied a server build: %d file(s) into %s", wrote, root)
+    return {"ok": True, "applied": wrote, "root": root,
+            "refused": len(skipped)}
+
+
 def _progress():
     """Whatever long content job is running, for the bar the whole app shows.
 
@@ -606,6 +662,8 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("direction") or "to_server",
                     bool(body.get("force")),
                     body.get("names")))
+            if path == "/api/server_build":
+                return _json(self, _apply_server_build(body.get("id") or ""))
             if path == "/api/server_shortcut":
                 if not self._peer_local():
                     return self._deny_remote()
@@ -622,6 +680,42 @@ class Handler(BaseHTTPRequestHandler):
                 config.save({"remote_admin": on})
                 return _json(self, {"ok": True, "remote_admin": on,
                                     "token": auth.token() if on else ""})
+            if path == "/api/push/server_build":
+                if _INSTALL.get("state") == "running":
+                    return _json(self, {"ok": False,
+                                        "error": "a content job is already running"})
+                base = body.get("base") or ""
+                tok = body.get("token") or ""
+                plan = pushmod.server_build_plan()
+                _INSTALL.update({"state": "running",
+                                 "detail": "packing the server build",
+                                 "done": 0, "total": plan.get("bytes") or 0,
+                                 "files": []})
+
+                def run_build():
+                    def tick(sent, total):
+                        _INSTALL["done"] = sent
+                        _INSTALL["total"] = total
+                        if sent * 2 < total:
+                            _INSTALL["detail"] = "packing the server build"
+                        else:
+                            _INSTALL["detail"] = "sending the server build"
+                    try:
+                        r = pushmod.send_server_build(base, tok, progress=tick)
+                        if r.get("ok"):
+                            _INSTALL.update({
+                                "state": "done",
+                                "detail": f"server build applied "
+                                          f"({r.get('applied')} file(s))"})
+                        else:
+                            _INSTALL.update({"state": "error",
+                                             "detail": r.get("error") or "failed"})
+                    except Exception as ex:
+                        logs.LOG.exception("sending a server build to %s", base)
+                        _INSTALL.update({"state": "error", "detail": str(ex)})
+
+                threading.Thread(target=run_build, daemon=True).start()
+                return _json(self, {"ok": True, "started": True, **plan})
             if path == "/api/push/plan":
                 prof = next((x for x in servers.load()
                              if x.get("id") == body.get("id")), None)
