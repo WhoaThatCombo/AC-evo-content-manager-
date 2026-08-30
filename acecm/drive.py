@@ -756,6 +756,8 @@ def _run(pick):
             _ensure_backend()
             poked = _enter_and_start(pick)
             if not poked.get("ok"):
+                if _ui_failed(poked, "join"):
+                    return
                 _set(phase="failed",
                      fault=poked.get("error") or "could not press Start")
                 return
@@ -794,6 +796,8 @@ def _run(pick):
             return
         poked = _enter_and_start(pick)
         if not poked.get("ok"):
+            if _ui_failed(poked, "single player"):
+                return
             _set(phase="failed",
                  fault=poked.get("error") or "could not press Start in the UI")
             return
@@ -919,6 +923,32 @@ def _wait_ready(deadline):
             last_beat = now
         time.sleep(0.3)
     return ""
+
+
+def _ui_failed(poked, where):
+    """A failed UI step is not a failed launch, as long as the game is up.
+
+    ⚠ The session is already decided before any button is pressed: the mode,
+    track, car and conditions were written into the GameModeSave, and the game
+    booted into that mode. Everything the automation does after that is
+    pressing the same buttons a player would.
+
+    So treating a UI hiccup as "failed" was wrong and was the worst part of
+    this to hit - the game is sitting there ready, one keypress from going,
+    and ACECM says the launch failed. Anything that made the menu slow or
+    unresponsive turned a working launch into a broken one. Now it says what
+    it could not press and hands over.
+    """
+    if backend._game_running():
+        why = poked.get("error") or "the menu did not respond"
+        _set(phase="launched",
+             hint="the game is up and your session is set — press Start in "
+                  "the menu to go (ACECM could not: " + why + ")",
+             fault="")
+        logs.LOG.info("drive: handing over to the player at %s: %s",
+                      where, why)
+        return True
+    return False
 
 
 def _enter_and_start(pick=None):
