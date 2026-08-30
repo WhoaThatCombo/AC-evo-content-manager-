@@ -3861,6 +3861,11 @@ function putFile(url, file, onProgress) {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    // ⚠ Carry the admin token like api() does. Without this, dragging a car
+    // or track onto a server managed over Tailscale is refused with 401 - the
+    // one upload path that bypassed the shared helper and so bypassed auth.
+    const _tok = adminToken();
+    if (_tok) xhr.setRequestHeader('X-ACECM-Token', _tok);
     xhr.upload.onprogress = e => {
       if (e.lengthComputable) onProgress(e.loaded, e.total);
     };
