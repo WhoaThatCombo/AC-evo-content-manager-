@@ -352,3 +352,118 @@ def _walk(msg, depth=0):
         for it in items:
             if hasattr(it, "ListFields"):
                 yield from _walk(it, depth + 1)
+
+# ------------------------------------------------------------- populate --
+def states_in_package(pkg=None):
+    """model -> the .carfinalstate files the GAME ships for it.
+
+    These are the game's own complete states for each car and preset combo -
+    same car_data, actor, mechanical/visual preset and material slots a real
+    saved car holds. Verified against an owned car: the shipped state for
+    ks_alpine_a110_s decodes as CarFinalStateData cleanly and carries the
+    identical paths. So a car nobody owns can still be given a truthful
+    record, rather than one invented field by field.
+    """
+    pkg = pkg or viewer.package()
+    sep = chr(92)
+    out = {}
+    for path, _s, _o in kspkg.iter_entries(pkg):
+        low = path.lower().replace("/", sep)
+        if not low.endswith(".carfinalstate"):
+            continue
+        parts = low.split(sep)
+        if len(parts) > 2 and parts[0] == "content" and parts[1] == "cars":
+            out.setdefault(parts[2], []).append(path)
+    for v in out.values():
+        v.sort()
+    return out
+
+
+def populate(dry_run=False, pkg=None):
+    """Give every car in the game a saved car, so its liveries can be picked.
+
+    ⚠ The garage only ever held cars you OWN - nine here against a hundred in
+    the game - and the livery picker is driven by the garage, so there was no
+    way to choose a colour for anything else. This writes the missing records
+    from the game's own shipped state for that car.
+
+    Existing files are never touched: a car you already own keeps whatever you
+    have done to it.
+    """
+    d = _saved_cars_dir()
+    if not d:
+        return {"ok": False, "error": "no SavedCars folder - launch the game "
+                                      "once so it creates your profile"}
+    pkg = pkg or viewer.package()
+    if not pkg:
+        return {"ok": False, "error": "content.kspkg not found"}
+    have = {e["model"] for e in garage()}
+    shipped = states_in_package(pkg)
+    todo = sorted(m for m in shipped if m not in have)
+    made, failed = [], []
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_add": todo,
+                "already": sorted(have), "count": len(todo)}
+
+    with open(pkg, "rb") as f:
+        offs = {}
+        for path, size, off in kspkg.iter_entries(pkg):
+            if path.lower().endswith(".carfinalstate"):
+                offs[path] = (size, off)
+        for model in todo:
+            try:
+                src = shipped[model][0]
+                size, off = offs[src]
+                blob = bytes(kspkg.read_entry(f, size, off, src))
+                data = protos.new("CarFinalStateData")
+                if data is None:
+                    raise RuntimeError("CarFinalStateData schema missing")
+                if data.ParseFromString(blob) != len(blob):
+                    raise ValueError("shipped state did not decode cleanly")
+                rec = protos.new(RECORD)
+                rec.final_state.CopyFrom(data)
+                new = _uuid.uuid4()
+                _set_guid(rec, new)
+                out = rec.SerializeToString()
+                # never write something we cannot read back
+                check = protos.new(RECORD)
+                if check.ParseFromString(out) != len(out):
+                    raise ValueError("record did not round-trip")
+                name = f"{model}_{new}.carfinalstatewithconsumable"
+                with open(os.path.join(d, name), "wb") as fh:
+                    fh.write(out)
+                made.append(model)
+            except Exception as ex:
+                logs.LOG.warning("livery: could not add %s: %s", model, ex)
+                failed.append({"model": model, "error": str(ex)})
+    logs.LOG.info("livery: added %d saved car(s)", len(made))
+    return {"ok": True, "added": made, "failed": failed,
+            "count": len(made), "already": len(have)}
+
+
+def depopulate():
+    """Remove ONLY the records populate() created - anything with no mileage.
+
+    ⚠ Judged by consumable status, not by a list we keep: a car you have
+    actually driven has wear on it, and must survive this.
+    """
+    d = _saved_cars_dir()
+    if not d:
+        return {"ok": False, "error": "no SavedCars folder"}
+    gone, kept = [], []
+    for e in garage():
+        try:
+            rec = _load(e["file"])
+            body = getattr(rec.car_consumable_status, "body", None)
+            driven = bool(getattr(body, "hundred_meters", 0))
+        except Exception:
+            driven = True          # unreadable: leave it alone
+        if driven:
+            kept.append(e["model"])
+            continue
+        try:
+            os.remove(e["file"])
+            gone.append(e["model"])
+        except OSError as ex:
+            logs.LOG.warning("livery: removing %s: %s", e["model"], ex)
+    return {"ok": True, "removed": gone, "kept": kept}

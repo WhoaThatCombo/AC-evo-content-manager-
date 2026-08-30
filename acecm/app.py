@@ -587,6 +587,15 @@ class Handler(BaseHTTPRequestHandler):
                         "ok": False,
                         "error": "that colour is not offered for this car"})
                 return _json(self, livery.apply_color(car, slot, color))
+            if path == "/api/livery/populate":
+                # ⚠ Writes files into the player's garage folder, but never
+                # over one: only cars with no saved record at all get one, so
+                # nothing you have already customised can be lost.
+                from . import livery
+                if body.get("undo"):
+                    return _json(self, livery.depopulate())
+                return _json(self, livery.populate(
+                    dry_run=bool(body.get("dry_run"))))
             if path == "/api/app/show":
                 # A second launch asks the instance that owns the window to
                 # raise it, rather than opening a rival webview on the same

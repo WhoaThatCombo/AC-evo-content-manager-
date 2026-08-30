@@ -18,9 +18,20 @@ from . import settings as gamesettings
 DRIVE_ID = "acecm-drive"
 STATE = os.path.join(config.DATA, "drive.json")
 
+# ⚠ DRIFT and FREEROAM are deliberately absent. The game defines both - they
+# are in the GameModeType enum and all over the UI resources - but neither can
+# actually be started: the game writes their .gamemodesave as an empty stub
+# (79 and 82 bytes, no track and no car) where PRACTICE, INSTANT_RACE and
+# RACE_WEEKEND all carry a real session. Free Roam wants one specific track
+# that is not in this build. Offering them meant picking a mode that silently
+# would not load, so they are not offered.
+#
+# HOTLAP, HOTSTINT and TEST_DRIVE are kept: they have no save on this machine
+# either way, so there is no evidence against them, and removing a mode that
+# works is worse than listing one that might not.
 SP_MODES = [
     "PRACTICE", "INSTANT_RACE", "HOTLAP", "HOTSTINT",
-    "DRIFT", "FREEROAM", "RACE_WEEKEND", "TEST_DRIVE",
+    "RACE_WEEKEND", "TEST_DRIVE",
 ]
 
 AI_MODES = ("INSTANT_RACE", "RACE_WEEKEND")
