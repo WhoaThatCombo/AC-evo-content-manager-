@@ -112,11 +112,32 @@ def extract(path=None, force=False):
     """Pull FileDescriptorProtos out of an executable into <data>/protos."""
     from google.protobuf import descriptor_pb2 as dp
     d = cache_dir()
-    if not force and glob.glob(os.path.join(d, "*.desc")):
-        return {"ok": True, "cached": True, "dir": d,
-                "count": len(glob.glob(os.path.join(d, "*.desc")))}
     srcs = [path] if path else _sources()
     srcs = [s for s in srcs if s and os.path.isfile(s)]
+    # ⚠ The cache is keyed on the SOURCE exes, not just "do .desc files
+    # exist". A game update rewrites the executable and changes the schemas
+    # inside it - 9.0 -> 9.1 changed 36 of them, including the multiplayer
+    # protocol - but the old code served whatever was already extracted, so
+    # ACECM silently kept parsing with last version's layout. The stamp is
+    # (path, size, mtime) of every source; when it moves, re-extract.
+    stampfile = os.path.join(d, ".sources")
+    stamp = chr(10).join(
+        f"{os.path.abspath(x)}|{os.path.getsize(x)}|{int(os.path.getmtime(x))}"
+        for x in srcs)
+    if not force and glob.glob(os.path.join(d, "*.desc")):
+        try:
+            if open(stampfile, encoding="utf-8").read() == stamp:
+                return {"ok": True, "cached": True, "dir": d,
+                        "count": len(glob.glob(os.path.join(d, "*.desc")))}
+        except OSError:
+            pass
+        # stale: the game changed under us, so clear before re-reading
+        for old_desc in glob.glob(os.path.join(d, "*.desc")):
+            try:
+                os.remove(old_desc)
+            except OSError:
+                pass
+        logs.LOG.info("game executable changed - re-extracting schemas")
     if not srcs:
         return {"ok": False, "error": "no game or server executable found to "
                                       "read the schemas from - set game_exe in "
@@ -148,6 +169,11 @@ def extract(path=None, force=False):
         safe = name.replace("/", "_").replace("\\", "_") + ".desc"
         with open(os.path.join(d, safe), "wb") as f:
             f.write(fd.SerializeToString())
+    if found:
+        try:
+            open(stampfile, "w", encoding="utf-8").write(stamp)
+        except OSError as ex:
+            logs.LOG.info("could not write the schema stamp: %s", ex)
     return {"ok": bool(found), "dir": d, "count": len(found),
             "sources": [os.path.basename(s) for s in srcs],
             "error": None if found else "no descriptors found in those files"}
