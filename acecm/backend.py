@@ -352,30 +352,71 @@ def apply_redirect():
 # search rather than two independent ones. Re-derived 2026-08-25 against
 # buildid 24331595 (was FUN_140ce58d0 in 0.8.1; function moved +0x106b10).
 INSPECTOR_PORT = int(os.environ.get("INSPECTOR_PORT", "9444"))
-_INSPECTOR_PORT_VA = 0x140DEC69C
-_INSPECTOR_PORT_ORIG = bytes.fromhex("c74538ffffffff")  # mov [rbp+0x38], -1
-_INSPECTOR_FLAG_VA = 0x140DEC6A3
-_INSPECTOR_FLAG_ORIG = bytes.fromhex("66c7453c0001")    # flag 0, next byte 1
-_INSPECTOR_FLAG_NEW = bytes.fromhex("66c7453c0101")     # flag 1
 _inspector_cache = {}
 
+# ⚠ Find the inspector site by its CODE PATTERN, not a fixed address.
+#
+# The two instructions the patch touches are adjacent and unique:
+#   mov dword [rbp+X], -1        c7 45 XX ff ff ff ff   (the DevTools port)
+#   mov word  [rbp+Y], 0x0100    66 c7 45 YY 00 01      (enabled=0)
+# The stack offsets X/Y and the address both move between game builds - 9.0's
+# hardcoded VA 0x140dec69c pointed at unrelated code in 9.1 and Drive could no
+# longer press Start. The byte SHAPE is stable, so anchor on that instead. The
+# offsets are read from the match, never assumed, so a build that shuffles the
+# stack still patches correctly.
+import re as _re
 
-def _va_to_file(data, va):
-    e = struct.unpack_from("<I", data, 0x3C)[0]
-    n = struct.unpack_from("<H", data, e + 6)[0]
-    opt = struct.unpack_from("<H", data, e + 20)[0]
-    ib = struct.unpack_from("<Q", data, e + 24 + 24)[0]
-    rva = va - ib
-    for i in range(n):
-        vs, va_s, rs, ra = struct.unpack_from(
-            "<IIII", data, e + 24 + opt + i * 40 + 8)
-        if va_s <= rva < va_s + max(vs, rs):
-            return ra + (rva - va_s)
-    raise ValueError(f"VA {va:#x} is not in any section")
+# Two shapes for one site, because patching CHANGES the very bytes we anchor
+# on. Unpatched the port is -1 and the flag's low byte is 0; patched the port
+# holds the DevTools port and the low byte is 1. A regex that only knew the
+# unpatched shape reported "site not found" on an exe we had already patched -
+# so "already applied" looked like "the game changed", and re-running Drive
+# refused. Match either, and report which.
+#   port instr:  c7 45 <off> <4 byte value>
+#   flag instr:  66 c7 45 <off> <lowbyte> 01
+_INSP_UNPATCHED = _re.compile(
+    bytes([0xc7, 0x45]) + b"." + bytes([0xff, 0xff, 0xff, 0xff,
+                                         0x66, 0xc7, 0x45]) + b"."
+    + bytes([0x00, 0x01]), _re.DOTALL)
 
 
-def _inspector_want_port():
-    return _INSPECTOR_PORT_ORIG[:3] + struct.pack("<I", INSPECTOR_PORT)
+def _insp_patched_sig():
+    """The patched shape for the CURRENT inspector port."""
+    port = struct.pack("<I", INSPECTOR_PORT)
+    return _re.compile(
+        bytes([0xc7, 0x45]) + b"." + _re.escape(port)
+        + bytes([0x66, 0xc7, 0x45]) + b"." + bytes([0x01, 0x01]),
+        _re.DOTALL)
+
+
+def _find_inspector(data):
+    """(port_off, flag_off, matched, patched) or None.
+
+    Tries the unpatched shape first, then the patched one. Refuses an
+    ambiguous match - if a shape appears more than once we cannot know which
+    is the inspector, and guessing would corrupt the exe.
+    """
+    for sig, patched in ((_INSP_UNPATCHED, False), (_insp_patched_sig(), True)):
+        ms = list(sig.finditer(data))
+        if len(ms) == 1:
+            m = ms[0]
+            return m.start(), m.start() + 7, m.group(), patched
+    return None
+
+
+
+def _inspector_bytes(matched):
+    """From the matched instruction pair, the (orig, patched) for both sites.
+
+    Derived from the match so the stack offsets are whatever THIS build uses,
+    never assumed - the port keeps its `c7 45 <off>`, the flag keeps its
+    `66 c7 45 <off>`.
+    """
+    port_orig = matched[0:7]
+    port_new = matched[0:3] + struct.pack("<I", INSPECTOR_PORT)
+    flag_orig = matched[7:13]
+    flag_new = matched[7:11] + bytes([0x01, 0x01])
+    return port_orig, port_new, flag_orig, flag_new
 
 
 def probe_inspector():
@@ -393,26 +434,29 @@ def probe_inspector():
         return hit
     try:
         data = open(exe, "rb").read()
-        pf = _va_to_file(data, _INSPECTOR_PORT_VA)
-        gf = _va_to_file(data, _INSPECTOR_FLAG_VA)
-    except (OSError, ValueError, struct.error) as ex:
+    except OSError as ex:
         info = {"exe": exe, "inspector_patched": None, "error": str(ex)}
-        _inspector_cache.clear()
-        _inspector_cache[key] = info
+        _inspector_cache.clear(); _inspector_cache[key] = info
         return info
-    port_b = bytes(data[pf:pf + len(_INSPECTOR_PORT_ORIG)])
-    flag_b = bytes(data[gf:gf + len(_INSPECTOR_FLAG_ORIG)])
-    want = _inspector_want_port()
+    site = _find_inspector(data)
+    if not site:
+        info = {"exe": exe, "inspector_patched": None,
+                "error": "inspector code pattern not found (or ambiguous) - "
+                         "the game may have changed too much to auto-locate"}
+        _inspector_cache.clear(); _inspector_cache[key] = info
+        return info
+    pf, gf, matched, patched = site
+    port_b = bytes(data[pf:pf + 7])
+    flag_b = bytes(data[gf:gf + 6])
     info = {
         "exe": exe,
-        "inspector_patched": port_b == want and flag_b == _INSPECTOR_FLAG_NEW,
-        "port_site": hex(_INSPECTOR_PORT_VA),
-        "flag_site": hex(_INSPECTOR_FLAG_VA),
+        "inspector_patched": patched,
+        "port_site": hex(pf),
+        "flag_site": hex(gf),
         "port_bytes": port_b.hex(),
         "flag_bytes": flag_b.hex(),
         "port": INSPECTOR_PORT,
-        "known": (port_b in (want, _INSPECTOR_PORT_ORIG)
-                  and flag_b in (_INSPECTOR_FLAG_ORIG, _INSPECTOR_FLAG_NEW)),
+        "known": True,
     }
     _inspector_cache.clear()
     _inspector_cache[key] = info
@@ -434,28 +478,19 @@ def apply_inspector():
                                       "is not a valid TCP port"}
     try:
         data = bytearray(open(exe, "rb").read())
-        pf = _va_to_file(data, _INSPECTOR_PORT_VA)
-        gf = _va_to_file(data, _INSPECTOR_FLAG_VA)
-    except (OSError, ValueError, struct.error) as ex:
+    except OSError as ex:
+        return {"ok": False, "error": f"could not read the client: {ex}"}
+    site = _find_inspector(bytes(data))
+    if not site:
         return {"ok": False,
-                "error": f"could not locate the inspector sites: {ex}"}
-    port_b = bytes(data[pf:pf + len(_INSPECTOR_PORT_ORIG)])
-    flag_b = bytes(data[gf:gf + len(_INSPECTOR_FLAG_ORIG)])
-    want = _inspector_want_port()
-    if port_b == want and flag_b == _INSPECTOR_FLAG_NEW:
+                "error": "inspector code pattern not found (or ambiguous) - "
+                         "Drive cannot enable the menu inspector until this is "
+                         "re-derived for this game build"}
+    pf, gf, matched, patched = site
+    if patched:
         _inspector_cache.clear()
         return {"ok": True, "already": True, "port": INSPECTOR_PORT}
-    if port_b not in (want, _INSPECTOR_PORT_ORIG):
-        return {"ok": False,
-                "error": f"unexpected bytes at inspector port site "
-                         f"{_INSPECTOR_PORT_VA:#x}: {port_b.hex()} "
-                         f"(expected {_INSPECTOR_PORT_ORIG.hex()}). "
-                         f"the game may have updated — Drive cannot press "
-                         f"Start until this is re-derived"}
-    if flag_b not in (_INSPECTOR_FLAG_ORIG, _INSPECTOR_FLAG_NEW):
-        return {"ok": False,
-                "error": f"unexpected bytes at inspector flag site "
-                         f"{_INSPECTOR_FLAG_VA:#x}: {flag_b.hex()}"}
+    _, want, _, flag_new = _inspector_bytes(matched)
     if _game_running(exe):
         return {"ok": False,
                 "error": "the game is running — close it before enabling "
@@ -466,7 +501,7 @@ def apply_inspector():
             shutil.copy2(exe, bak)
             logs.LOG.info("inspector backup: %s", bak)
         data[pf:pf + len(want)] = want
-        data[gf:gf + len(_INSPECTOR_FLAG_NEW)] = _INSPECTOR_FLAG_NEW
+        data[gf:gf + len(flag_new)] = flag_new
         with open(exe, "wb") as fh:
             fh.write(data)
     except PermissionError:
@@ -478,9 +513,8 @@ def apply_inspector():
     except OSError as ex:
         return {"ok": False, "error": f"could not write the client: {ex}"}
     _inspector_cache.clear()
-    logs.LOG.info("inspector enabled: DebuggerPort %s, flag 1 (sites %s / %s)",
-                  INSPECTOR_PORT, hex(_INSPECTOR_PORT_VA),
-                  hex(_INSPECTOR_FLAG_VA))
+    logs.LOG.info("inspector enabled: DebuggerPort %s, flag 1 "
+                  "(sites %s / %s)", INSPECTOR_PORT, hex(pf), hex(gf))
     return {"ok": True, "port": INSPECTOR_PORT, "backup": bak,
             "off": hex(pf)}
 
