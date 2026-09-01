@@ -2922,6 +2922,34 @@ async function tracksPage() {
   const p = $('#page');
   p.innerHTML = '';
 
+  /* After a game update the client's tracks.table is replaced and every
+     imported track vanishes from it, even though the files are still on
+     disk. Detect that and offer to put them back, rather than leaving the
+     user to wonder where their tracks went. */
+  try {
+    const miss = await api('tracks/missing');
+    if (miss && miss.ok && miss.count > 0) {
+      const warn = el('div', 'card');
+      warn.style.borderLeft = '3px solid var(--accent)';
+      warn.innerHTML = '<h2>' + miss.count + ' imported track'
+        + (miss.count === 1 ? '' : 's') + ' missing</h2>'
+        + '<div class="tiny dim" style="margin-bottom:9px">These are on disk '
+        + 'but the game forgot them &mdash; usually because Assetto Corsa EVO '
+        + 'updated and replaced its track list. Restoring re-registers them '
+        + '(about 15s each). Close the game first.</div>';
+      const b = el('button', 'sm primary', 'Restore ' + miss.count + ' track'
+                   + (miss.count === 1 ? '' : 's'));
+      b.onclick = async () => {
+        const r = await api('tracks/restore', {});
+        if (!r || !r.ok) { toast((r && r.error) || 'could not start', true); return; }
+        toast('Restoring ' + (r.count || '') + ' track(s) - watch the bar');
+        progKick();
+      };
+      warn.append(b);
+      p.append(warn);
+    }
+  } catch (e) { /* detection is best-effort */ }
+
   // Every track the game can load, with the cover art it ships. Only some
   // tracks have one; the rest show a blank tile rather than a placeholder
   // pretending to be a photo.
