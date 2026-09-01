@@ -197,6 +197,44 @@ def _game_exe():
     return detect.find("game_exe") or ""
 
 
+def _refresh_backup(exe, bak, data_len=None):
+    """Keep a backup only while it belongs to the CURRENT game build.
+
+    ⚠ A backup is a downgrade waiting to happen. These are written once and
+    then skipped if the file exists, so after a game update `.bak_preinspector`
+    can still hold the PREVIOUS build - and restoring it puts that old
+    executable back. That is not hypothetical: an 8.1 backup was restored over
+    a freshly updated 9.1 client and silently downgraded the game, with Steam
+    still reporting it as up to date because Steam tracks its own manifest, not
+    the bytes on disk.
+
+    A patch only ever flips a few bytes, so a backup of the same build is the
+    same SIZE as the file it came from. A different size means a different
+    build: throw it away and take a fresh one.
+    """
+    want = data_len if data_len is not None else os.path.getsize(exe)
+    try:
+        if os.path.exists(bak):
+            if os.path.getsize(bak) == want:
+                return {"kept": True}
+            stale = bak + ".stale"
+            try:
+                os.replace(bak, stale)
+                logs.LOG.warning(
+                    "%s is from a different game build (%d bytes vs %d) - "
+                    "set aside as %s and taking a fresh backup",
+                    os.path.basename(bak), os.path.getsize(stale), want,
+                    os.path.basename(stale))
+            except OSError:
+                os.remove(bak)
+        shutil.copy2(exe, bak)
+        logs.LOG.info("backup: %s", bak)
+        return {"made": True}
+    except OSError as ex:
+        logs.LOG.warning("could not refresh %s: %s", bak, ex)
+        return {"error": str(ex)}
+
+
 def probe_client_url():
     """Read the client's rdata slot. Do not trust the .bak_prebackend file.
 
@@ -324,9 +362,7 @@ def apply_redirect():
     # -backend=), so say that rather than offering a skip that does not work.
     bak = exe + ".bak_prebackend"
     try:
-        if not os.path.exists(bak):
-            shutil.copy2(exe, bak)
-            logs.LOG.info("backend URL backup: %s", bak)
+        _refresh_backup(exe, bak, len(data))
         data[off:off + slot] = want
         with open(exe, "wb") as fh:
             fh.write(data)
@@ -497,9 +533,7 @@ def apply_inspector():
                          "the menu inspector"}
     bak = exe + ".bak_preinspector"
     try:
-        if not os.path.exists(bak):
-            shutil.copy2(exe, bak)
-            logs.LOG.info("inspector backup: %s", bak)
+        _refresh_backup(exe, bak, len(data))
         data[pf:pf + len(want)] = want
         data[gf:gf + len(flag_new)] = flag_new
         with open(exe, "wb") as fh:
