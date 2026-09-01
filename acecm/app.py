@@ -484,6 +484,12 @@ class Handler(BaseHTTPRequestHandler):
                                     # tracks already imported here, which is
                                     # how anyone actually gets one
                                     "imported": trackdeploy.importable()})
+            if path == "/api/tracks/missing":
+                # imported tracks the client table lost (a game update wipes
+                # them); the UI turns a nonzero count into a Restore prompt
+                miss = trackdeploy.missing_from_client()
+                return _json(self, {"ok": True, "missing": miss,
+                                    "count": len(miss)})
             if path == "/api/tracks/installed":
                 return _json(self, install.tracks_installed())
             if path == "/api/splines":
@@ -817,6 +823,42 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, contentsync.scan(pool))
             if path == "/api/browser/install":
                 return _json(self, _install_content(body))
+            if path == "/api/tracks/restore":
+                if _INSTALL.get("state") == "running":
+                    return _json(self, {"ok": False,
+                                        "error": "a content job is already running"})
+                miss = trackdeploy.missing_from_client()
+                if not miss:
+                    return _json(self, {"ok": True, "count": 0,
+                                        "note": "nothing to restore"})
+                _INSTALL.update({"state": "running",
+                                 "detail": "restoring imported tracks",
+                                 "done": 0, "total": len(miss), "files": []})
+
+                def run_restore():
+                    def tick(i, n, folder):
+                        _INSTALL["done"] = i
+                        _INSTALL["total"] = n
+                        _INSTALL["detail"] = f"restoring {folder} ({i+1}/{n})"
+                    try:
+                        r = trackdeploy.restore_imported(progress=tick)
+                        install._after_content_change()
+                        if r.get("ok"):
+                            _INSTALL.update({"state": "done",
+                                             "detail": f"restored "
+                                             f"{len(r.get('restored') or [])} track(s)"})
+                        else:
+                            _INSTALL.update({"state": "error",
+                                             "detail": "; ".join(
+                                                 str(f) for f in
+                                                 (r.get("failed") or []))[:200]
+                                             or "restore failed"})
+                    except Exception as ex:
+                        logs.LOG.exception("restoring imported tracks")
+                        _INSTALL.update({"state": "error", "detail": str(ex)})
+
+                threading.Thread(target=run_restore, daemon=True).start()
+                return _json(self, {"ok": True, "started": True, "count": len(miss)})
             if path == "/api/trackdeploy/deploy":
                 # native = install at the track's own paths, leaving every
                 # stock track intact; the old path borrows Road Atlanta's slots

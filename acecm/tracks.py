@@ -824,6 +824,63 @@ def pack_meta(folder):
             "layout": layout, "containers": containers}
 
 
+def missing_from_client(folder=None):
+    """Imported tracks whose FILES are here but which the client table lost.
+
+    A game update replaces content.kspkg, and with it the tracks.table rows
+    that made imported tracks selectable. The art is untouched in the mods
+    folder, so the track is not gone - the game has just forgotten it. This is
+    what tells the difference: on disk under mods, absent from the table.
+    """
+    from . import contentsync
+    try:
+        known = set(contentsync.track_map().values())
+    except Exception:
+        known = set()
+    here = [t.get("folder") for t in importable() if t.get("folder")]
+    miss = [f for f in here if f not in known]
+    return [f for f in miss if not folder or f == folder]
+
+
+def restore_imported(only=None, progress=None):
+    """Re-register every imported track the client table has forgotten.
+
+    The one action a game update needs for modded content: it walks the tracks
+    already in the mods folder and writes each back into the fresh client
+    table. Idempotent - a track the table still knows is skipped, so running it
+    when nothing is wrong does nothing.
+
+    ⚠ Client side only. Putting a track back into the SERVER package is
+    deploy_native and happens per hosted track at server start - re-deploying
+    all nineteen here would rewrite a 64 MiB index nineteen times for tracks
+    most people do not host.
+    """
+    from . import winproc
+    if winproc.pids_named("AssettoCorsaEVO"):
+        return {"ok": False, "needs_close": True,
+                "error": "close the game first - restoring tracks writes "
+                         "content.kspkg, which is locked while it runs"}
+    want = missing_from_client()
+    if only:
+        want = [f for f in want if f in set(only)]
+    done, failed = [], []
+    for i, folder in enumerate(want):
+        if progress:
+            progress(i, len(want), folder)
+        r = register_client_track(folder)
+        (done if r.get("ok") else failed).append(
+            folder if r.get("ok") else {"folder": folder,
+                                        "error": r.get("error")})
+    if want:
+        try:
+            from . import contentsync
+            contentsync.track_map(refresh=True)
+        except Exception:
+            pass
+    return {"ok": not failed, "restored": done, "failed": failed,
+            "checked": len(want)}
+
+
 def register_client_track(folder, meta=None):
     """Write this track into the CLIENT's tracks.table + containers table.
 
