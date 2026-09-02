@@ -2,7 +2,7 @@
 
 ACECM is a desktop manager for [Assetto Corsa EVO](https://store.steampowered.com/app/3058630): install cars and tracks, run a dedicated server, join it from Drive, and share a live map. It is built for the same job Content Manager does for the original Assetto Corsa — content, hosting, and getting you on track without fighting the stock launcher.
 
-Current release: **0.16.0**. Windows 10/11 with Edge WebView2 (included with
+Current release: **0.15.0**. Windows 10/11 with Edge WebView2 (included with
 Windows 11), or Linux with Steam + Proton.
 
 ## What it is
