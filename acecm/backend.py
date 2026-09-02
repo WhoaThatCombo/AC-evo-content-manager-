@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 
-from . import config, detect, logs, netutil
+from . import config, detect, logs, netutil, shell, winproc
 
 MODES = {
     "proxy": "acevo_proxy.py",
@@ -319,6 +319,12 @@ def _is_elevated():
     way costs the user a launch that silently never happens.
     """
     try:
+        if sys.platform != "win32":
+            # ⚠ Not the same question, deliberately. Nothing on Linux needs
+            # elevation to patch the game: the Steam library is owned by the
+            # user. Answering "yes, elevated" here would make the caller warn
+            # about a UAC problem that does not exist on this platform.
+            return os.geteuid() == 0
         import ctypes
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
@@ -679,8 +685,7 @@ def start(mode="proxy"):
     # user for our own leftover. Either it started in time or it does not run.
     if p.poll() is None:
         try:
-            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
-                           capture_output=True, timeout=15)
+            winproc.kill(p.pid)
         except Exception:
             p.terminate()
         _procs.pop(mode, None)
@@ -689,6 +694,8 @@ def start(mode="proxy"):
         why = (f"port {port} is already held by another process (pid "
                f"{owner[0]}), so this backend could not bind. Close the other "
                f"ACECM or backend window and start it again.")
+    elif privileged_port_hint(port):
+        why = privileged_port_hint(port)
     elif p.poll() is not None:
         why = (f"the backend exited immediately without listening on port "
                f"{port} - see the detail below")
@@ -696,6 +703,41 @@ def start(mode="proxy"):
         why = (f"the backend is running but never listened on port {port}")
     return {"ok": False, "pid": p.pid, "mode": mode, "port": port,
             "error": why, "detail": tail}
+
+
+
+def privileged_port_hint(port):
+    """Why a low port cannot be bound on Linux, or "" if that is not the issue.
+
+    ⚠ Windows lets any user bind port 448; Linux reserves everything below
+    `net.ipv4.ip_unprivileged_port_start` (1024 by default) to root. The lobby
+    port is not ours to choose — it is where the game connects — so the only
+    fixes are to lower that boundary or to grant the capability. Without this
+    the failure surfaces as "the backend exited immediately", which sends
+    people looking at TLS and firewalls instead.
+    """
+    if sys.platform == "win32":
+        return ""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return ""
+    if port >= 1024 or os.geteuid() == 0:
+        return ""
+    try:
+        with open("/proc/sys/net/ipv4/ip_unprivileged_port_start") as fh:
+            start = int(fh.read().strip())
+    except (OSError, ValueError):
+        start = 1024
+    if port >= start:
+        return ""
+    return (f"port {port} is below Linux's privileged-port boundary "
+            f"({start}), so an ordinary user cannot bind it. The game "
+            f"connects to this port, so it cannot be changed. Allow it with:"
+            f"\n    sudo sysctl -w net.ipv4.ip_unprivileged_port_start={port}"
+            f"\nTo keep it across reboots:"
+            f"\n    echo 'net.ipv4.ip_unprivileged_port_start={port}' | "
+            f"sudo tee /etc/sysctl.d/50-acecm.conf")
 
 
 def _listener_pids(port):
@@ -721,17 +763,11 @@ def _is_descendant(pid, ancestor, depth=6):
         if seen == ancestor:
             return True
         try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                 f"(Get-CimInstance Win32_Process -Filter "
-                 f"'ProcessId={int(seen)}').ParentProcessId"],
-                capture_output=True, text=True, timeout=10)
-            txt = (r.stdout or "").strip()
+            seen = int(winproc.ppid(seen) or 0)
         except Exception:
             return False
-        if not txt.isdigit():
+        if not seen:
             return False
-        seen = int(txt)
         if seen in (0, 4):
             return False
     return False
@@ -757,12 +793,7 @@ def _orphan_on_backend_port():
         if pid == os.getpid():
             continue
         try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                 f"(Get-CimInstance Win32_Process -Filter "
-                 f"'ProcessId={pid}').CommandLine"],
-                capture_output=True, text=True, timeout=10)
-            cmd = (r.stdout or "").strip()
+            cmd = winproc.cmdline(pid)
         except Exception as ex:
             logs.LOG.info("backend port owner lookup: %s", ex)
             continue
@@ -787,8 +818,7 @@ def stop():
         logs.LOG.info("reclaiming backend port %s from orphaned ACECM pid %s "
                       "(left over from a previous ACECM session)",
                       config.CFG["backend_port"], pid)
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                       capture_output=True)
+        winproc.kill(pid)
     return {"ok": True}
 
 
@@ -1064,6 +1094,91 @@ def _game_pids():
     return winproc.pids_named("AssettoCorsaEVO")
 
 
+
+def _pe_base_linux(pid, name="AssettoCorsaEVO.exe"):
+    """Where the game's PE image is mapped in this process, or None.
+
+    ⚠ The LOWEST mapping of the file, not the first line that mentions it.
+    A PE is mapped as several segments with different protections and the
+    kernel lists them in address order per region, but the image base is the
+    start of the lowest one — every RVA in the binary is relative to that.
+    """
+    base = None
+    try:
+        with open(f"/proc/{int(pid)}/maps", "r", errors="replace") as fh:
+            for line in fh:
+                parts = line.split(None, 5)
+                if len(parts) < 6:
+                    continue
+                path = parts[5].strip()
+                if not path.lower().endswith(name.lower()):
+                    continue
+                start = int(parts[0].split("-")[0], 16)
+                if base is None or start < base:
+                    base = start
+    except OSError:
+        return None
+    return base
+
+
+def _poke_linux(value=True):
+    """Linux half of poke_ai_player_flag, via /proc/<pid>/mem.
+
+    ⚠ Needs ptrace permission over a process we did not start. Steam launches
+    the game, so with the usual `kernel.yama.ptrace_scope=1` this is refused
+    and there is nothing ACECM can do about it from inside. Report that
+    plainly instead of failing as though the address were wrong — the two
+    have completely different fixes.
+    """
+    pids = _game_pids()
+    if not pids:
+        return {"ok": False, "error": "game is not running"}
+    want = b"\x01" if value else b"\x00"
+    done, denied = [], False
+    for pid in pids:
+        base = _pe_base_linux(pid)
+        if base is None:
+            continue                 # a wine helper with no PE image mapped
+        addr = base + (_AI_FLAG_VA - _IMAGE_BASE)
+        try:
+            with open(f"/proc/{pid}/mem", "rb+", buffering=0) as mem:
+                mem.seek(addr)
+                before = mem.read(1)
+                mem.seek(addr)
+                mem.write(want)
+                mem.seek(addr)
+                after = mem.read(1)
+            rec = {"pid": pid, "ok": after == want, "addr": hex(addr),
+                   "base": hex(base), "before": before.hex(),
+                   "after": after.hex()}
+            done.append(rec)
+            logs.LOG.info("poked FLAGS_ai_player_car pid=%s %s", pid, rec)
+        except PermissionError:
+            denied = True
+            done.append({"pid": pid, "ok": False, "error": "permission denied"})
+        except OSError as ex:
+            done.append({"pid": pid, "ok": False, "error": str(ex),
+                         "addr": hex(addr)})
+    ok = any(x.get("ok") for x in done)
+    if not ok and denied:
+        scope = ""
+        try:
+            with open("/proc/sys/kernel/yama/ptrace_scope") as fh:
+                scope = fh.read().strip()
+        except OSError:
+            pass
+        hint = ("writing to another process is blocked by "
+                f"kernel.yama.ptrace_scope={scope or '?'}. "
+                "Allow it for this session with: "
+                "sudo sysctl -w kernel.yama.ptrace_scope=0")
+        return {"ok": False, "error": hint, "pokes": done}
+    if not done:
+        return {"ok": False,
+                "error": "the game's executable image was not found in any "
+                         "running process — is it still starting up?"}
+    return {"ok": ok, "pokes": done}
+
+
 def poke_ai_player_flag(value=True):
     """Set FLAGS_ai_player_car in the running process after the menu exists.
 
@@ -1072,6 +1187,8 @@ def poke_ai_player_flag(value=True):
     once the dealership car already exists, only affects the next spawn
     (the dedicated-server join).
     """
+    if sys.platform != "win32":
+        return _poke_linux(value)
     import ctypes
     from ctypes import wintypes
 
@@ -1206,12 +1323,23 @@ def fast_boot_flags(already=()):
                               unchanged" - a fast path the game ships switched
                               off
       no_idle_camera_sequence "Disable idle camera sequence"
+      startup_scene           "Startup scene" - which scene the client boots
+                              into. The client's own default is `paintshop`,
+                              the car dealership, and Drive cannot press Start
+                              until it has finished and its overlay is gone.
+                              That wait is several seconds of pure delay for
+                              anyone who is going straight to a session.
 
     ⚠ Off by default, and deliberately. skip_cars_preload MOVES work rather
     than removing it - the boot is shorter and the first use of a car pays for
     it - so whether it is a win depends on what you are doing, and that is the
     user's call, not a default. The intro skip is different: nothing loads
     during it, so it is always on.
+
+    ⚠ startup_scene takes a VALUE and the accepted set is the client's, not
+    ours. `startup_scene` in Settings overrides it; empty means "leave the
+    game's default alone", which is the safe answer if a value the client does
+    not know turns out to misbehave.
     """
     want = []
     if not config.CFG.get("fast_boot"):
@@ -1220,6 +1348,9 @@ def fast_boot_flags(already=()):
                  "no_idle_camera_sequence"):
         if not any(name in a for a in already):
             want.append("-" + name)
+    scene = str(config.CFG.get("startup_scene") or "").strip()
+    if scene and not any("startup_scene" in a for a in already):
+        want.append("-startup_scene=" + scene)
     return want
 
 
@@ -1254,7 +1385,7 @@ def launch_game(extra_args=None):
         # (we cannot find the exe) never surfaced.
         appid = config.CFG.get("steam_appid")
         if appid:
-            os.startfile(f"steam://rungameid/{appid}")   # noqa: S606
+            shell.open_url(f"steam://rungameid/{appid}")
             return {"ok": False, "via": "steam", "started": True,
                     "error": "the game exe could not be found, so it was "
                              "started through Steam WITHOUT a rewritten "
@@ -1434,30 +1565,49 @@ def launch_game(extra_args=None):
     elif want_flags and not _is_elevated():
         env["SteamAppId"] = appid
         env["SteamGameId"] = appid
-        cmd = [exe, f"-backend={url}", f"--backend={url}"]
-        cmd.extend(extra_args)
+        cmd, launch_env = client_launch_cmd(
+            exe, [f"-backend={url}", f"--backend={url}"] + list(extra_args),
+            env)
         try:
-            subprocess.Popen(cmd, cwd=cwd, env=env)
+            subprocess.Popen(cmd, cwd=cwd, env=launch_env)
             # ⚠ Wait, then check it is STILL there. The process exists within
             # half a second of Popen whether or not Steam will accept it -
             # the refusal comes later, once steam_api has initialised and
             # checked ownership. Breaking out at the first sight of the
             # process would call a launch that is about to be refused a
             # success, and never fall back.
-            time.sleep(8)
+            # ⚠ Longer on Linux. The 8s is tuned for Windows, where the exe
+            # is the process we started. Under Proton there is a container to
+            # bring up (pressure-vessel), a prefix to check and a wineserver
+            # to start before AssettoCorsaEVO.exe exists at all, so 8s can
+            # expire while the launch is still perfectly healthy - and the
+            # penalty for calling it early is falling back to a Steam launch
+            # that silently drops every flag.
+            time.sleep(8 if sys.platform == "win32" else 25)
             if _game_running():
                 via = "exe"
                 tried_direct = "ok"
             else:
                 tried_direct = "refused or exited within 8s"
+            launch_error = None
         except OSError as ex:
             tried_direct = f"failed: {ex}"
+            launch_error = ex
         if not via:
-            # remember it, so the wait is paid once rather than every launch
-            try:
-                config.save({"direct_launch_refused": True})
-            except Exception:
-                pass
+            # ⚠ Only remember a REFUSAL. `direct_launch_refused` exists to
+            # avoid paying the 8s wait again when Steam will not accept our
+            # token - it is a fact about this machine's ownership, and it
+            # permanently disables the one route that carries our flags.
+            # An OSError is not that: it means we could not start the process
+            # at all (a wrong path, or a Windows exe with no Proton behind
+            # it), which is a bug or a setup problem and is fixed by fixing
+            # it. Persisting that turned one broken launch into a permanent
+            # downgrade to flagless Steam launches.
+            if launch_error is None:
+                try:
+                    config.save({"direct_launch_refused": True})
+                except Exception:
+                    pass
             logs.LOG.info("direct launch %s - falling back to Steam, and not "
                           "trying again (flags will not reach the game)",
                           tried_direct)
@@ -1466,10 +1616,11 @@ def launch_game(extra_args=None):
     if not via:
         env["SteamAppId"] = appid
         env["SteamGameId"] = appid
-        cmd = [exe, f"-backend={url}", f"--backend={url}"]
-        cmd.extend(extra_args)
+        cmd, launch_env = client_launch_cmd(
+            exe, [f"-backend={url}", f"--backend={url}"] + list(extra_args),
+            env)
         via = "exe"
-        subprocess.Popen(cmd, cwd=cwd, env=env)
+        subprocess.Popen(cmd, cwd=cwd, env=launch_env)
     logs.launched("game client", cmd, None, backend=url, via=via,
                   rdata_patched=probe_client_url().get("rdata_patched"),
                   inspector_patched=probe_inspector().get("inspector_patched"),
@@ -1547,6 +1698,53 @@ def ensure_steam(wait=20.0):
                      "open Steam yourself, then Drive again"}
 
 
+
+# ⚠ The vkd3d-proton workaround AC EVO needs. Without it the client dies at
+# renderer init with "Failed to create command signature": vkd3d cannot build
+# a command signature that updates a root descriptor unless root CBVs are raw
+# VAs. Steam users set this in the game's launch options, but a DIRECT launch
+# never sees those - so ACECM has to supply it, or the one path that actually
+# delivers our flags is also the one that crashes.
+VKD3D_WORKAROUND = "force_raw_va_cbv"
+
+
+def _with_vkd3d(env):
+    """Add our vkd3d flag without discarding one the user already set."""
+    cur = [x for x in (env.get("VKD3D_CONFIG") or "").split(",") if x.strip()]
+    if VKD3D_WORKAROUND not in cur:
+        cur.append(VKD3D_WORKAROUND)
+    env["VKD3D_CONFIG"] = ",".join(cur)
+    return env
+
+
+def client_launch_cmd(exe, args, env):
+    """argv + env that start the game client on this platform.
+
+    ⚠ On Linux the client is a Windows binary: exec'ing it directly is an
+    "Exec format error", which the caller records as a refusal and then never
+    retries. It has to go through the same Proton prefix Steam uses, with the
+    verb Steam itself uses, so the prefix is set up before the game runs.
+    """
+    argv = [exe] + [str(a) for a in args]
+    if sys.platform == "win32":
+        return argv, env
+    from . import proton
+    appid = str(config.CFG.get("steam_appid") or "3058630")
+    if not proton.available(appid):
+        raise OSError("no Proton prefix for appid %s - launch the game from "
+                      "Steam once so Proton creates it" % appid)
+    # ⚠ "run", NOT "waitforexitandrun". The latter is what Steam uses, and it
+    # first waits for a previous session's wineserver to exit. ACECM's whole
+    # point is running a dedicated server and joining it, so the prefix very
+    # often ALREADY has one of our own processes in it - and then the verb
+    # blocks forever. The symptom is silent and expensive to chase: Proton's
+    # wrapper sits idle, the game never starts, nothing is logged, and only
+    # the wrapper chain is left looking like a running game.
+    inner = proton.run_argv(appid, proton.to_windows_path(exe, appid),
+                            [str(a) for a in args], verb="run")
+    return inner, _with_vkd3d(proton.run_env(appid, env))
+
+
 def _start_via_steam(appid):
     """Open the game as the logged-in Steam user, not as ACECM's token."""
     url = f"steam://rungameid/{appid}"
@@ -1561,8 +1759,8 @@ def _start_via_steam(appid):
         except OSError:
             pass
     try:
-        os.startfile(url)  # noqa: S606
-        return "steam-url", [url]
+        if shell.open_url(url):
+            return "steam-url", [url]
     except OSError:
         pass
     root = detect.steam_root()

@@ -2,7 +2,8 @@
 
 ACECM is a desktop manager for [Assetto Corsa EVO](https://store.steampowered.com/app/3058630): install cars and tracks, run a dedicated server, join it from Drive, and share a live map. It is built for the same job Content Manager does for the original Assetto Corsa — content, hosting, and getting you on track without fighting the stock launcher.
 
-Current release: **0.10.5**. Windows 10/11, Edge WebView2 (included with Windows 11).
+Current release: **0.16.0**. Windows 10/11 with Edge WebView2 (included with
+Windows 11), or Linux with Steam + Proton.
 
 ## What it is
 
@@ -12,19 +13,104 @@ It does **not** ship the game, the dedicated server, or Kunos content. You alrea
 
 ## Install
 
-1. Download **[ACECM.exe](https://github.com/WhoaThatCombo/AC-evo-content-manager-/releases/latest)** from the latest GitHub Release.
+1. Download **[ACECM.exe](https://github.com/WhoaThatCombo/AC-evo-content-manager-/releases/latest)** (Windows) or **ACECM** (Linux) from the latest GitHub Release.
 2. Run it. There is no installer.
 3. On first launch it locates the Steam game folder and `AssettoCorsaEVOServer.exe`. If either is missed, set it under **Settings**.
 
-Settings, server profiles, logs, and thumbnails live in `%LOCALAPPDATA%\ACECM`. Override the data folder with the `ACECM_DATA` environment variable if you need a clean profile.
+Settings, server profiles, logs, and thumbnails live in `%LOCALAPPDATA%\ACECM`
+(`~/.local/share/ACECM` on Linux). Override the data folder with the
+`ACECM_DATA` environment variable if you need a clean profile.
 
-**Settings → check for updates** downloads the newest release, verifies the SHA-256 published with the asset, and swaps the exe on the next restart. The previous build is kept as `ACECM.exe.old`.
+### Linux
+
+Download **ACECM** (no extension) from the latest release, make it executable,
+run it. It is one self-contained file — no Python, no pip, nothing to install.
 
 ```
-ACECM.exe              native window (default)
-ACECM.exe --browser    open in your default browser
-ACECM.exe --headless   API only
+chmod +x ACECM
+./ACECM
 ```
+
+To get it in your app launcher, put it on your PATH and add a desktop entry:
+
+```
+mkdir -p ~/.local/bin ~/.local/share/applications
+mv ACECM ~/.local/bin/ && chmod +x ~/.local/bin/ACECM
+cat > ~/.local/share/applications/ACECM.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=AC EVO Content Manager
+Exec=$HOME/.local/bin/ACECM
+Terminal=false
+Categories=Game;Utility;
+EOF
+```
+
+Settings and profiles live in `~/.local/share/ACECM`.
+
+#### Two things to set up once
+
+**1. The game needs a launch option.** In Steam, right-click Assetto Corsa EVO
+→ Properties → Launch Options:
+
+```
+VKD3D_CONFIG=force_raw_va_cbv %command%
+```
+
+Without it the client dies at renderer init with `Failed to create command
+signature` — vkd3d-proton cannot build a command signature that updates a root
+descriptor unless root CBVs are raw VAs. ACECM sets this itself when it
+launches the game, but Steam launches need it too.
+
+**2. The lobby proxy needs port 448, which Linux reserves for root.** The game
+connects there, so it cannot be moved:
+
+```
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start=448
+echo 'net.ipv4.ip_unprivileged_port_start=448' | sudo tee /etc/sysctl.d/50-acecm.conf
+```
+
+Everything except the lobby (Drive, Content, servers, thumbnails) works
+without it.
+
+#### How it runs the game
+
+The game and the dedicated server are Windows binaries. ACECM runs them
+through the **Proton prefix Steam already uses for AC EVO**, so launch the game
+from Steam once before first use — that is what creates the prefix. The 3D car
+viewer (`evoview.exe`) goes through the same prefix.
+
+#### Window
+
+ACECM uses a native window when the desktop can provide one:
+
+1. A WebKitGTK window, hosted by your system Python. Needs `python3-gobject`
+   and `webkit2gtk4.1`, which most desktops already have.
+2. A Chromium-family browser in `--app` mode.
+3. Otherwise your default browser.
+
+The single binary carries its own Python, so it cannot import the distro's
+PyGObject directly (different ABI) — it asks the system Python to draw the
+window instead. Nothing to install either way.
+
+#### Optional
+
+* `xdotool` or `wmctrl` — lets ACECM raise the game window, and enables the
+  keyboard pit hotkey. Without focus detection that binding stays **off** on
+  purpose: `ctrl+y` is redo in most editors and firing it there would teleport
+  a car in a session running behind. Wheel and pad buttons need none of this.
+* Reading wheel buttons needs membership of the `input` group:
+  `sudo usermod -aG input $USER` (log out and in).
+
+#### Running from source
+
+```
+./setup-linux.sh
+.venv/bin/python -m acecm
+```
+
+The venv is created with `--system-site-packages` so the distro's WebKitGTK
+bindings are visible to it.
 
 ## Quick start
 

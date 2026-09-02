@@ -30,17 +30,34 @@ from . import config, logs, version
 APP = "ACECM"
 
 
+IS_WINDOWS = sys.platform == "win32"
+
+
 def install_dir():
+    if not IS_WINDOWS:
+        # ~/.local/bin is on PATH for a normal login shell and needs no root,
+        # which matters on an immutable OS where /usr is read-only.
+        return os.path.join(os.path.expanduser("~"), ".local", "bin")
     base = (os.environ.get("LOCALAPPDATA")
             or os.path.expanduser(r"~\AppData\Local"))
     return os.path.join(base, "Programs", APP)
 
 
 def installed_exe():
+    if not IS_WINDOWS:
+        return os.path.join(install_dir(), APP)
     return os.path.join(install_dir(), f"{APP}.exe")
 
 
 def _start_menu():
+    if not IS_WINDOWS:
+        # The XDG equivalent of the Start Menu: an application entry the
+        # desktop's launcher picks up.
+        base = os.path.join(os.environ.get("XDG_DATA_HOME")
+                            or os.path.join(os.path.expanduser("~"),
+                                            ".local", "share"),
+                            "applications")
+        return os.path.join(base, f"{APP}.desktop")
     base = (os.environ.get("APPDATA")
             or os.path.expanduser(r"~\AppData\Roaming"))
     return os.path.join(base, r"Microsoft\Windows\Start Menu\Programs",
@@ -51,7 +68,8 @@ def _desktop():
     # ⚠ Ask the shell. A OneDrive-redirected profile has no ~\Desktop at all,
     # and writing there fails with DirectoryNotFound.
     from . import detect
-    return os.path.join(detect.desktop(), f"{APP}.lnk")
+    ext = ".lnk" if IS_WINDOWS else ".desktop"
+    return os.path.join(detect.desktop(), f"{APP}{ext}")
 
 
 def running_exe():
@@ -85,13 +103,48 @@ def status():
     return out
 
 
+def _desktop_entry(link, target, args="", desc=""):
+    """Write an XDG .desktop launcher.
+
+    ⚠ Must be executable, and on a desktop file placed in ~/Desktop it must
+    also be trusted by the file manager, or GNOME/KDE show it as a text file
+    rather than an icon. Nothing we can do about the trust bit from here —
+    the user right-clicks "Allow launching" once — but without the exec bit
+    it does not even offer that.
+    """
+    exe = target if not args else f'{target} {args}'
+    icon = os.path.join(os.path.dirname(os.path.abspath(target)), "acecm.ico")
+    body = [
+        "[Desktop Entry]",
+        "Type=Application",
+        f"Name={APP}",
+        f"Comment={desc or APP}",
+        # ⚠ Quote the path: an install under a directory with a space in it
+        # otherwise parses as a command plus an argument and fails silently.
+        f'Exec="{target}"' + (f" {args}" if args else ""),
+        f"Path={os.path.dirname(os.path.abspath(target))}",
+        "Terminal=false",
+        "Categories=Game;Utility;",
+        "StartupNotify=true",
+    ]
+    if os.path.isfile(icon):
+        body.insert(5, f"Icon={icon}")
+    os.makedirs(os.path.dirname(link), exist_ok=True)
+    with open(link, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(body) + "\n")
+    os.chmod(link, 0o755)
+    return link
+
+
 def _shortcut(link, target, args="", desc=""):
-    """Write a .lnk.
+    """Write a .lnk (or a .desktop entry on Linux).
 
     Windows has no plain-file shortcut format we can emit safely, so this asks
     the shell to make one. PowerShell is always present; pywin32 is not, and
     adding a dependency for four lines is not worth it.
     """
+    if not IS_WINDOWS:
+        return _desktop_entry(link, target, args, desc)
     ps = (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('%s');"
         "$s.TargetPath = '%s';"

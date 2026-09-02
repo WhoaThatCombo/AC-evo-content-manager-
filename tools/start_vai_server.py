@@ -11,6 +11,7 @@ The server's content.kspkg ships neither; the VFS falls back to loose files on
 disk, which is how this is solved without touching the archive.
 
 Stop it with:  taskkill /IM AssettoCorsaEVOServer.exe /F
+               (Linux: ACECM Stop, or kill the wine process tree)
 Log:           serverConfig/vai_server.log
 """
 import base64
@@ -363,6 +364,34 @@ def main():
         si.wShowWindow = 0
         popen_kw["startupinfo"] = si
         popen_kw["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+    if sys.platform != "win32":
+        # ⚠ The dedicated server is a Windows binary. Run it through the
+        # SAME Proton build and prefix Steam uses for the game: the engine
+        # resolves content by hash out of content.kspkg and reads the ACE
+        # profile from the prefix's Saved Games, so a server started in some
+        # other prefix sees different content than the client that joins it.
+        #
+        # The Windows console dance above has no counterpart here - the
+        # console a Proton child gets is virtual and never appears - but the
+        # log-file rule is unchanged: this process holds it open until the
+        # exe exits.
+        try:
+            sys.path.insert(0, os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))))
+            from acecm import proton
+        except ImportError as ex:
+            print(f"cannot load the Proton helper ({ex}); "
+                  "a Windows server exe cannot be started on Linux without it")
+            return 1
+        appid = os.environ.get("ACECM_STEAM_APPID") or "3058630"
+        if not proton.available(appid):
+            print("no Proton prefix for appid %s - launch Assetto Corsa EVO "
+                  "from Steam once so Proton creates it, then try again"
+                  % appid)
+            return 1
+        args = proton.run_argv(appid, proton.to_windows_path(EXE, appid),
+                               args[1:], verb="runinprefix")
+        popen_kw["env"] = proton.run_env(appid, child_env)
     p = subprocess.Popen(args, **popen_kw)
     time.sleep(1.2)
     rc = p.poll()

@@ -1,0 +1,26 @@
+-r requirements.txt
+
+# ── Native window backend ────────────────────────────────────────────────
+# pywebview needs a system webview; it does NOT bundle one. There are two
+# routes on Linux and they are not equivalent:
+#
+#   WebKitGTK (preferred) — comes from the DISTRO, not from pip. PyGObject on
+#   PyPI builds against system GTK headers and still cannot supply WebKit2
+#   itself, so installing it here would not help. Get it from the system:
+#
+#       Fedora/Bazzite : rpm-ostree install python3-gobject webkit2gtk4.1
+#                        (needs a reboot — immutable OS)
+#       Arch           : pacman -S python-gobject webkit2gtk-4.1
+#       Debian/Ubuntu  : apt install python3-gi gir1.2-webkit2-4.1
+#
+#   Qt WebEngine — pip-installable and self-contained, which is why it is the
+#   fallback that works on an immutable system with no reboot. It is a large
+#   download (~150-250 MB) because it ships its own Chromium.
+#
+# Uncomment the next line if you want the Qt route:
+# PySide6-Essentials>=6.6
+# PySide6-Addons>=6.6
+
+# Pit-button and hotkey support reads the input devices directly; there is no
+# GetAsyncKeyState / XInput equivalent to fall back on.
+evdev>=1.7

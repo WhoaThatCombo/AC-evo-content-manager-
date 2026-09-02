@@ -14,12 +14,21 @@ import sys
 # ⚠ A packaged build must NOT write beside its executable: that is Program
 # Files for an installed copy, and a one-file build unpacks to a temp folder
 # that is deleted on exit - profiles and telemetry state would vanish every
-# run. User data goes to %LOCALAPPDATA%\ACECM; read-only assets ride inside
-# the bundle at sys._MEIPASS.
+# run. User data goes to %LOCALAPPDATA%\ACECM (~/.local/share/ACECM on
+# Linux); read-only assets ride inside the bundle at sys._MEIPASS.
 FROZEN = getattr(sys, "frozen", False)
 HERE = (sys._MEIPASS if FROZEN                      # noqa: SLF001
         else os.path.dirname(os.path.abspath(__file__)))
-if FROZEN:
+if FROZEN and sys.platform != "win32":
+    # XDG: ~/.local/share/ACECM. The Windows note below applies here too —
+    # a one-file build unpacks to /tmp and is deleted on exit, so nothing we
+    # want to keep may live beside the executable.
+    ROOT = os.path.join(os.environ.get("XDG_DATA_HOME")
+                        or os.path.join(os.path.expanduser("~"),
+                                        ".local", "share"), "ACECM")
+    WEB = os.path.join(HERE, "acecm", "web")
+    BUNDLED_TOOLS = os.path.join(HERE, "tools")
+elif FROZEN:
     ROOT = os.path.join(os.environ.get("LOCALAPPDATA")
                         or os.path.expanduser("~"), "ACECM")
     WEB = os.path.join(HERE, "acecm", "web")
@@ -50,6 +59,12 @@ DEFAULTS = {
     "remote_admin": False,
     # opt-in: see backend.fast_boot_flags
     "fast_boot": False,
+    # Which scene the client boots into, when fast_boot is on. The client's
+    # own default is "paintshop" (the dealership), and Drive has to wait for
+    # it to finish before it can press Start. "menu" goes straight to the
+    # menu. Empty leaves the game's default alone - the accepted values are
+    # the client's, so this is a setting rather than something we hardcode.
+    "startup_scene": "menu",
     "hud_mph": False,
     # A wheel/box/controller button that sends the car to the pitlane. The
     # game's own "Go to Pitlane" is in the pause menu and its button is
@@ -266,6 +281,7 @@ _OWNED_TOOLS = (
     "acevo_proxy.py",
     "acevo_backend.py",
     "server_telemetry.py",
+    "acecm_window.py",
 )
 
 

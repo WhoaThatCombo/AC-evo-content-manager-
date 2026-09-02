@@ -223,18 +223,16 @@ def running_config():
 def _server_cmdline():
     """The command line of the running dedicated server, or ''."""
     try:
-        import subprocess
+        from . import winproc
         # ⚠ Match BOTH exe names. The launcher can run the stock binary
         # (AssettoCorsaEVOServer.stock.exe), and filtering on the plain name
         # alone reported "nothing running" while a server was plainly up -
         # so the advertisement silently kept using stale profile values.
-        ps = ("Get-CimInstance Win32_Process -Filter \"Name LIKE "
-              "'AssettoCorsaEVOServer%.exe'\" | "
-              "Select-Object -First 1 -ExpandProperty CommandLine")
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
-                            "-Command", ps], capture_output=True, text=True,
-                           timeout=8)
-        return (r.stdout or "").strip()
+        for pid in winproc.pids_named_prefix("assettocorsaevoserver"):
+            cmd = winproc.cmdline(pid)
+            if cmd:
+                return cmd.strip()
+        return ""
     except Exception as ex:
         logs.LOG.info("could not read the server command line: %s", ex)
         return ""

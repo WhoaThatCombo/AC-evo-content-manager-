@@ -122,6 +122,44 @@ def viewer_exe():
     return None
 
 
+
+def _looks_like_path(arg):
+    """Is this argument a filesystem path rather than a flag or a value?"""
+    a = str(arg)
+    if not os.path.isabs(a):
+        return False
+    # an output file does not exist yet, but its directory does
+    return os.path.exists(a) or os.path.isdir(os.path.dirname(a))
+
+
+def viewer_cmd(cmd):
+    """Turn an evoview argv into something this platform can actually run.
+
+    evoview is a Windows binary. On Linux it goes through the same Proton
+    prefix as the game — it reads the game's own .kspkg archives, so a
+    prefix that cannot see them is no use — and every path argument has to be
+    translated, because the exe resolves them on the Windows side of wine.
+
+    Returns (argv, env). On Windows both are unchanged apart from the usual
+    child-environment scrubbing.
+    """
+    from . import winproc
+    env = winproc.child_env()
+    if sys.platform == "win32":
+        return list(cmd), env
+    from . import proton
+    appid = str(config.CFG.get("steam_appid") or "3058630")
+    if not proton.available(appid):
+        raise RuntimeError(
+            "evoview needs the game's Proton prefix, which does not exist "
+            "yet — launch Assetto Corsa EVO from Steam once, then try again.")
+    args = [proton.to_windows_path(a, appid) if _looks_like_path(a) else str(a)
+            for a in cmd[1:]]
+    argv = proton.run_argv(appid, proton.to_windows_path(cmd[0], appid),
+                           args, verb="runinprefix")
+    return argv, proton.run_env(appid, env)
+
+
 # ------------------------------------------------------------------ listing --
 
 def _pretty(car_id):
@@ -381,12 +419,15 @@ def open_car(car_id, paint=""):
         cmd += ["--base", base]
 
     # never hand a child our frozen bundle's PATH - see winproc.child_env
-    from . import winproc as _wp
-    env = _wp.child_env()
+    cmd, env = viewer_cmd(cmd)
     if paint:
         env["EVOVIEW_PAINT"] = paint
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-    subprocess.Popen(cmd, env=env, cwd=os.path.dirname(exe), creationflags=flags)
+    kw = {}
+    if sys.platform == "win32":
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    subprocess.Popen(cmd, env=env, cwd=os.path.dirname(exe), **kw)
     _set(car_id, "open", "")
     return {"ok": True, "package": pkg}
 
@@ -424,8 +465,13 @@ def open_track(folder):
             raise RuntimeError("game install not found")
         cmd = [exe, pkg, "--track", folder]
         src = pkg
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-    subprocess.Popen(cmd, cwd=os.path.dirname(exe), creationflags=flags)
+    cmd, env = viewer_cmd(cmd)
+    kw = {}
+    if sys.platform == "win32":
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    subprocess.Popen(cmd, env=env, cwd=os.path.dirname(exe), **kw)
     _set("track:" + folder, "open", "")
     logs.LOG.info("viewer track %s from %s", folder, src)
     return {"ok": True, "folder": folder, "source": src}

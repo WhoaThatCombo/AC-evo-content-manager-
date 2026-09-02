@@ -12,6 +12,7 @@ import shutil
 import socket
 import socketserver
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -22,6 +23,7 @@ from . import (auth, backend, config, content, contentsync, detect, drive,
                gameui, hooking, hotkey, install,
                installer,
                logs, lobby, netutil, overview, patching, penalties, realai,
+               shell,
                version,
                registry, servers, settings as gamesettings,
                telemetry, thumbs, tracks as trackdeploy, viewer)
@@ -1245,6 +1247,18 @@ def _allow_share_port(port):
     """
     name = f"ACECM-share-{int(port)}"
     old = f"ACECM-content-{int(port)}"
+    if sys.platform != "win32":
+        # ⚠ Do NOT try to punch this hole automatically on Linux. There is no
+        # single firewall to ask (firewalld, ufw, nftables, or none), and every
+        # route needs a privilege prompt — from a background thread at startup
+        # that is either a hang or a silent denial. Say what is needed and let
+        # the user decide; a closed port degrades Get-content for friends, it
+        # does not stop ACECM.
+        logs.LOG.info("share port %s: if friends cannot fetch content, allow "
+                      "inbound TCP %s in your firewall "
+                      "(firewalld: sudo firewall-cmd --add-port=%s/tcp)",
+                      port, port, port)
+        return
     try:
         subprocess.run(
             ["netsh", "advfirewall", "firewall", "delete", "rule",
@@ -1287,7 +1301,15 @@ class App(socketserver.ThreadingTCPServer):
     # NOT reusable: on Windows a second process can otherwise bind the same
     # port silently and requests land on whichever wins - that cost real
     # debugging time on the telemetry tools.
-    allow_reuse_address = False
+    #
+    # ⚠ Windows-specific, so Linux gets the opposite default. There
+    # SO_REUSEADDR does NOT let a second process share a live listener (that
+    # is SO_REUSEPORT); it only allows binding over a dead socket still in
+    # TIME_WAIT. Leaving it off there buys no safety and makes every restart
+    # fail with "port 8092 is in use by something that is not ACECM" for
+    # about a minute after the previous copy exits - which reads as ACECM
+    # being broken, not as the socket cooling down.
+    allow_reuse_address = sys.platform != "win32"
     # A content fetch opens many range requests at once; the default backlog
     # of 5 would refuse most of them and they would retry, which reads as a
     # slow download rather than as a refusal.
@@ -1611,7 +1633,7 @@ def main(mode="window", okflag=None, relaunch=False):
         if not shown:
             # Headless instance (no window to raise), so give the user
             # something rather than nothing.
-            os.startfile(url)      # noqa: S606
+            shell.open_url(url)
         return
     # HTTP is up — this binary is good enough to keep. Write the flag
     # the swap script is waiting on BEFORE opening the window, so a
@@ -1623,10 +1645,33 @@ def main(mode="window", okflag=None, relaunch=False):
         if mode == "window":
             from . import ui
             if not ui.available():
-                raise SystemExit(
-                    "no native window (WebView2 missing) - ACECM is a desktop app")
-            ui.run(url)              # blocks until the window is closed
-            return
+                if sys.platform == "win32":
+                    raise SystemExit(
+                        "no native window (WebView2 missing) - ACECM is a "
+                        "desktop app")
+                # ⚠ Degrade, do not exit. WebView2 is part of Windows, so its
+                # absence there is a broken install worth stopping for. A
+                # Linux box legitimately may have no system webview, and the
+                # UI is a local web app - a browser tab is the same app.
+                logs.LOG.warning(
+                    "no system webview (WebKitGTK / Qt WebEngine) - opening "
+                    "ACECM in your browser instead. Install the WebKitGTK "
+                    "bindings for a native window.")
+                mode = "browser"
+            else:
+                try:
+                    ui.run(url)      # blocks until the window is closed
+                    return
+                except Exception as ex:
+                    # ⚠ A window backend that dies is not a reason to take
+                    # ACECM down. The server is already up and serving; drop
+                    # to the browser so the user still has their app.
+                    if sys.platform == "win32":
+                        raise
+                    logs.LOG.warning(
+                        "the native window could not stay open (%s) - "
+                        "opening ACECM in your browser instead", ex)
+                    mode = "browser"
         if mode == "headless":
             # ⚠ Tailscale FIRST. lan_ipv4() asks the routing table which
             # address reaches the internet, which is the ordinary NIC - so on
@@ -1649,7 +1694,7 @@ def main(mode="window", okflag=None, relaunch=False):
             print(auth.banner(url, addrs).encode("ascii", "replace")
                   .decode("ascii"), flush=True)
         if mode == "browser":
-            threading.Timer(0.6, lambda: os.startfile(url)).start()   # noqa: S606
+            threading.Timer(0.6, lambda: shell.open_url(url)).start()
         try:
             while True:
                 time.sleep(3600)

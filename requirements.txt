@@ -1,0 +1,11 @@
+# Runtime dependencies shared by every platform.
+#
+# Pinned loosely: ACECM tracks the game, not these libraries, and a hard pin
+# turns "install ACECM" into a dependency-resolution problem on whatever
+# Python the user already has.
+cryptography>=42        # lobby TLS keypair (backend proxy)
+websockets>=12          # Gameface inspector + telemetry transport
+protobuf>=4.25          # session / lobby message encoding
+numpy>=1.26             # spline and track-table maths
+Pillow>=10.2            # thumbnails
+pywebview>=5.0          # native window (see the platform notes below)

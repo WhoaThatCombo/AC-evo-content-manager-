@@ -24,9 +24,12 @@ import glob
 import json
 import os
 import re
+import sys
 import time
 
 from . import config, logs
+
+IS_WINDOWS = sys.platform == "win32"
 
 APPID_GAME = "3058630"           # Assetto Corsa EVO
 # The dedicated server is distributed as a separate tool; its appid varies by
@@ -39,7 +42,15 @@ _MEM = {}
 
 # ------------------------------------------------------------------ steam --
 def steam_root():
-    """Steam's own install folder, from the registry."""
+    """Steam's own install folder, from the registry.
+
+    There is no registry on Linux; `proton.steam_root` checks the handful of
+    directories the Steam client actually uses instead. Same contract: an
+    absolute path, or "".
+    """
+    if not IS_WINDOWS:
+        from . import proton
+        return proton.steam_root()
     try:
         import winreg
     except ImportError:
@@ -62,6 +73,9 @@ def steam_root():
 
 def steam_libraries():
     """Every Steam library folder on this machine."""
+    if not IS_WINDOWS:
+        from . import proton
+        return proton.libraries()
     root = steam_root()
     if not root:
         return []
@@ -137,13 +151,36 @@ def known_folder(guid, fallback=""):
 
 
 def saved_games():
-    """The real "Saved Games" folder, which is not always under the profile."""
+    """The real "Saved Games" folder, which is not always under the profile.
+
+    ⚠ On Linux this is NOT a folder in the user's home. The game is a Windows
+    binary under Proton and writes its profile inside the prefix, so the only
+    "Saved Games" that means anything is the one the game itself can see.
+    Pointing at ~/Saved Games would create a directory nothing ever reads and
+    make installed cars silently fail to appear.
+    """
+    if not IS_WINDOWS:
+        from . import proton
+        return proton.saved_games(APPID_GAME)
     return known_folder("{4C5C32FF-BB9D-43b0-B5B4-2D72E54EAAA4}",
                         os.path.join(os.path.expanduser("~"), "Saved Games"))
 
 
 def desktop():
     """The real Desktop, which is often redirected into OneDrive."""
+    if not IS_WINDOWS:
+        # XDG's equivalent of the known-folder API: the user may have renamed
+        # or relocated it, and on a non-English desktop it is not "Desktop".
+        try:
+            import subprocess
+            r = subprocess.run(["xdg-user-dir", "DESKTOP"],
+                               capture_output=True, text=True, timeout=5)
+            d = (r.stdout or "").strip()
+            if d and os.path.isdir(d):
+                return d
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return os.path.join(os.path.expanduser("~"), "Desktop")
     return known_folder("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
                         os.path.join(os.path.expanduser("~"), "Desktop"))
 
@@ -169,12 +206,14 @@ def game_dir():
     d = steam_app_dir(APPID_GAME)
     if d:
         return d
+    cands = [os.path.join(lib, "steamapps", "common", "Assetto Corsa EVO")
+             for lib in steam_libraries()]
+    if IS_WINDOWS:
+        cands += [
+            r"C:\Program Files (x86)\Steam\steamapps\common\Assetto Corsa EVO",
+            r"C:\Program Files\Steam\steamapps\common\Assetto Corsa EVO"]
     return _first_dir(
-        [os.path.join(lib, "steamapps", "common", "Assetto Corsa EVO")
-         for lib in steam_libraries()]
-        + [r"C:\Program Files (x86)\Steam\steamapps\common\Assetto Corsa EVO",
-           r"C:\Program Files\Steam\steamapps\common\Assetto Corsa EVO"],
-        contains=lambda n: n.lower() == "assettocorsaevo.exe")
+        cands, contains=lambda n: n.lower() == "assettocorsaevo.exe")
 
 
 def game_exe():
@@ -194,8 +233,20 @@ def server_dir():
                   os.path.join(common, "Assetto Corsa EVO Server")]
     cands += [os.path.join(home, "Downloads", "ACE_server_portable"),
               os.path.join(home, "Downloads", "AssettoCorsaEVOServer"),
-              os.path.join(home, "ACE_server_portable"),
-              r"C:\ACE_server", r"C:\AssettoCorsaEVOServer"]
+              os.path.join(home, "ACE_server_portable")]
+    if IS_WINDOWS:
+        cands += [r"C:\ACE_server", r"C:\AssettoCorsaEVOServer"]
+    else:
+        # A server unpacked inside the prefix is reachable to the game by a
+        # C:\ path, which is what a user following a Windows guide will do.
+        from . import proton
+        pfx = proton.prefix(APPID_GAME)
+        if pfx:
+            cdrive = os.path.join(pfx, "drive_c")
+            cands += [os.path.join(cdrive, "ACE_server"),
+                      os.path.join(cdrive, "AssettoCorsaEVOServer"),
+                      os.path.join(cdrive, "users", "steamuser", "Downloads",
+                                   "ACE_server_portable")]
     return _first_dir(cands, contains=lambda n: bool(SERVER_EXE_RE.match(n)))
 
 
