@@ -72,7 +72,7 @@ def _scan(path):
             continue
         model = m.group(1)
         if low.endswith(".mechanicalcarpreset") or low.endswith(".carfinalstate"):
-            base = os.path.basename(low)
+            base = kspkg.entry_name(low)
             for pid in _preset_ids(base):
                 # mechanicalcarpreset is the authoritative id; a later
                 # carfinalstate for the same preset must not overwrite it
@@ -80,7 +80,7 @@ def _scan(path):
                 presets.setdefault(pid, model)
                 # Caterham etc. ship as ks_<model>_mech_N. Don't invent a
                 # preset_ks_* key — cars.json uses the ks_* id as-is.
-        models.setdefault(model, os.path.dirname(entry))
+        models.setdefault(model, kspkg.entry_dir(entry))
     return {
         "kspkg": path,
         "built": int(time.time()),

@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -93,6 +93,11 @@ def _opener():
     return urllib.request.build_opener(
         _DropAuthOnHop,
         urllib.request.HTTPSHandler(context=_ssl_context()))
+
+
+# What this platform's build is called in a GitHub release. Windows keeps the
+# historical name so existing installs keep updating; Linux has no extension.
+ASSET_NAME = "ACECM.exe" if sys.platform == "win32" else "ACECM"
 
 
 def _newer(a, b):
@@ -219,8 +224,14 @@ def _check_now():
             rel = _get_json(f"https://api.github.com/repos/{repo}/releases/latest")
             latest = str(rel.get("tag_name") or rel.get("name") or "").lstrip("vV")
             assets = rel.get("assets") or []
+            # ⚠ The asset name is per-platform. A release carries both builds,
+            # so a Linux ACECM that matched "acecm.exe" would download the
+            # WINDOWS binary, verify its checksum happily, and replace itself
+            # with something it cannot execute - a self-update that bricks the
+            # install and passes every check on the way.
+            want = ASSET_NAME.lower()
             asset = next((a for a in assets
-                          if a.get("name", "").lower() == "acecm.exe"), None)
+                          if a.get("name", "").lower() == want), None)
             # Prefer the ACECM.exe.sha256 we upload. GitHub's own digest is
             # often missing, and when it is present it is not always the
             # same string we published.
@@ -230,7 +241,7 @@ def _check_now():
                 sha = digest.split(":")[-1]
             sum_asset = next((a for a in assets
                               if a.get("name", "").lower()
-                              == "acecm.exe.sha256"), None)
+                              == want + ".sha256"), None)
             if sum_asset:
                 sum_url = (sum_asset.get("url")
                            or sum_asset.get("browser_download_url"))
@@ -294,12 +305,76 @@ def swap_pending():
     return os.path.isfile(pending_path())
 
 
+
+def _linux_swap(exe, new, relaunch=True, ver=""):
+    """Replace the running executable, then restart it.
+
+    ⚠ Far simpler than the Windows path, and for a real reason: Linux
+    refuses to WRITE to a running binary (ETXTBSY) but is perfectly happy to
+    RENAME it. The inode stays alive for this process while the directory
+    entry points at the new file, so the swap needs no waiting, no retry
+    loop, and no helper script watching for our pid to disappear.
+
+    ⚠ os.replace, not shutil.move, and the temporary must already be on the
+    same filesystem as the exe. os.replace is atomic within a filesystem and
+    raises across one; a copy-based move could be interrupted and leave a
+    half-written ACECM behind with the original already renamed away.
+    """
+    import shutil
+    old = exe + ".old"
+    staged = exe + ".new"
+    # Stage beside the exe so the two renames below are same-filesystem.
+    shutil.copyfile(new, staged)
+    shutil.copymode(exe, staged)
+    os.chmod(staged, os.stat(staged).st_mode | 0o111)
+    try:
+        os.replace(exe, old)
+    except OSError as ex:
+        os.remove(staged)
+        raise RuntimeError(f"could not move the old build aside: {ex}")
+    try:
+        os.replace(staged, exe)
+    except OSError as ex:
+        os.replace(old, exe)          # put it back; we are still runnable
+        raise RuntimeError(f"could not move the new build into place: {ex}")
+    try:
+        os.remove(new)
+    except OSError:
+        pass
+    logs.LOG.info("update: swapped in %s (previous build kept as %s)",
+                  ver or "new build", os.path.basename(old))
+    if relaunch:
+        _linux_relaunch(exe)
+    return old
+
+
+def _linux_relaunch(exe):
+    """Start the new build once this process has released the port.
+
+    ⚠ Cannot simply Popen and exit: the new copy would race us for the UI
+    port and die with "address in use", which looks exactly like ACECM
+    closing and never coming back. A tiny detached shell waits for our pid
+    the way the Windows batch file does.
+    """
+    import subprocess
+    script = (
+        f'while kill -0 {os.getpid()} 2>/dev/null; do sleep 0.5; done; '
+        f'sleep 0.5; exec "{exe}" --relaunch'
+    )
+    subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     cwd=os.path.dirname(exe) or None)
+
+
 def schedule_relaunch(exe, pid, bat=None):
     """Start ACECM again only after this PID is gone.
 
     Launching a second copy first fights for port 8092; the child dies
     with 'port in use' and Restart looks like it closed and never came back.
     """
+    if sys.platform != "win32":
+        _linux_relaunch(exe)
+        return ""
     bat = bat or os.path.join(config.DATA, "_relaunch.bat")
     inst = os.path.dirname(exe)
     os.makedirs(config.DATA, exist_ok=True)
@@ -551,6 +626,25 @@ def apply(url=None, sha256=None):
         return {"ok": False,
                 "error": f"checksum mismatch (got {got[:12]}, "
                          f"expected {sha256[:12]})"}
+
+    if sys.platform != "win32":
+        # ⚠ Swap NOW rather than scheduling it. Renaming a running binary is
+        # legal here, and this process keeps executing the old inode until it
+        # exits, so there is nothing to wait for and no script to go wrong.
+        try:
+            old = _linux_swap(exe, new, relaunch=True,
+                              ver=info.get("latest") or VERSION)
+        except (OSError, RuntimeError) as ex:
+            return {"ok": False, "error": f"update failed: {ex}"}
+        try:
+            with open(pending_path(), "w", encoding="utf-8") as f:
+                f.write(info.get("latest") or VERSION)
+        except OSError:
+            pass
+        return {"ok": True, "version": info.get("latest"),
+                "note": "installed and verified; close ACECM to finish - it "
+                        f"will relaunch itself. The previous build is kept "
+                        f"as {os.path.basename(old)}."}
 
     bat, blog = _write_swap_script(exe, new, os.getpid(),
                                    ver=info.get("latest") or VERSION)

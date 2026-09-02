@@ -900,21 +900,53 @@ def _denied_msg(pids):
 
 
 def _pid_on_port(port):
-    """Which process is listening on a local port, or None."""
+    """Which dedicated server is listening on a local port, or None.
+
+    ⚠ Only ever returns a pid that IS a dedicated server. The port owner is
+    not automatically safe to kill: under Proton the listening socket is held
+    by `wineserver`, which is shared by every wine process in the prefix — the
+    game included. Killing it to stop one server would take down the whole
+    prefix, which is the "Stop took down somebody else's session" failure this
+    function was written to prevent, in its Linux form.
+    """
+    from . import winproc
     try:
-        ps = (f"(Get-NetTCPConnection -State Listen -LocalPort {int(port)} "
-              f"-ErrorAction SilentlyContinue).OwningProcess")
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
-                            "-Command", ps], capture_output=True, text=True,
-                           timeout=8)
-        for line in (r.stdout or "").split():
-            if line.strip().isdigit():
-                pid = int(line.strip())
-                if pid in _server_pids():
-                    return pid
+        live = _server_pids()
+        holders = winproc.tcp_listen_pids(int(port))
+        for pid in holders:
+            if pid in live:
+                return pid
+        if sys.platform == "win32" or not holders:
+            return None
+        # The holder is wine's, not the server's. That still proves the port
+        # is up, but it does not say WHICH server owns it, and wine gives us
+        # nothing to tell two servers in one prefix apart. Answer only when
+        # there is no ambiguity; callers already prefer the pid recorded at
+        # launch, which covers every server ACECM started itself.
+        mains = [p for p in live if _ppid_outside(p, live)]
+        if len(mains) == 1:
+            return mains[0]
+        logs.LOG.info("port %s is held by wine (pid %s); %d dedicated servers "
+                      "are running, so the owner is ambiguous",
+                      port, holders[0], len(mains))
     except Exception as ex:
         logs.LOG.info("port lookup for %s: %s", port, ex)
     return None
+
+
+def _ppid_outside(pid, live):
+    """True if `pid`'s parent is not itself a dedicated-server process.
+
+    wine forks several processes per exe; the one whose parent is outside that
+    set is the one we launched.
+    """
+    if sys.platform == "win32":
+        return True
+    try:
+        from . import _proc_posix
+        return _proc_posix._ppid(pid) not in live
+    except Exception:
+        return True
 
 
 def log_tail(profile, lines=120, since=0):

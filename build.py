@@ -244,6 +244,7 @@ def build(clean=False):
         return 1
     ver_file, ver = _version_file()
     print(f"version resource: {ver}")
+    windows = sys.platform == "win32"
     args = [
         sys.executable, "-m", "PyInstaller", "--noconfirm",
         "--onefile", "--name", "ACECM",
@@ -256,7 +257,6 @@ def build(clean=False):
         # ⚠ Never UPX. A packed section is one of the strongest heuristics
         # antivirus engines have, and it buys a few MB on a 44 MB download.
         "--noupx",
-        "--version-file", ver_file,
         "--distpath", DIST,
         "--workpath", os.path.join(HERE, "build_tmp"),
         "--specpath", HERE,
@@ -271,15 +271,27 @@ def build(clean=False):
         # the entry script top-level, where relative imports fail.
         os.path.join(HERE, "launcher.py"),
     ]
+    # ⚠ --version-file is a Windows PE resource and PyInstaller rejects it
+    # outright on other platforms, so the build fails before it starts.
+    if windows:
+        args[args.index("--noupx") + 1:args.index("--noupx") + 1] = [
+            "--version-file", ver_file]
     # protobuf and numpy both need help being found inside a frozen build.
     # ⚠ texture2ddecoder and PIL are imported INSIDE a function (so a missing
     # decoder degrades to "no cover" instead of breaking the app), and a lazy
     # import is invisible to PyInstaller's scanner. Without these two named
     # here the frozen build silently ships four track covers instead of
     # nineteen, and nothing in the log says why.
+    # ⚠ The webview backend differs per platform and the wrong one is not
+    # merely dead weight: naming edgechromium on Linux pulls pythonnet/clr,
+    # which fails to build the bundle at all.
+    gui_mods = (("webview.platforms.edgechromium", "clr_loader", "pythonnet")
+                if windows else
+                ("webview.platforms.gtk", "webview.platforms.qt", "gi",
+                 "evdev"))
     for mod in ("google.protobuf", "numpy", "capstone", "acecm", "acecm.cli",
-            "webview", "webview.platforms.edgechromium", "clr_loader",
-            "pythonnet", "cryptography", "websockets",
+            "webview", *gui_mods,
+            "cryptography", "websockets",
             "texture2ddecoder", "PIL", "PIL.Image",
             # ⚠ certifi is imported inside version._ssl_context, so the
             # scanner never sees it - and without its cacert.pem a machine
@@ -301,16 +313,29 @@ def build(clean=False):
     # DLLs the Windows app never loads (it uses Edge WebView2). That is
     # why the exe jumped from 40 MB to 73 MB. Exclude the unused
     # backends; do not uninstall PyQt5 from the machine.
-    for mod in ("PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy",
-                "PyQt5.QtCore", "PyQt5.QtGui", "PyQt5.QtWidgets",
-                "PyQt5.QtNetwork"):
-        args += ["--exclude-module", mod]
+    # ⚠ On Linux the Qt backend is a legitimate fallback (a KDE box may have
+    # no WebKitGTK), so excluding it wholesale would remove the only window
+    # some users can get. Exclude it only where WebView2 is guaranteed.
+    if windows:
+        for mod in ("PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy",
+                    "PyQt5.QtCore", "PyQt5.QtGui", "PyQt5.QtWidgets",
+                    "PyQt5.QtNetwork"):
+            args += ["--exclude-module", mod]
     if clean:
         args.append("--clean")
     print("running PyInstaller ...")
     r = subprocess.run(args, cwd=HERE)
     if r.returncode:
         return r.returncode
+    if not windows:
+        # The CRT-stripping second pass below is about a bundled MSVC
+        # runtime, which does not exist here. The equivalent Linux hazard
+        # (our libs on a child's LD_LIBRARY_PATH) is handled at runtime in
+        # winproc.child_env, because it has to cover the frozen tool
+        # re-invocation as well.
+        out = os.path.join(DIST, "ACECM")
+        print(f"built {out}")
+        return 0
     # ⚠ Second pass, and it is not optional. PyInstaller bundles the Visual
     # C++ runtime and unpacks it into %TEMP%\_MEIxxxxxx, so every program
     # ACECM starts resolves its C runtime out of OUR folder instead of its

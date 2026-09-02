@@ -89,8 +89,10 @@ def render_car(car_id, force=False, timeout=180, make=True, big=False):
         cmd += ["--base", base]
     from . import winproc
     try:
+        cmd, env = viewer.viewer_cmd(cmd)
         r = winproc.hidden_run(cmd, capture_output=True, text=True,
-                               timeout=timeout, cwd=os.path.dirname(exe))
+                               timeout=timeout, cwd=os.path.dirname(exe),
+                               env=env)
     except subprocess.TimeoutExpired:
         logs.LOG.warning("thumb %s: timed out", car_id)
         return None

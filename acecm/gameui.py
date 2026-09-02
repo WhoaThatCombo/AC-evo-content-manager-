@@ -14,6 +14,7 @@ import json
 import os
 import socket
 import struct
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -234,6 +235,23 @@ def boot_parts(hint=None):
 def boot_page(hint=None):
     p = boot_parts(hint)
     return p[0] if p else ""
+
+
+def selected_track(timeout=10):
+    """The track Single Player currently has selected ("Name/Layout"), or "".
+
+    ⚠ Asked over the game's own command channel, not scraped from the DOM.
+    The answer decides whether Start is safe to press: a Single Player page
+    with no track makes the engine load a session with no spawn points,
+    derive an opponent count of -1 and crash in a render worker.
+    """
+    try:
+        r = evaluate("(" + _CURRENT_TRACK + ")()", page=menu_page(),
+                     timeout=timeout, attempts=2)
+    except Exception:
+        return ""
+    val = str(js_value(r) or "").strip()
+    return "" if val in ("/", "-", "none", "null", "undefined") else val
 
 
 def paintshop_up(hint=None):
@@ -598,8 +616,53 @@ def quit_game():
                              user_gesture=True))
 
 
+_WIN_TITLE = "Assetto Corsa EVO"
+
+
+def _linux_close_window():
+    """Ask the desktop to close the EVO window, the way a title-bar X does.
+
+    ⚠ Best-effort by design. There is no Wayland equivalent of PostMessage
+    from another process, and xdotool only reaches X11 clients (an XWayland
+    game included). Returning False when we could not do it is the point:
+    the caller then falls through to killing the tree, which always works.
+    Claiming success here would reproduce the "assume the game is gone"
+    failure this function exists to avoid.
+    """
+    import shutil
+    import subprocess
+    for argv in (["wmctrl", "-c", _WIN_TITLE],
+                 ["xdotool", "search", "--name", _WIN_TITLE,
+                  "windowclose"]):
+        if not shutil.which(argv[0]):
+            continue
+        try:
+            r = subprocess.run(argv, capture_output=True, timeout=10)
+            if r.returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
+def _linux_window_open():
+    """True while the game is still up.
+
+    Answered from the PROCESS, not the window list. A window check needs a
+    compositor we may not be able to query, and "no window found" would then
+    mean "closed" on every Wayland session — the exact false negative that
+    let ACECM report the game closed while it was still running. The process
+    is authoritative and needs nothing installed.
+    """
+    from . import winproc
+    return bool(winproc.pids_named("AssettoCorsaEVO")
+                or winproc.pids_named_prefix("assettocorsaevo"))
+
+
 def close_window():
     """WM_CLOSE the EVO window. Works when the inspector is already dead."""
+    if sys.platform != "win32":
+        return _linux_close_window()
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -631,6 +694,8 @@ def close_window():
 
 def window_open():
     """True if an EVO window is still on screen."""
+    if sys.platform != "win32":
+        return _linux_window_open()
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -662,9 +727,40 @@ def press_start():
                              user_gesture=True))
 
 
+def _linux_focus_game():
+    """Raise the EVO window on Linux. False if we could not.
+
+    ⚠ Best effort, and it must never raise. There is no cross-desktop way to
+    activate another process's window — Wayland deliberately has none, and
+    xdotool only reaches X11/XWayland clients. Failing to raise the window is
+    a cosmetic problem (the game pauses occluded until the user alt-tabs);
+    throwing here aborted the whole Drive sequence AFTER the car had already
+    been set and the session was ready to join.
+    """
+    import shutil
+    import subprocess
+    for argv in (["wmctrl", "-a", _WIN_TITLE],
+                 ["xdotool", "search", "--name", _WIN_TITLE,
+                  "windowactivate", "--sync"]):
+        if not shutil.which(argv[0]):
+            continue
+        try:
+            if subprocess.run(argv, capture_output=True,
+                              timeout=10).returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    from . import logs
+    logs.LOG.info("could not raise the game window (install wmctrl or "
+                  "xdotool if it stays behind ACECM)")
+    return False
+
+
 def focus_game():
     """Put EVO in front. CDP / ACECM steal focus and the game pauses
     in an occluded state until you alt-tab back."""
+    if sys.platform != "win32":
+        return _linux_focus_game()
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -765,6 +861,100 @@ def select_car(model, preset=""):
     want = json.dumps({"model": model or "", "preset": preset or ""})
     expr = "(" + _SELECT + ")(" + want + ")"
     return js_value(evaluate(expr, page=page, timeout=30, attempts=2))
+
+
+# Track selection over the same channel the car picker uses.
+#
+# ⚠ This exists because `-startup_gamemode` cannot be relied on to bring the
+# track with it. When the game boots to the home menu instead of into the
+# saved game mode, Single Player opens with NOTHING selected — and starting
+# from there crashes the engine (no spawn points -> opponents -1 -> access
+# violation in a render worker). The car was already being set this way; the
+# track had no equivalent, which is the whole gap.
+#
+# ⚠ Ask for TrackList first and send back the game's OWN item when it matches.
+# A hand-built TrackItem carries only the fields we know about (name, layout,
+# event_name, length); the real one also has image_path, max_drivers and the
+# development flag. Sending a partial item makes the UI show a track with no
+# map and no driver count, which is how the "-" placeholders appeared.
+_SET_TRACK = """
+(async function(want){
+  if (!window.GAMEMODESELECTION) return 'no-GAMEMODESELECTION';
+  function req(cmd, payload){
+    return new Promise(function(resolve){
+      try {
+        GAMEMODESELECTION.Client.request(cmd, payload || {}, function(r){
+          resolve(r || {});
+        });
+      } catch (e) { resolve({error: String(e && e.message || e)}); }
+    });
+  }
+  var mode = 'ClientCommandsMode_SINGLEPLAYER';
+  function norm(x){ return String(x == null ? '' : x).trim().toLowerCase(); }
+  var item = null, seen = 0;
+  try {
+    var tl = await req('TrackList', {mode: mode});
+    var list = (tl && (tl.track_item || tl.track_items || tl.tracks)) || [];
+    if (list && !Array.isArray(list)) list = [list];
+    seen = list.length;
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i] || {};
+      if (norm(t.name) === norm(want.name) &&
+          norm(t.layout) === norm(want.layout)) { item = t; break; }
+    }
+    if (!item) {
+      for (var j = 0; j < list.length; j++) {
+        var u = list[j] || {};
+        if (norm(u.event_name) && norm(u.event_name) === norm(want.event_name)) {
+          item = u; break;
+        }
+      }
+    }
+  } catch (e) {}
+  if (!item) {
+    item = {name: want.name, layout: want.layout,
+            event_name: want.event_name || '',
+            track_length: want.track_length | 0,
+            is_enabled: true, nation: '', continent: ''};
+  }
+  var r = await req('SetTrack', {mode: mode, track_item: item});
+  var resp = (r && (r.response || r.result)) || 'sent';
+  var now = '';
+  try {
+    var c = await req('CurrentTrack', {mode: mode});
+    var ci = c && c.track_item;
+    if (ci) now = String(ci.name || '') + '/' + String(ci.layout || '');
+  } catch (e) {}
+  return 'set:' + resp + ' now:' + now + ' from:' + seen +
+         (item.image_path ? ' (game item)' : ' (built)');
+})
+"""
+
+
+def select_track(name, layout="", event_name="", track_length=0):
+    """Make this the selected track on the Single Player page."""
+    page = menu_page()
+    want = json.dumps({"name": name or "", "layout": layout or "",
+                       "event_name": event_name or "",
+                       "track_length": int(track_length or 0)})
+    expr = "(" + _SET_TRACK + ")(" + want + ")"
+    return js_value(evaluate(expr, page=page, timeout=30, attempts=2))
+
+
+_CURRENT_TRACK = """
+(async function(){
+  if (!window.GAMEMODESELECTION) return '';
+  return await new Promise(function(resolve){
+    try {
+      GAMEMODESELECTION.Client.request('CurrentTrack',
+        {mode: 'ClientCommandsMode_SINGLEPLAYER'}, function(r){
+          var t = r && r.track_item;
+          resolve(t ? String(t.name || '') + '/' + String(t.layout || '') : '');
+        });
+    } catch (e) { resolve(''); }
+  });
+})
+"""
 
 
 _CONDITIONS = """

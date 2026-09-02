@@ -21,11 +21,21 @@ Some wheels expose the rest through DirectInput proper, so a button box with
 more than 32 controls may have buttons that cannot be seen here.
 """
 import ctypes
+import sys
 import threading
 import time
 from ctypes import wintypes
 
 from . import config, logs
+
+IS_WINDOWS = sys.platform == "win32"
+
+
+def _posix():
+    """The evdev implementation. Imported lazily so Windows never loads it."""
+    from . import _input_posix
+    return _input_posix
+
 
 _JOY_RETURNBUTTONS = 0x00000080
 _JOY_RETURNALL = 0x000000FF
@@ -113,16 +123,22 @@ def read_pad(pad_id):
 
 
 def read(kind, dev):
+    if not IS_WINDOWS:
+        return _posix().read(kind, dev)
     return read_pad(dev) if kind == "pad" else read_joy(dev)
 
 
 def devices():
     """Everything answering right now, and what it is currently holding.
 
+    On Linux this comes from evdev - see acecm._input_posix.
+
     Both APIs, because a machine can easily have a wheel on one and a pad on
     the other - and the same physical pad may appear on both while only
     reporting its buttons on XInput.
     """
+    if not IS_WINDOWS:
+        return _posix().devices()
     out = []
     for jid in range(_MAX_JOY):
         mask = read_joy(jid)
@@ -148,6 +164,8 @@ def capture(seconds=6.0):
     from a wheel whose paddle is resting against a switch captures that
     instead of the button the user then presses.
     """
+    if not IS_WINDOWS:
+        return _posix().capture(seconds)
     start = {}
     for d in devices():
         start[(d["kind"], d["id"])] = d["buttons"]
@@ -211,6 +229,8 @@ def combo_held(text):
     message loop; this only asks what is currently down, so nothing is
     reserved and the game is unaffected.
     """
+    if not IS_WINDOWS:
+        return _posix().combo_held(text)
     mods, key = parse_combo(text)
     if not key:
         return False
@@ -227,6 +247,8 @@ def game_focused():
     wheel/controller button needs no such check: nothing else on the desktop
     is listening to it.
     """
+    if not IS_WINDOWS:
+        return _posix().game_focused()
     try:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         hwnd = user32.GetForegroundWindow()

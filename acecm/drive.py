@@ -1030,6 +1030,42 @@ def _enter_and_start(pick=None):
                 "error": "Single Player never stayed open — the game "
                          "kept returning to the home menu (last "
                          + (on or "-") + ")"}
+    # ⚠ Set the track HERE, the same way the car is set, rather than trusting
+    # `-startup_gamemode` to have carried it in from the save. The flag is
+    # delivered (verified in the game's own environment and argv) but the
+    # game may still boot to the home menu, and then Single Player opens with
+    # nothing selected. The car picker never had this problem because it
+    # always drove the UI directly; the track had no equivalent call.
+    ev = _event(pick) if pick else None
+    if ev:
+        _set(phase="selecting_track",
+             hint="setting " + str(ev.get("track") or "the track"))
+        try:
+            picked = gameui.select_track(ev.get("track") or "",
+                                         ev.get("layout") or "",
+                                         ev.get("name")
+                                         or ev.get("event_name") or "",
+                                         ev.get("length_m") or 0)
+            logs.LOG.info("drive set track: %s", picked)
+        except OSError as ex:
+            logs.LOG.warning("drive set track failed: %s", ex)
+
+    # ⚠ Never press Start with nothing selected. A Single Player page with no
+    # track makes the engine load a session with no spawn points, reduce the
+    # opponent count to -1 and crash in a render worker - the game dies and
+    # takes the user's session with it. Refusing here costs a clear message
+    # instead of a crash, and leaves them on a working menu.
+    try:
+        track_now = gameui.selected_track()
+    except Exception:
+        track_now = ""
+    if not track_now:
+        return {"ok": False,
+                "error": "Single Player still has no track selected after "
+                         "asking the game to set it, so Start was not "
+                         "pressed (it would crash the game). Pick the track "
+                         "in-game and press Drive again."}
+    logs.LOG.info("drive track confirmed: %s", track_now)
     _set(phase="starting_session", hint="starting the session")
     try:
         started = gameui.press_start()

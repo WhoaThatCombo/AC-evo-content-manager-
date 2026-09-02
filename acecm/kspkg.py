@@ -53,6 +53,25 @@ def _plain(path):
     return path.lower().endswith(".texturemips")
 
 
+def entry_name(entry):
+    """The file name of an archive entry.
+
+    ⚠ Not os.path.basename. Entries inside a .kspkg are stored with Windows
+    separators (`content\\cars\\ks_foo\\presets\\bar.mechanicalcarpreset`), and
+    on Linux a backslash is an ordinary filename character — basename returns
+    the WHOLE path unchanged. Everything downstream that expected a bare name
+    then quietly sees a path: it cost every `ks_*_mech_N` car id in carsmap,
+    which dropped six real Kunos cars out of Drive with no error anywhere.
+    """
+    return str(entry).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def entry_dir(entry):
+    """The directory part of an archive entry, in archive form."""
+    norm = str(entry).replace("\\", "/")
+    return norm.rsplit("/", 1)[0].replace("/", "\\") if "/" in norm else ""
+
+
 def iter_entries(kspkg_path):
     """Yield (path, size, offset) for every named entry in the archive.
 
