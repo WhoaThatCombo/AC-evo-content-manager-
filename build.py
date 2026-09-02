@@ -100,8 +100,16 @@ SOURCES = {
         "acevo_proto.py", "dump_protos.py",
     ],
     HERE: ["acecm_sync.py"],
-    # the Vulkan car viewer, built separately with cargo
+    # the Vulkan car viewer, built separately with cargo.
+    # ⚠ Both locations, because the checkout MOVED. This pointed only at
+    # Downloads while the project actually lives in C:\Projects, so
+    # stage_tools() never found a newer build and every release silently
+    # shipped the committed binary instead - months of viewer work (the
+    # game's own studio cubemap, the instancing and foliage fixes) never
+    # reached a single user, and nothing said so because "0 refreshed from
+    # dev copies" reads like a no-op rather than a miss.
     os.path.join(_DL, "evoview", "target", "release"): ["evoview.exe"],
+    os.path.join(r"C:\Projects", "evoview", "target", "release"): ["evoview.exe"],
 }
 
 
