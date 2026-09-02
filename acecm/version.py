@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.14.4"
+VERSION = "0.14.5"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -413,14 +413,33 @@ def _write_swap_script(exe, new, pid, bat=None, blog=None, relaunch=True,
         ":wait\r\n",
         f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n',
         "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)\r\n",
+        # ⚠ Waiting for the main pid is NOT enough. ACECM spawns children
+        # from its own exe (--tool acevo_proxy, the telemetry trackers), and
+        # Windows keeps the image file locked while any of them lives. The
+        # move then failed with "being used by another process", retried ten
+        # times, gave up and relaunched the OLD build - so every update
+        # silently did nothing and Restart came back on the same version,
+        # with the reason buried in _update.log.
+        #
+        # ⚠ Match on the EXE PATH, not the image name. `taskkill /IM
+        # ACECM.exe` ends every ACECM on the machine, which would take down
+        # an unrelated one - a headless server on another port, or a second
+        # install - as collateral of updating this one. Only the copies
+        # running the file we are about to replace are holding it open.
+        "rem clear helpers still running the exe we are replacing\r\n",
+        ('powershell -NoProfile -NonInteractive -Command '
+         '"Get-Process -Name ACECM -ErrorAction SilentlyContinue | '
+         'Where-Object { $_.Path -eq \'%s\' } | '
+         'Stop-Process -Force -ErrorAction SilentlyContinue" >>%%LOG%% 2>&1\r\n'
+         % exe.replace("'", "''")),
         "rem the file can stay locked for a moment after the process goes\r\n",
-        "ping -n 3 127.0.0.1 >nul\r\n",
+        "ping -n 4 127.0.0.1 >nul\r\n",
         "set TRIES=0\r\n",
         ":swap\r\n",
         f'move /y "{exe}" "{exe}.old" >>%LOG% 2>&1\r\n',
         "if errorlevel 1 (\r\n",
         "  set /a TRIES+=1\r\n",
-        "  if !TRIES! lss 10 (ping -n 2 127.0.0.1 >nul & goto swap)\r\n",
+        "  if !TRIES! lss 20 (ping -n 2 127.0.0.1 >nul & goto swap)\r\n",
         "  echo could not replace the exe - it is still locked >>%LOG%\r\n",
         "  goto giveup\r\n",
         ")\r\n",
