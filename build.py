@@ -247,6 +247,14 @@ def build(clean=False):
     args = [
         sys.executable, "-m", "PyInstaller", "--noconfirm",
         "--onefile", "--name", "ACECM",
+        # ⚠ An icon is not decoration here. A PyInstaller build with the
+        # default icon, no signature and a generic name is exactly what a
+        # packed dropper looks like, and users were being scared off the
+        # download. Real branding is the cheapest part of not looking like
+        # malware.
+        "--icon", os.path.join(HERE, "acecm.ico"),
+        # ⚠ Never UPX. A packed section is one of the strongest heuristics
+        # antivirus engines have, and it buys a few MB on a 44 MB download.
         "--noupx",
         "--version-file", ver_file,
         "--distpath", DIST,
@@ -327,10 +335,71 @@ def build(clean=False):
     if os.path.isfile(exe):
         mb = os.path.getsize(exe) / 1024 / 1024
         print(f"\nOK  {exe}  ({mb:.0f} MB)")
+        sign(exe)
         if missing:
             print(f"  ! {len(missing)} helper script(s) were missing - features "
                   f"using them will not work in this build")
     return 0
+
+
+def sign(exe):
+    """Authenticode-sign the build, when a certificate is configured.
+
+    ⚠ This is the ONLY real fix for "Windows protected your PC". An unsigned
+    exe has no publisher, so SmartScreen has nothing to build reputation
+    against and every release starts from zero - which is why people are
+    bouncing off the download. An icon and clean metadata help it look like a
+    product; only a signature makes Windows treat it as one.
+
+    Opt-in, so a machine without a certificate still builds:
+        ACECM_SIGN_PFX   path to a .pfx / .p12
+        ACECM_SIGN_PASS  its password (optional)
+      or
+        ACECM_SIGN_SHA1  thumbprint of a cert already in the user's store
+    """
+    pfx = os.environ.get("ACECM_SIGN_PFX", "").strip()
+    sha1 = os.environ.get("ACECM_SIGN_SHA1", "").strip()
+    if not pfx and not sha1:
+        print("  ! unsigned - users will see a SmartScreen warning. Set "
+              "ACECM_SIGN_PFX or ACECM_SIGN_SHA1 to sign.")
+        return False
+    tool = _signtool()
+    if not tool:
+        print("  ! signtool.exe not found (install the Windows SDK) - "
+              "shipping unsigned")
+        return False
+    cmd = [tool, "sign", "/fd", "SHA256",
+           # ⚠ Timestamp, always. Without it every signature expires with the
+           # certificate and old releases start warning again years later.
+           "/tr", "http://timestamp.digicert.com", "/td", "SHA256"]
+    if pfx:
+        cmd += ["/f", pfx]
+        if os.environ.get("ACECM_SIGN_PASS"):
+            cmd += ["/p", os.environ["ACECM_SIGN_PASS"]]
+    else:
+        cmd += ["/sha1", sha1]
+    cmd.append(exe)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode == 0:
+        print("  signed and timestamped")
+        return True
+    # never print the command: it can carry the certificate password
+    print(f"  ! signing failed: {(r.stderr or r.stdout).strip()[:200]}")
+    return False
+
+
+def _signtool():
+    """Newest signtool.exe from the Windows SDK, or None."""
+    roots = [r"C:\Program Files (x86)\Windows Kits\10\bin",
+             r"C:\Program Files\Windows Kits\10\bin"]
+    found = []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            if "signtool.exe" in files and "x64" in dirpath:
+                found.append(os.path.join(dirpath, "signtool.exe"))
+    return sorted(found)[-1] if found else None
 
 
 if __name__ == "__main__":
