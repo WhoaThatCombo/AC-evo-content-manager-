@@ -3575,9 +3575,11 @@ async function shareCard(p) {
   c.innerHTML = '<h2>Shared for download</h2>'
     + '<div class="tiny dim" style="margin-bottom:10px">A player who does not '
     + 'have your track cannot join, and the game will not send it to them. '
-    + 'Share it here, copy the link, and they paste it into '
-    + '<b>Server browser → Fetch from ACECM</b>. Only tracks you imported '
-    + 'are listed — stock tracks everyone already has.</div>';
+    + 'Share or stop each imported track below. The hosted server\'s track '
+    + 'starts shared so joiners can download it; Stop sharing turns that off. '
+    + 'Copy the link; they paste it into '
+    + '<b>Server browser → Fetch from ACECM</b>. Stock tracks everyone already '
+    + 'has are not listed.</div>';
   // ⚠ TWO links, labelled by who they are for. Handing out one LAN address and
   // telling people to "swap in your public IP" is how a share link that cannot
   // possibly work gets sent to a friend on another network - the server list
@@ -3624,10 +3626,6 @@ async function shareCard(p) {
   if (!rows.length) {
     c.append(el('div', 'empty', 'No imported tracks yet'));
   } else {
-    /* ⚠ No Share / Stop sharing buttons any more. Working out which of your
-       content a joining player is missing is a question ACECM can answer from
-       the server profiles, so sharing follows what you host instead of being a
-       list to keep in step by hand. This is the READ-OUT of that. */
     rows.forEach(([name, folder]) => {
       const row = el('div', 'chk');
       const auto = (autoWho[folder] || []);
@@ -3639,6 +3637,7 @@ async function shareCard(p) {
         + `<div class="tiny dim">${esc(folder)} — ${esc(why)}</div></span>`
         + `<span class="pill ${on ? 'on' : 'off'}"><i class="dot"></i>`
         + `${on ? 'shared' : 'idle'}</span>`;
+      row.append(shareTrackBtn(folder, name, on));
       c.append(row);
     });
   }
@@ -4066,6 +4065,22 @@ function bindDropAnywhere() {
   });
 }
 
+function shareTrackBtn(folder, label, on) {
+  const b = el('button', on ? 'sm danger' : 'sm primary',
+               on ? 'Stop sharing' : 'Share');
+  b.onclick = async (ev) => {
+    if (ev) ev.stopPropagation();
+    const r = await api('share/track', {
+      folder, share: !on, label: label || folder,
+    });
+    if (!(r && r.error)) {
+      toast(on ? 'No longer shared' : (label || folder) + ' is now downloadable');
+    }
+    contentPage();
+  };
+  return b;
+}
+
 function libRow(item, shareUrl) {
   const row = el('div', 'chk');
   const cars = (item.cars || []).map(x => esc(x.label || x.id)).join(', ');
@@ -4125,14 +4140,18 @@ function libRow(item, shareUrl) {
       + '&name=' + encodeURIComponent(item.name));
     await copyText((r && r.path) || item.path, 'path');
   };
+  const shareB = item.kind === 'track'
+    ? shareTrackBtn(item.folder || item.name, item.label || item.name,
+                    !!item.shared)
+    : null;
+  let link = null;
   if (item.shared && shareUrl) {
-    const link = el('button', 'sm', 'Link');
+    link = el('button', 'sm', 'Link');
     link.title = 'Copy the Get content share URL';
     link.onclick = (ev) => {
       ev.stopPropagation();
       copyText(shareUrl, shareUrl);
     };
-    act.append(link);
   }
   const rm = el('button', 'sm danger', 'Delete');
   rm.onclick = async (ev) => {
@@ -4148,7 +4167,10 @@ function libRow(item, shareUrl) {
           !(r && r.ok));
     contentPage();
   };
-  act.append(exp, copy, pathB, rm);
+  act.append(exp, copy, pathB);
+  if (shareB) act.append(shareB);
+  if (link) act.append(link);
+  act.append(rm);
   row.append(act);
   return row;
 }

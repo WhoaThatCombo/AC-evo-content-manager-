@@ -520,17 +520,11 @@ def deploy_native(pkg_dir, dry_run=False, folder=None, display_name=None):
             os.remove(tmp)
         return {"ok": False, "error": str(ex), **bak,
                 "hint": "the archive was backed up first - use Restore to undo"}
-    # Publish it, so joining players can actually get the content.
-    # ⚠ Automatic on purpose. The host knows the folder, the display name and
-    # the layout at exactly this moment; expecting them to retype it into a
-    # registry entry afterwards means most servers would advertise a track
-    # nobody can download, and the failure would surface on someone ELSE'S
-    # machine as a join they cannot explain.
-    published = None
-    try:
-        published = _publish(display, folder)
-    except Exception as ex:
-        logs.LOG.warning("could not publish %s for download: %s", folder, ex)
+    # Do not add a registry row here. Deploying a track into the server
+    # package is not the same as hosting it, and publishing every import as
+    # "(hosted here)" advertised tracks no running server used. Sharing
+    # follows the server profiles (autoshare) plus whatever the Content page
+    # ticks by hand.
 
     # Loose AI lines. The archive cannot see a brand-new .aisplinedata
     # path, but the VFS will load one from disk. Barber already has both
@@ -556,7 +550,7 @@ def deploy_native(pkg_dir, dry_run=False, folder=None, display_name=None):
         shipped = {"ok": False, "error": str(ex)}
 
     return {**plan, "seconds": round(time.time() - t0, 1),
-            "written": res, "verified": check, "published": published,
+            "written": res, "verified": check,
             "splines": shipped, **bak}
 
 
@@ -960,25 +954,6 @@ def register_client_track(folder, meta=None):
                   folder, display, modes)
     return {"ok": True, "folder": folder, "display_name": display,
             "layout": layout, "modes": modes, "written": written}
-
-
-def _publish(display, folder):
-    """Add or refresh this track in the share registry, keeping it deduped."""
-    from . import registry
-    for e in registry.load():
-        if folder in (e.get("required_tracks") or []):
-            return {"id": e["id"], "new": False}
-    # ⚠ No ip/port here. Hardcoding them wrote ip='' and port=9700 into every
-    # entry a track import created, so a host with twenty tracks published
-    # twenty entries with no address and the same port - registry.upsert
-    # fills both in from this machine and its server profile.
-    entry = registry.upsert({
-        "name": f"{display} (hosted here)",
-        "description": f"Content for {display} - installed by ACECM",
-        "required_tracks": [folder],
-        "public": True,
-    })
-    return {"id": entry["id"], "new": True}
 
 
 def restore():
