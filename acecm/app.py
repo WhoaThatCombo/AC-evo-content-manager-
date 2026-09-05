@@ -382,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
                 out = []
                 for p in servers.load():
                     out.append({"id": p.get("id"), "name": p.get("name"),
-                                "needs": autoshare.needs(p),
+                                "needs": autoshare.share_needs(p),
                                 "gaps": autoshare.server_gaps(p)})
                 return _json(self, {"ok": True, "servers": out})
             if path in ("/live", "/live.html"):
@@ -894,6 +894,12 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("id"), bool(body.get("baseline_ai"))))
             if path == "/api/telemetry/stop":
                 return _json(self, telemetry.stop(body.get("id")))
+            if path == "/api/share/track":
+                from . import autoshare
+                return _json(self, autoshare.set_track(
+                    body.get("folder") or body.get("name") or "",
+                    body.get("share"),
+                    body.get("label") or ""))
             if path == "/api/registry/save":
                 return _json(self, registry.upsert(body))
             if path == "/api/registry/delete":
@@ -1488,6 +1494,16 @@ def serve():
         registry.backfill()
     except Exception as ex:
         logs.LOG.warning("registry backfill: %s", ex)
+    # Drop leftover "(hosted here)" rows from old track deploys, then publish
+    # only what the saved profiles actually need.
+    try:
+        from . import autoshare
+        profs = servers.load()
+        autoshare.prune(profs)
+        for p in profs:
+            autoshare.publish(p)
+    except Exception as ex:
+        logs.LOG.warning("autoshare at start: %s", ex)
     _watch_lobby()
     _watch_hud()
     hotkey.watch()

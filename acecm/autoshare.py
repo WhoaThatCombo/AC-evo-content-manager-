@@ -93,6 +93,14 @@ def needs(profile):
     return {"tracks": tracks, "mods": sorted(mods)}
 
 
+def share_needs(profile):
+    """What we actually advertise. A host can unshare the hosted track."""
+    want = needs(profile)
+    skip = {t for t in (profile.get("unshared_tracks") or []) if t}
+    want["tracks"] = [t for t in want["tracks"] if t not in skip]
+    return want
+
+
 def _auto_entry(profile):
     for e in registry.load():
         if e.get("auto") and e.get("profile_id") == profile.get("id"):
@@ -102,7 +110,7 @@ def _auto_entry(profile):
 
 def publish(profile):
     """Make the share list match this profile. Returns what changed."""
-    want = needs(profile)
+    want = share_needs(profile)
     existing = _auto_entry(profile)
 
     if not want["tracks"] and not want["mods"]:
@@ -130,13 +138,79 @@ def publish(profile):
 
 
 def prune(profiles):
-    """Drop automatic entries whose profile is gone. Hand-made ones stay."""
+    """Drop automatic entries whose profile is gone. Hand-made ones stay.
+
+    Also drops leftover '(hosted here)' rows that track deploy used to create
+    for every import. Those advertised every imported track whether a server
+    here actually ran it, and autoshare never touched them because they had
+    no `auto` / `profile_id`.
+    """
     alive = {p.get("id") for p in profiles}
-    gone = [e for e in registry.load()
-            if e.get("auto") and e.get("profile_id") not in alive]
-    for e in gone:
-        registry.remove(e["id"])
-    return [e["id"] for e in gone]
+    drop, keep = [], []
+    for e in registry.load():
+        leftover = ((e.get("name") or "").endswith("(hosted here)")
+                    and not e.get("auto")
+                    and not (e.get("profile_id") or "").strip())
+        stale_auto = e.get("auto") and e.get("profile_id") not in alive
+        if leftover or stale_auto:
+            drop.append(e)
+        else:
+            keep.append(e)
+    if drop:
+        registry.save(keep)
+        try:
+            registry.forget_public_sizes()
+        except Exception:
+            pass
+    return [e["id"] for e in drop]
+
+
+def set_track(folder, share, label=""):
+    """Share or unshare one track, including the one a server is hosting.
+
+    Unsharing a hosted track is remembered on the profile as
+    `unshared_tracks`, so the next save/start does not publish it again.
+    The server still gets the files - this only changes what joiners can
+    download.
+    """
+    from . import servers
+    folder = (folder or "").strip()
+    if not folder:
+        return {"ok": False, "error": "no track"}
+    share = bool(share)
+    items = servers.load()
+    for p in items:
+        skip = [t for t in (p.get("unshared_tracks") or []) if t]
+        uses = track_folder(p) == folder
+        if share:
+            p["unshared_tracks"] = [t for t in skip if t != folder]
+        elif uses and folder not in skip:
+            p["unshared_tracks"] = skip + [folder]
+    servers.save_all(items)
+    for p in items:
+        publish(p)
+    if share:
+        already = any(folder in (e.get("required_tracks") or [])
+                      for e in registry.load())
+        if not already:
+            registry.upsert({
+                "name": f"{(label or folder)} (track)",
+                "description": f"Track {folder} shared by this host",
+                "required_tracks": [folder],
+                "public": True,
+            })
+    else:
+        kept = []
+        for e in registry.load():
+            tracks = [t for t in (e.get("required_tracks") or []) if t != folder]
+            if tracks or (e.get("required_mods") or []):
+                kept.append({**e, "required_tracks": tracks})
+        registry.save(kept)
+    try:
+        registry.forget_public_sizes()
+    except Exception:
+        pass
+    return {"ok": True, "shared": share, "folder": folder}
 
 
 def server_gaps(profile):
