@@ -98,22 +98,35 @@ jobs:
     # costs a few minutes and removes both failure modes.
     needs: build
     runs-on: ubuntu-latest
-    # ⚠ Build inside manylinux, NOT on ubuntu-latest. A PyInstaller onefile
+    # ⚠ Build in an OLD distro, not on ubuntu-latest. A PyInstaller onefile
     # links against the glibc of the machine that built it and refuses to
     # start on anything older, so an ubuntu-latest build (glibc 2.39) would
     # die on Debian stable, Ubuntu 22.04 and SteamOS - the machines most
-    # likely to be running this. manylinux_2_28 puts the floor at glibc 2.28
-    # (RHEL 8 / Ubuntu 18.10 and newer), and that is also the oldest glibc
-    # GitHub's own node20 actions will run on, so it is the lowest floor a
-    # job here can actually use.
-    container: quay.io/pypa/manylinux_2_28_x86_64
+    # likely to be running this. AlmaLinux 8 is glibc 2.28 (RHEL 8 / Ubuntu
+    # 18.10 and newer), and 2.28 is also the oldest glibc the runner's own
+    # node can use, so it is the lowest floor a job here can reach.
+    #
+    # ⚠ AlmaLinux, not quay.io/pypa/manylinux_2_28 - which is the same glibc
+    # and the obvious choice. Its bundled interpreters are built static, and
+    # PyInstaller refuses outright: "Python was built without a shared
+    # library". The distro's own python3.12 is a normal shared build.
+    container: almalinux:8
     steps:
-      - uses: actions/checkout@v4
+      - name: Install Python and build tools
+        # ⚠ Before checkout would need it: git, or actions/checkout falls back
+        # to a REST tarball. binutils is for objdump in the glibc-floor step.
+        # actions/setup-python is deliberately NOT used - it would install a
+        # build made against a newer glibc and undo the whole point.
+        run: |
+          dnf -y install --setopt=install_weak_deps=False             git gcc gcc-c++ make binutils findutils
+          if dnf -y install python3.12 python3.12-devel; then PY=python3.12
+          elif dnf -y install python3.11 python3.11-devel; then PY=python3.11
+          else dnf -y install python39 python39-devel && PY=python3.9; fi
+          ln -sf "$(command -v $PY)" /usr/local/bin/python
+          python --version
+          python -c "import sysconfig;print('shared libpython:', sysconfig.get_config_var('Py_ENABLE_SHARED'))"
 
-      - name: Use the container's Python 3.12
-        # manylinux ships interpreters under /opt/python; there is no
-        # actions/setup-python that would keep the glibc floor.
-        run: echo /opt/python/cp312-cp312/bin >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         # ⚠ From requirements-linux.txt, not a hand-copied list: it is what a
