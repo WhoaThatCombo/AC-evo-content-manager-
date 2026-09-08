@@ -320,6 +320,35 @@ def car_names():
     return names
 
 
+def car_models():
+    """preset id -> the mod folder (== car id) that ships it.
+
+    ⚠ EXACT, where content.guess_model can only guess. A mod's package
+    basename IS the car folder, and its manifest names the preset, so the two
+    are related by the file layout rather than by their spelling. The guess
+    strips `preset_`/`_mech_N` and looks for a folder containing what is left,
+    which fails whenever a mod's preset code is not a substring of its folder:
+    `preset_m8x_mech_1` is shipped by `ks_bmw_m8_comp_mod_v1`. No model means
+    no thumbnail, and mods are exactly the cars people pick by sight.
+    """
+    packaged = set()
+    listings = {}
+    for which in ("server", "client"):
+        listings[which] = installed(which).get("mods", [])
+        for m in listings[which]:
+            if m.get("kspkg"):
+                packaged.add(m["name"])
+    out = {}
+    for which in ("server", "client"):
+        for m in listings[which]:
+            if m["name"] not in packaged:
+                continue
+            for c in m["cars"]:
+                if c.get("id"):
+                    out.setdefault(c["id"], m["name"])
+    return out
+
+
 def scan_source(path):
     """Look at a folder or .zip and report the mods it could install."""
     if not path or not os.path.exists(path):
@@ -1253,7 +1282,16 @@ def ingest_staging(did, overwrite=False):
     # and the next drop would show the previous one's numbers.
     try:
         if len(names) == 1:
-            r = ingest(os.path.join(d, names[0]), overwrite=overwrite)
+            one = os.path.join(d, names[0])
+            # ⚠ Check for a server package BEFORE the ordinary ingest. It is a
+            # .zip like any other, and the generic path would try to read it
+            # as a car mod and fail - the marker file inside is the only thing
+            # that tells them apart.
+            from . import pack as packmod
+            if packmod.is_package(one):
+                r = packmod.install(one)
+            else:
+                r = ingest(one, overwrite=overwrite)
         elif any(n.lower() == "acecm_track.json" for n in names) \
                 or any(n.lower().endswith((".scene", ".track")) for n in names):
             r = install_track_folder(d, overwrite=overwrite)

@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 
-from . import config, kspkg_write, logs, servers, tracktables
+from . import config, kspkg_write, logs, servers, tracktables, winproc
 
 REQUIRED = ["manifest.json", "containers.bin", "tracks_entry.bin"]
 
@@ -230,8 +230,8 @@ def deploy(pkg_dir):
         cmd = (config.tool_cmd("server_track_inject",
                                ["--install", kspkg, pkg_dir])
                if config.FROZEN else [sys.executable, "-c", code])
-        r = subprocess.run(cmd, cwd=srv_dir,
-                           capture_output=True, text=True, timeout=900)
+        r = winproc.hidden_run(cmd, cwd=srv_dir,
+                               capture_output=True, text=True, timeout=900)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "injector timed out", **bak}
     out = (r.stdout or "") + (r.stderr or "")

@@ -256,6 +256,12 @@ def fill_entry(entry, peer=None):
     except Exception as ex:
         print(f"  (could not fill players: {ex})")
     setif("max_players", int(lb.get("max_players") or 90))
+    # Bools. Without these a locked ACECM server advertised itself as
+    # open: no lock icon, and it passed the "unlocked only" filter, so
+    # selecting the row in-game cleared the password box and the join
+    # was refused with nothing on screen explaining why.
+    setif("driver_password", bool(lb.get("driver_password")))
+    setif("spectator_password", bool(lb.get("spectator_password")))
     mode = (lb.get("game_mode") or "PRACTICE").replace("GameModeType_", "")
     pretty = mode.replace("_", " ").title()
     if pretty == "Practice":

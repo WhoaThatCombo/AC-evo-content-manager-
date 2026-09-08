@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 
-from . import config, detect, logs, netutil
+from . import config, detect, logs, netutil, winproc
 
 MODES = {
     "proxy": "acevo_proxy.py",
@@ -679,8 +679,8 @@ def start(mode="proxy"):
     # user for our own leftover. Either it started in time or it does not run.
     if p.poll() is None:
         try:
-            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
-                           capture_output=True, timeout=15)
+            winproc.hidden_run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
+                               capture_output=True, timeout=15)
         except Exception:
             p.terminate()
         _procs.pop(mode, None)
@@ -721,7 +721,7 @@ def _is_descendant(pid, ancestor, depth=6):
         if seen == ancestor:
             return True
         try:
-            r = subprocess.run(
+            r = winproc.hidden_run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command",
                  f"(Get-CimInstance Win32_Process -Filter "
                  f"'ProcessId={int(seen)}').ParentProcessId"],
@@ -757,7 +757,7 @@ def _orphan_on_backend_port():
         if pid == os.getpid():
             continue
         try:
-            r = subprocess.run(
+            r = winproc.hidden_run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command",
                  f"(Get-CimInstance Win32_Process -Filter "
                  f"'ProcessId={pid}').CommandLine"],
@@ -787,8 +787,8 @@ def stop():
         logs.LOG.info("reclaiming backend port %s from orphaned ACECM pid %s "
                       "(left over from a previous ACECM session)",
                       config.CFG["backend_port"], pid)
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                       capture_output=True)
+        winproc.hidden_run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True)
     return {"ok": True}
 
 

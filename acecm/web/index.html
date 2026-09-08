@@ -4,32 +4,54 @@
 <meta charset="utf-8">
 <title>Assetto Corsa EVO Content Manager</title>
 <link rel="stylesheet" href="/style.css">
+<script>
+// Apply the saved theme before first paint, so there is no flash of the
+// default accent on every load.
+// ⚠ The server injects the saved theme into __ACECM_THEME__ below. It has to,
+// because localStorage cannot be relied on across an update: ui._storage_path
+// deletes the whole WebView2 profile whenever the version changes (to avoid
+// painting yesterday's JS), which took the chosen accent with it every time.
+var t = '__ACECM_THEME__';
+try {
+  t = localStorage.getItem('acecm.theme') || t;
+} catch (e) {}
+if (t && t !== '__ACECM' + '_THEME__') document.documentElement.dataset.theme = t;
+</script>
 </head>
 <body>
 
 <main>
-  <!-- Content Manager's own arrangement: no sidebar. The active section is the
-       page title, and the other sections sit beside it in grey. The rarely
-       used ones (patches, logs, settings…) go to the right so the row that
-       matters stays short. -->
+  <!-- One centred bar. The active section is the only title we need, so the
+       old 34px heading and its subtitle are gone - they cost ~125px of every
+       page and mostly repeated the highlighted nav word underneath them.
+       Left / centre / right are grid columns so the nav is centred on the
+       WINDOW, not on whatever happens to be beside it. -->
   <header>
-    <div class="topline">
-      <div class="mark" title="Assetto Corsa EVO Content Manager"></div>
-      <h1 id="ttl">Drive</h1>
-      <div class="grow"></div>
-      <nav id="sections2"></nav>
+    <div class="bar">
+      <div class="barL">
+        <!-- The mark used to sit beside a 34px title; alone it read as a stray
+             dot, so it is a proper lockup now. Clicking it goes home. -->
+        <a class="brand" id="brand" title="Assetto Corsa EVO Content Manager">
+          <span class="mark"></span>
+          <span class="wordmark">ACECM</span>
+        </a>
+      </div>
+      <div class="barC">
+        <nav id="sections"></nav>
+      </div>
+      <!-- Settings sits far right, away from the sections you move between.
+           The "server ready" line is gone: it was permanent furniture that
+           said the same thing on every page, and a genuine problem already
+           shows up in the attention banner below. -->
+      <div class="barR">
+        <div id="hdr" class="row"></div>
+        <nav id="sections2"></nav>
+        <button id="themebtn" class="themebtn" title="Colour theme"></button>
+      </div>
     </div>
-    <!-- ⚠ On its own line, and every section always present. Sharing a line
-         with the title made the row slide sideways whenever the title's length
-         changed ("cars" vs "server browser"), so the link you were aiming at
-         moved between clicks. -->
-    <nav id="sections"></nav>
-    <div class="subline">
-      <div class="sub" id="sub">&nbsp;</div>
-      <div class="grow"></div>
-      <div id="hdr" class="row"></div>
-      <div class="foot" id="navfoot">—</div>
-    </div>
+    <!-- kept for the router, which still sets them; not displayed -->
+    <h1 id="ttl" hidden></h1>
+    <div class="sub" id="sub" hidden></div>
   </header>
   <!-- Anything actually wrong, on every page. Empty and invisible when there
        is nothing to report. -->
@@ -39,6 +61,7 @@
 
 <div id="dropveil"><div>Drop a car mod or track pack to install</div></div>
 <div id="toast"></div>
+<div id="thememenu" class="thememenu" hidden></div>
 <script>
 window.addEventListener('error', function (e) {
   var p = document.getElementById('page');

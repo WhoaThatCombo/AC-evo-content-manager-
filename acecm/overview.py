@@ -81,6 +81,10 @@ def _servers():
         out.append({
             "id": p.get("id"), "name": p.get("name") or "(unnamed)",
             "track": track,
+            # ⚠ Kept separate from `track`: it is the one reliable "this is
+            # NOT base-game content" marker, and the publish warning needs to
+            # tell the two apart.
+            "custom_track": (p.get("custom_track") or "").strip(),
             "layout": layout,
             "port": p.get("tcp_port") or p.get("port") or 9700,
             "http_port": p.get("http_port") or 8080,
@@ -169,7 +173,23 @@ def attention(srv, be):
                      for t in (e.get("required_tracks") or [])}
         from . import contentsync
         known = set(contentsync.track_map().values())
-        hosting = {s["track"] for s in srv if s["running"] and s["track"]}
+        # ⚠ Only CUSTOM content is worth warning about. A base-game track is
+        # already on every player's disk, so "players cannot download it from
+        # you" is simply untrue there - and the banner then sat on screen
+        # permanently for anyone hosting a stock circuit, which is most
+        # people. A track counts as custom if the profile deployed one, or if
+        # its name is not one the base game ships.
+        try:
+            from . import content as _content
+            stock = {(t.get("track") or "").strip().lower()
+                     for t in _content.tracks().get("tracks", [])
+                     if not t.get("mod")}
+        except Exception:
+            stock = set()
+        hosting = {s["track"] for s in srv
+                   if s["running"] and s["track"]
+                   and (s.get("custom_track")
+                        or s["track"].strip().lower() not in stock)}
         if hosting and not published and known:
             items.append({
                 "level": "warn",

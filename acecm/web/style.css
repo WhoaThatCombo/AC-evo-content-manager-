@@ -2,10 +2,22 @@
 :root{
   --bg:#0b0d11; --panel:#12151c; --panel2:#171b24; --line:#232936;
   --fg:#e8edf5; --dim:#8b95a7; --dim2:#5d6779;
-  --accent:#2ee6c8; --accent2:#1c8f7d; --gold:#ffd166; --red:#ff5c7a;
+  --accent:#2ee6c8; --accent2:#1c8f7d; --accent3:#4c8dff;
+  --gold:#ffd166; --red:#ff5c7a;
   --ok:#3fb950;
   --r:9px;
 }
+/* Themes change the ACCENT only. Background, panels, lines and text stay
+   fixed, so no theme can quietly ruin contrast - the worst a bad pick can do
+   is look unfashionable. --accent2 is the pressed/hover shade, --accent3 the
+   second stop of the mark gradient. */
+:root[data-theme="blue"]  {--accent:#4c8dff; --accent2:#2b5fbd; --accent3:#22d3ee}
+:root[data-theme="purple"]{--accent:#a78bfa; --accent2:#6d4fd6; --accent3:#f472b6}
+:root[data-theme="red"]   {--accent:#ff5c7a; --accent2:#c23a55; --accent3:#ff9d6c}
+:root[data-theme="orange"]{--accent:#ff9d47; --accent2:#c26f24; --accent3:#ffd166}
+:root[data-theme="green"] {--accent:#3fb950; --accent2:#2a8137; --accent3:#a3e635}
+:root[data-theme="pink"]  {--accent:#f472b6; --accent2:#be3f86; --accent3:#a78bfa}
+:root[data-theme="amber"] {--accent:#ffd166; --accent2:#c4a03f; --accent3:#ff9d47}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
@@ -16,38 +28,49 @@ body{
 button,input,select{font:inherit;color:inherit}
 
 /* ---------------------------------------------------------------- shell --
-   Title-nav, after Content Manager: the current section IS the heading, set
-   large and light, with the other sections beside it in grey. There is no
-   sidebar, so the full width belongs to the content.                        */
+   One centred bar. The old layout stacked a 34px page title, a nav row and a
+   subtitle row: 125px of chrome on every page, and the title was usually the
+   same word as the highlighted nav item directly beneath it. The active
+   section is enough of a title, so the bar is now mark / nav / status, and
+   the ~125px goes back to the content.                                      */
 main{flex:1;min-width:0;display:flex;flex-direction:column}
-header{padding:20px 26px 10px;display:flex;flex-direction:column;gap:2px}
-.topline{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
-.subline{display:flex;align-items:center;gap:12px;min-height:20px}
+header{padding:10px 18px 8px;border-bottom:1px solid var(--line)}
+/* Three grid columns so the nav is centred on the WINDOW, not pushed around
+   by whatever sits either side of it. */
+.bar{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px}
+.barL{display:flex;align-items:center;gap:10px}
+.barC{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+      justify-content:center;min-width:0}
+.barR{display:flex;align-items:center;gap:12px;justify-content:flex-end}
+.brand{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;
+       text-decoration:none}
+.brand:hover .wordmark{color:var(--fg)}
 .mark{
-  width:14px;height:14px;border-radius:3px;flex:none;align-self:center;
-  background:linear-gradient(135deg,var(--accent),#4c8dff);
+  width:17px;height:17px;border-radius:4px;flex:none;
+  background:linear-gradient(135deg,var(--accent),var(--accent3));
   box-shadow:0 0 16px -4px var(--accent);
 }
-header h1{
-  margin:0;font-size:34px;font-weight:200;letter-spacing:-.6px;
-  text-transform:lowercase;line-height:1.1;
+.wordmark{
+  font-size:12px;font-weight:600;letter-spacing:.16em;color:var(--dim);
+  text-transform:uppercase;white-space:nowrap;
 }
-#sections{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;
-  margin-top:2px;padding-bottom:2px}
-#sections2{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+#sections{display:flex;align-items:center;gap:19px;flex-wrap:wrap}
+#sections2{display:flex;align-items:center;gap:13px;flex-wrap:wrap}
+.navsep{width:1px;height:15px;background:var(--line);flex:none}
 #sections a{
   color:var(--dim2);text-decoration:none;cursor:pointer;user-select:none;
-  font-size:19px;font-weight:200;text-transform:lowercase;letter-spacing:-.2px;
+  font-size:16.5px;font-weight:400;text-transform:lowercase;letter-spacing:-.1px;
+  padding:4px 2px;border-bottom:2px solid transparent;
 }
 #sections a:hover{color:var(--fg)}
 /* ⚠ The active section stays IN PLACE. Hiding it (which is what Content
    Manager does) reflows every other word on each click, so the thing you are
    aiming at moves as you use it - you learn a position, then it is wrong. A
    fixed row that only changes colour is worth more than the tighter look. */
-#sections a.on{color:var(--fg)}
+#sections a.on{color:var(--fg);border-bottom-color:var(--accent)}
 #sections2 a{
   color:var(--dim2);text-decoration:none;cursor:pointer;user-select:none;
-  font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  font-size:10px;letter-spacing:.13em;text-transform:uppercase;
 }
 #sections2 a:hover{color:var(--fg)}
 #sections2 a.on{color:var(--accent)}
@@ -55,7 +78,36 @@ header .sub{
   color:var(--dim2);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
 }
 header .grow{flex:1}
-header .foot{color:var(--dim2);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase}
+header .foot{color:var(--dim2);font-size:10px;letter-spacing:.1em;
+             text-transform:uppercase;white-space:nowrap}
+
+/* --------------------------------------------------------------- themes --
+   Accent-only themes: everything else (background, panels, lines) stays put,
+   so a theme cannot wreck contrast or legibility. --accent drives the active
+   nav underline, primary buttons and the mark; --accent3 is the second stop
+   of the mark's gradient.                                                   */
+.themebtn{
+  width:16px;height:16px;padding:0;border-radius:50%;flex:none;cursor:pointer;
+  border:1px solid var(--line);
+  background:linear-gradient(135deg,var(--accent),var(--accent3));
+}
+.themebtn:hover{border-color:var(--accent)}
+.thememenu{
+  position:fixed;z-index:80;background:var(--panel2);border:1px solid var(--line);
+  border-radius:var(--r);padding:8px;display:none;gap:8px;flex-wrap:wrap;
+  max-width:210px;box-shadow:0 12px 34px -12px #000;
+}
+/* ⚠ display:flex on the menu itself beat the hidden attribute in WebView2
+   (UA [hidden] is not always !important there). An open class is the
+   actual switch; hidden is a belt. */
+.thememenu.open{display:flex}
+.thememenu[hidden]{display:none !important}
+.thememenu button{
+  width:22px;height:22px;border-radius:50%;padding:0;cursor:pointer;
+  border:2px solid transparent;
+}
+.thememenu button.on{border-color:var(--fg)}
+
 .page{flex:1;overflow:auto;padding:14px 26px 40px}
 
 /* --------------------------------------------------------------- pieces -- */
@@ -169,16 +221,60 @@ pre.log{
 .lib-tabs{margin-bottom:10px}
 
 /* ---------------------------------------------------------- drive home -- */
+/* Two columns: what you are driving (car + track, stacked) on the left, and
+   the session on the right. Three equal columns gave Car and Track a full
+   column each to hold one row apiece.
+   ⚠ align-items:stretch, not start - the left column has to reach the same
+   bottom edge as Session/Assists, otherwise the page trails off into empty
+   space beside a full-height panel. */
 .drive{
-  display:grid;grid-template-columns:1.15fr 1.15fr minmax(280px,360px);gap:14px;
-  align-items:stretch;min-height:calc(100vh - 150px);
+  display:grid;grid-template-columns:1fr 1fr;gap:14px;
+  /* ⚠ the subtraction has to cover EVERYTHING above and below the grid:
+     header + attention banner, the .page padding, and the Single player /
+     Online mode bar. 120px missed the mode bar and left the page scrolling
+     by ~30px - just enough for a scrollbar to appear and nothing useful. */
+  /* ⚠ MEASURED, not guessed. Every constant tried here was wrong at some
+     window size: the chrome above the grid is a header that can carry a
+     banner, plus a mode bar that wraps to two rows when the window narrows.
+     fitDrive() measures the grid's own top edge and writes --drive-h, so the
+     page fits exactly at any size and while resizing. The calc is only the
+     fallback for the frame before the first measurement. */
+  align-items:stretch;
+  height:var(--drive-h, calc(100vh - 155px));
+  min-height:340px;
 }
-@media (max-width:1100px){
-  .drive{grid-template-columns:1fr 1fr}
-  .drive .drive-go{grid-column:1/-1}
+.drive-left{display:flex;flex-direction:column;gap:14px;min-width:0}
+/* The two cards share the column's height; the car gets the larger share
+   because it is the thing you are choosing. */
+.drive-left > .card{display:flex;flex-direction:column;margin-bottom:0;min-height:0}
+.drive-left > .card:first-child{flex:1.7 1 0}
+.drive-left > .card:last-child{flex:1 1 0}
+/* The server list lives in the right pane, above Join. It is the tall thing
+   on the page, so it gets the leftover height and a taller window shows more
+   rows rather than a bigger picture.
+
+   ⚠ The cap is viewport-relative, NOT a flex share. Nothing in this column
+   is height-bounded (the page scrolls), so `flex:1` on a 250-row list simply
+   grew the pane to 13000px and took the left column's cards with it. The
+   subtracted 430px is the chrome above and below it: mode bar, pane tabs,
+   direct-connect, filters, Join. */
+.drive-go .pane > .drive-srvbox{
+  display:flex;flex-direction:column;min-height:0;margin-bottom:14px;
+}
+.drive-go .pane > .drive-srvbox .drive-list{
+  flex:1 1 auto;min-height:140px;max-height:none;overflow:auto;
+}
+.drive-go{min-height:0}
+.drive-go .pane{display:flex;flex-direction:column;min-height:0}
+@media (max-width:900px){
+  /* ⚠ one column means the two halves STACK, so pinning the grid to the
+     viewport would crush both into half a screen each. Below this width the
+     page is meant to scroll. */
+  .drive{grid-template-columns:1fr;height:auto;min-height:0}
 }
 .drive-col{display:flex;flex-direction:column;min-height:0;margin-bottom:0}
-.drive-col .drive-list{flex:1;min-height:280px;max-height:none}
+.drive-col .drive-list{flex:1;min-height:200px;max-height:none}
+/* the two mode rows stack; the sub-row is the quieter of the two */
 /* ---- the chosen thing, as a card ---------------------------------------
    After Content Manager: the car IS the control. A picture big enough to
    recognise at a glance, its name on a bar across the bottom, and the whole
@@ -189,6 +285,25 @@ pre.log{
   background:var(--panel2);border:1px solid var(--line);border-radius:10px;
   aspect-ratio:16/10;
 }
+/* ⚠ Inside the stacked column the pictures FILL their card rather than
+   dictating its height from an aspect ratio. 16/10 of a half-width column was
+   ~550px each, so car + track alone were two screens; letting them flex means
+   they fill exactly the height the session panel sets and no more. */
+/* ⚠ Cap it. The picture flexes so two stacked cards fill the column in Single
+   player, but in the Online modes the car is the ONLY card, so an uncapped
+   flex made it ~1000px tall: a vast empty box before you pick, and a car
+   cropped top and bottom by object-fit:cover after. */
+/* ⚠ The picture takes the leftover height, and there is no cap on it. With
+   a 460px ceiling a tall card had nowhere to put the rest, so it reserved
+   200px of nothing under the livery line - the gap this replaced. */
+.drive-left .drive-pick{
+  aspect-ratio:auto;flex:1 1 auto;min-height:80px;max-height:none;
+  margin-bottom:0;
+}
+/* nothing to show yet - do not inflate an empty state to fill a column */
+.drive-left .drive-pick.empty-pick{flex:0 0 auto;max-height:none;min-height:0}
+/* the card keeps the column's height; its contents sit at the top of it */
+.drive-left > .card{justify-content:flex-start}
 .drive-pick:hover{border-color:var(--accent2)}
 .drive-pick img{
   position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
@@ -290,7 +405,10 @@ pre.log{
 .drive-go{overflow:auto}
 .drive-fields{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}
 .drive-fields .span2{grid-column:1/-1}
-.drive-via{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+/* two stacked rows: the mode, then the quieter sub-mode + its actions */
+.drive-via{display:flex;flex-direction:column;align-items:flex-start;gap:6px;
+           margin-bottom:12px}
+.drive-via .subrow{padding-left:2px;flex-wrap:wrap}
 .drive-srv-filters{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;
   margin:6px 0 8px;padding:8px;background:var(--panel2);border:1px solid var(--line);
   border-radius:8px}
@@ -404,6 +522,53 @@ pre.log{
 .livery-head:hover{color:var(--fg)}
 .livery-caret{color:var(--dim2);font-size:9px}
 .livery-name{color:var(--fg);text-transform:capitalize}
+/* Headline car numbers under the picture. A quiet strip of chips, not a
+   table: it is context for the car you already chose, so it must not compete
+   with the name bar above it or the livery control below. */
+.car-specs{
+  /* ⚠ A fixed grid, not free-flowing pills. Wrapping chips re-flowed into a
+     different number of rows for every car, so the card's height jumped as
+     you moved through the list. Columns keep it the same block every time. */
+  display:grid;grid-template-columns:repeat(auto-fit, minmax(78px, 1fr));
+  gap:4px;margin-top:8px;
+}
+.car-specs .spec{
+  display:flex;flex-direction:column;gap:1px;min-width:0;
+  padding:4px 7px;border:1px solid var(--line);border-radius:7px;
+  background:var(--panel2);color:var(--fg);font-size:11.5px;
+  line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.car-specs .spec b{
+  color:var(--dim2);font-weight:600;text-transform:uppercase;
+  letter-spacing:.05em;font-size:8.5px;
+}
+.car-specs:empty{display:none}
+
+/* Our own confirmation dialog - see ask() in app.js. The embedded webview
+   silently refuses window.confirm(), so this is a real element instead. */
+.ask-box{max-width:520px;padding:18px 18px 14px}
+.ask-msg{
+  white-space:pre-wrap;line-height:1.45;font-size:13.5px;color:var(--fg);
+  max-height:52vh;overflow:auto;
+}
+.ask-row{justify-content:flex-end;gap:8px;margin-top:14px}
+
+/* Single player penalties, at the foot of the Assists pane. Set apart from
+   the assist grid above it: same screen, different thing - it edits the
+   game's content rather than your profile. */
+.sp-pen{
+  margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
+  display:flex;flex-direction:column;gap:6px;align-items:flex-start;
+}
+.sp-pen-head{display:flex;align-items:baseline;gap:8px}
+
+.livery-row{
+  display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;
+  color:var(--dim2);
+}
+.livery-lab{flex:none;text-transform:uppercase;letter-spacing:.06em;font-size:10.5px}
+.livery-row select{flex:0 1 200px;text-transform:capitalize}
+.livery-note{flex:1;min-width:0}
 .livery-body{display:none;margin:2px 0 4px;max-height:34vh;overflow:auto}
 .livery-body.on{display:block}
 .livery-opt{
@@ -426,3 +591,19 @@ pre.log{
 .drive-kids{display:none}
 .drive-kids.on{display:block}
 .drive-row.drive-variant{padding-left:34px;background:rgba(0,0,0,.15)}
+
+/* ------------------------------------------------------------- assists --
+   Assists is a pane beside Session, not a fold-out under it: it is something
+   you set, not something you scroll past. */
+.panetabs{display:flex;gap:6px;margin:-2px 0 12px}
+.pane{min-width:0}
+.assists-note{margin-bottom:10px;line-height:1.45}
+.assists-body{padding-top:0}
+.assists-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}
+.assists-grid label.f span{font-size:11px}
+
+.pk-box.pk-wide{
+  width:min(720px,100%);
+  max-height:min(92vh,920px);
+  height:min(92vh,920px);
+}

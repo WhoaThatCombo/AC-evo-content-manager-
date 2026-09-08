@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import sys
 
-from . import config, logs, version
+from . import config, logs, version, winproc
 
 APP = "ACECM"
 
@@ -102,7 +102,7 @@ def _shortcut(link, target, args="", desc=""):
     ) % (link.replace("'", "''"), target.replace("'", "''"),
          args.replace("'", "''"), os.path.dirname(target).replace("'", "''"),
          desc.replace("'", "''"))
-    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+    r = winproc.hidden_run(["powershell", "-NoProfile", "-NonInteractive",
                         "-Command", ps], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout or "shortcut failed").strip())
@@ -302,3 +302,358 @@ def uninstall(remove_exe=False):
                     "error": f"could not remove {exe}: {ex} "
                              f"(is it running?)"}
     return {"ok": True, "removed": gone, "data_kept": config.DATA}
+
+
+# --------------------------------------------------------------------------
+# Self-updating without an auto-updater.
+#
+# The update channel is a person: you post ACECM.exe to Patreon, someone
+# downloads it and runs it. If it finds an OLDER installed copy it offers to
+# replace that copy and relaunch it from the install folder; then this
+# download exits. No polling, no manifest, no server.
+#
+# ⚠ This NEVER fires for the installed copy itself. pending_update() short-
+# circuits on running_installed, so the app you launch from the Start Menu
+# has no update logic in it at all - only a file run from OUTSIDE the install
+# folder (i.e. a fresh download) can offer anything.
+# --------------------------------------------------------------------------
+
+def pending_update():
+    """What a just-launched exe should offer, if anything.
+
+    offer          -> replace an older installed copy (the update case)
+    offer_install  -> no install yet; put this one in place (first run)
+    Both are False for the installed copy, for a downgrade, and for a
+    same-version re-download - so the common cases stay silent.
+    """
+    st = status()
+    installed_v = installed_version()
+    frozen = st["frozen"]
+    # the guard the whole feature rests on: the installed copy is never asked
+    running_installed = st["running_installed"]
+    offer = bool(frozen and st["installed"] and not running_installed
+                 and _older(installed_v, version.VERSION))
+    offer_install = bool(frozen and not st["installed"] and not running_installed)
+    return {
+        "offer": offer,
+        "offer_install": offer_install,
+        "installed": st["installed"],
+        "installed_version": installed_v,
+        "this_version": version.VERSION,
+        "install_dir": install_dir(),
+        "install_exe": st["installed_exe"],
+        "running_installed": running_installed,
+    }
+
+
+def _exe_locked(path):
+    """True while `path` is a running image Windows will not let us overwrite.
+
+    A running exe is opened FILE_SHARE_READ only, so asking for write access
+    fails - which is exactly the condition os.replace would hit."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r+b"):
+            return False
+    except OSError:
+        return True
+
+
+def running_installed_pids():
+    """PIDs actually running the INSTALLED exe - not some other ACECM."""
+    try:
+        from . import winproc
+    except Exception:
+        return []
+    dst = os.path.normcase(os.path.abspath(installed_exe()))
+    out = []
+    for pid in winproc.pids_named(APP + ".exe"):
+        try:
+            got = winproc.exe_path(pid) or ""
+            if got and os.path.normcase(os.path.abspath(got)) == dst:
+                out.append(int(pid))
+        except Exception:
+            continue
+    return out
+
+
+def _ask_installed_to_quit(any_acecm=False):
+    """Ask a running copy to exit.
+
+    ⚠ TWO different intents, and they must not share a rule:
+      * the UPDATER (default) may only ever quit the INSTALLED copy - quitting
+        something else achieves nothing and can kill an unrelated instance;
+      * STARTUP TAKEOVER (any_acecm=True) just wants the PORT back from a
+        leftover windowless ACECM, whichever copy that happens to be.
+    Applying the updater's identity check to the takeover path stopped ACECM
+    starting at all whenever any other copy held the port - the app reported
+    "already running without a window and did not exit when asked" and there
+    was no way through but killing the other process by hand.
+
+    ⚠ For the updater, check WHO is answering first. The port is not proof of
+    identity: a copy run from a source tree during development owned it,
+    obediently quit when asked, and the actual installed copy kept its lock -
+    so the update failed with "still running" having just killed something
+    else entirely.
+    """
+    import urllib.request
+    port = config.CFG.get("ui_port")
+    if not port:
+        return False
+    mine = set(running_installed_pids())
+    try:
+        from . import winproc
+        owners = set(winproc.tcp_listen_pids(int(port)) or [])
+    except Exception:
+        owners = set()
+    if not any_acecm and owners and mine and not (owners & mine):
+        logs.LOG.info("update: port %s is held by pid(s) %s, which are not the "
+                      "installed copy %s - not sending quit there",
+                      port, sorted(owners), sorted(mine))
+        return False
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/app/quit", data=b"{}",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return bool((__import__("json").loads(r.read()) or {}).get("ok"))
+    except Exception as ex:
+        logs.LOG.info("quit request to running install: %s", ex)
+        return False
+
+
+def _wait_unlocked(path, timeout=20.0):
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        if not _exe_locked(path):
+            return True
+        time.sleep(0.4)
+    return not _exe_locked(path)
+
+
+def _spawn(exe, args):
+    flags = 0
+    if os.name == "nt":
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: the new app must outlive
+        # this exiting updater and not share its (dying) console.
+        flags = 0x00000008 | 0x00000200
+    # A onefile build unpacks itself into %TEMP%\_MEInnnnnn and tells its
+    # children where that is via _MEIPASS2. A frozen child that sees it does
+    # NOT unpack its own copy - it runs out of ours. So the app we are
+    # launching here held our extraction folder open, and this exiting
+    # updater could not delete it:
+    #   Failed to remove temporary directory: ...\Temp\_MEI270842
+    # a message box, on every single update. child_env() drops those
+    # breadcrumbs so the new copy unpacks its own directory and owns it.
+    from . import winproc
+    subprocess.Popen([exe] + list(args), close_fds=True,
+                     creationflags=flags, env=winproc.child_env(),
+                     cwd=os.path.dirname(exe) or None)
+
+
+def apply_update(relaunch=True):
+    """Replace the installed copy with THIS exe, then relaunch it.
+
+    Sequence: if the installed copy is running, ask it to quit and wait for
+    its exe to unlock; copy ourselves into place (force, because the marker
+    may equal or trail this build); relaunch the installed copy and let the
+    caller exit. The ACECM data folder is never touched.
+    """
+    # ⚠ Set logging up HERE. The updater replaces the exe and exits long
+    # before serve() would have called logs.setup(), so without this the whole
+    # swap - the one operation that overwrites a user's install - happened with
+    # nothing written down anywhere.
+    try:
+        logs.setup()
+    except Exception:
+        pass
+    st = status()
+    if not st["frozen"]:
+        return {"ok": False, "error": st.get("note") or "not a frozen build"}
+    dst = installed_exe()
+    logs.LOG.info("self-update: v%s -> v%s  (this exe: %s)",
+                  installed_version() or "?", version.VERSION, running_exe())
+    if _exe_locked(dst):
+        _ask_installed_to_quit()
+        if not _wait_unlocked(dst):
+            pids = running_installed_pids()
+            who = (" (process " + ", ".join(str(p) for p in pids) + ")"
+                   if pids else "")
+            return {"ok": False, "running": True, "pids": pids,
+                    "error": f"the installed ACECM is still running{who} - "
+                             "close that window, then run this update again"}
+    r = install(desktop=st.get("desktop", True), force=True)
+    if not r.get("ok"):
+        return r
+    if relaunch:
+        try:
+            _spawn(dst, ["--relaunch"])
+        except Exception as ex:
+            return {"ok": False,
+                    "error": f"installed v{version.VERSION} but could not "
+                             f"relaunch it: {ex}. Start it from the Start Menu.",
+                    "exe": dst}
+    return {"ok": True, "exe": dst, "version": version.VERSION,
+            "replaced": r.get("replaced"), "relaunched": relaunch}
+
+
+def _messagebox(text, title, yesno=True):
+    """A native yes/no (or OK) box, so a windowless download can still ask.
+
+    Falls back to the console when there is no user32 (non-Windows, or a
+    genuinely headless box), and to False if even that is unavailable."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            MB_YESNO, MB_OK = 0x4, 0x0
+            MB_ICONQUESTION = 0x20
+            MB_SETFOREGROUND, MB_TOPMOST = 0x10000, 0x40000
+            style = (MB_YESNO if yesno else MB_OK) | MB_ICONQUESTION \
+                | MB_SETFOREGROUND | MB_TOPMOST
+            return ctypes.windll.user32.MessageBoxW(0, text, title, style) == 6
+        except Exception:
+            pass
+    if not yesno:
+        print(f"{title}: {text}")
+        return True
+    try:
+        return input(f"{title}\n{text}\n[y/N] ").strip().lower().startswith("y")
+    except Exception:
+        return False
+
+
+def prompt_update(pu):
+    return _messagebox(
+        "A newer ACECM is ready to install.\n\n"
+        f"Installed:  v{pu['installed_version']}\n"
+        f"This file:   v{pu['this_version']}\n\n"
+        "Replace the installed copy and restart it now?",
+        "ACECM update", yesno=True)
+
+
+def prompt_install(pu):
+    return _messagebox(
+        f"ACECM v{pu['this_version']} is not installed yet.\n\n"
+        f"Install it to\n{pu['install_dir']}\nand add Start Menu / Desktop "
+        "shortcuts?",
+        "Install ACECM", yesno=True)
+
+
+def warn(msg):
+    _messagebox(str(msg), "ACECM", yesno=False)
+
+
+def quit_now(delay=0.4):
+    """Exit this process so its exe unlocks. No relaunch - the updater that
+    asked will start the replacement copy itself."""
+    def bye():
+        import time
+        time.sleep(delay)
+        try:
+            from . import ui
+            ui.destroy()
+        except Exception:
+            pass
+        time.sleep(1.5)
+        os._exit(0)                       # noqa: SLF001
+    import threading
+    threading.Thread(target=bye, daemon=True).start()
+    return {"ok": True, "quitting": True}
+
+
+# ------------------------------------------------------- temp housekeeping --
+
+# A file that exists in OUR bundle and is vanishingly unlikely to exist in
+# another PyInstaller app's. Never delete a _MEI directory without it: other
+# frozen programs use the same %TEMP%\_MEInnnnnn naming, and one of them may
+# be running right now.
+_OURS_MARKER = os.path.join("acecm", "web", "app.js")
+
+
+def stale_bundles(older_than=1800.0):
+    """Leftover onefile extraction folders that are definitely ours.
+
+    Every build before 1.2.0 leaked one of these per update: the relaunched
+    copy inherited _MEIPASS2 and ran out of the *old* process's folder, so the
+    old process could not delete it and said so in a message box. One user had
+    139 directories and 4.7 GB of them.
+    """
+    import tempfile
+    import time
+    live = ""
+    if getattr(sys, "frozen", False):
+        live = os.path.normcase(getattr(sys, "_MEIPASS", "") or "")
+    root = tempfile.gettempdir()
+    out = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return out
+    now = time.time()
+    for name in names:
+        if not name.startswith("_MEI"):
+            continue
+        d = os.path.join(root, name)
+        if not os.path.isdir(d) or os.path.normcase(d) == live:
+            continue
+        if not os.path.isfile(os.path.join(d, _OURS_MARKER)):
+            continue
+        try:
+            # ⚠ mtime, so a copy that is merely OLD but still running is not a
+            # candidate the moment it is unpacked. A running app touches
+            # nothing, so pair this with the delete-failure check below - the
+            # real guard is that an in-use file cannot be removed at all.
+            if now - os.path.getmtime(d) < older_than:
+                continue
+        except OSError:
+            continue
+        out.append(d)
+    return out
+
+
+def sweep_bundles(older_than=1800.0):
+    """Delete what stale_bundles() found. Never raises.
+
+    Deletion IS the lock test: a directory another live copy is running from
+    refuses to go, and it is simply left behind.
+    """
+    import shutil
+    freed, gone, kept = 0, 0, 0
+    for d in stale_bundles(older_than):
+        size = 0
+        try:
+            for base, _dirs, files in os.walk(d):
+                for f in files:
+                    try:
+                        size += os.path.getsize(os.path.join(base, f))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        # ⚠ RENAME FIRST, and only delete what the rename won. rmtree on a
+        # live bundle is not safely reversible: it deletes the unlocked files
+        # one by one and only fails when it reaches a loaded DLL, which would
+        # gut a running copy of ACECM instead of skipping it. Renaming a
+        # directory is atomic and Windows refuses it outright while any file
+        # inside is open - so the rename IS the in-use test, and a copy that
+        # has merely been running a long time is left completely untouched.
+        tmp = d + ".stale"
+        try:
+            if os.path.exists(tmp):
+                shutil.rmtree(tmp, ignore_errors=True)
+            os.rename(d, tmp)
+        except OSError:
+            kept += 1
+            continue
+        try:
+            shutil.rmtree(tmp)
+            freed += size
+            gone += 1
+        except OSError:
+            kept += 1
+    if gone:
+        logs.LOG.info("removed %d stale bundle folder(s), %.1f MB freed "
+                      "(%d still in use)", gone, freed / 1e6, kept)
+    return {"removed": gone, "bytes": freed, "in_use": kept}

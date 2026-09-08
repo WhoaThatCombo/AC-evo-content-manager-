@@ -140,6 +140,27 @@ def tcp_listen_pids(port):
     return out
 
 
+def exe_path(pid):
+    """Full path of a process's executable, or "" if it cannot be read.
+
+    Needed to tell one ACECM from another: the name alone cannot distinguish
+    the installed copy from one run out of a build folder or a source tree.
+    """
+    h = _k32.OpenProcess(PROCESS_QUERY_LIMITED, False, int(pid))
+    if not h:
+        return ""
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return ""
+    except Exception:
+        return ""
+    finally:
+        _k32.CloseHandle(h)
+
+
 def pids_named(*names):
     """PIDs whose exe name matches any of `names` (with or without .exe)."""
     want = {_norm(n) for n in names}
@@ -347,3 +368,103 @@ def hide_console():
     except Exception:
         pass
     return hidden
+
+
+# --------------------------------------------------------------------------
+# Console, on demand.
+#
+# ⚠ The shipped exe is built --windowed (GUI subsystem), so Windows never
+# allocates a console for it. That is the ONLY reliable way to stop a black
+# window appearing behind the app: a --console build gets its console from the
+# OS before a single line of our code runs, so hiding it later always leaves a
+# visible flash - and for a double-clicked exe it is on screen for the whole
+# multi-second startup.
+#
+# The cost is that a GUI-subsystem process has no stdout at all, which matters
+# because this is also a server tool. So the console is created on demand:
+# attach to the terminal that launched us if there is one, otherwise allocate
+# our own window - but only for the modes that actually need to be read.
+# --------------------------------------------------------------------------
+
+class _NullStream:
+    """Somewhere for print() to go when there is no console.
+
+    A --windowed build sets sys.stdout/sys.stderr to None, and then any bare
+    print() raises AttributeError. Logging still gets everything: the log file
+    handler is independent of stdout."""
+
+    def write(self, s):
+        return len(s) if s else 0
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        raise OSError("no console")
+
+    def close(self):
+        pass
+
+    @property
+    def closed(self):
+        return False
+
+
+def ensure_console(alloc=True):
+    """Give this process a readable console. True if one is available.
+
+    Attaches to the launching terminal when there is one, so `ACECM.exe
+    --headless` in a shell prints where the user is looking.
+
+    ⚠ alloc=False for background children (--tool). Those are started with
+    CREATE_NO_WINDOW precisely so nothing appears on screen; calling
+    AllocConsole in one would hand it a brand-new VISIBLE console window - the
+    proxy and every telemetry tracker popping a black box, which is worse than
+    the single console this whole change exists to remove. They log to files.
+    """
+    import sys
+    if sys.platform != "win32":
+        return True
+    ATTACH_PARENT_PROCESS = ctypes.c_uint(-1).value
+    ok = False
+    try:
+        _k32.GetConsoleWindow.restype = wintypes.HWND
+        if _k32.GetConsoleWindow():
+            ok = True                      # already have one
+        elif _k32.AttachConsole(ATTACH_PARENT_PROCESS):
+            ok = True                      # started from a terminal
+        elif alloc and _k32.AllocConsole():
+            ok = True                      # double-clicked: make our own
+    except Exception:
+        return False
+    if not ok:
+        return False
+    # Rebind the streams; without this they stay None and print() still fails.
+    for name, dev, mode in (("stdout", "CONOUT$", "w"),
+                            ("stderr", "CONOUT$", "w"),
+                            ("stdin", "CONIN$", "r")):
+        try:
+            cur = getattr(sys, name, None)
+            if cur is not None and not isinstance(cur, _NullStream):
+                try:
+                    if cur.fileno() >= 0:
+                        continue           # already a real stream
+                except Exception:
+                    pass
+            f = open(dev, mode, buffering=1 if mode == "w" else -1,
+                     encoding="utf-8", errors="replace")
+            setattr(sys, name, f)
+        except Exception:
+            continue
+    return True
+
+
+def safe_stdio():
+    """Make print() harmless when there is no console (the window build)."""
+    import sys
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is None:
+            setattr(sys, name, _NullStream())

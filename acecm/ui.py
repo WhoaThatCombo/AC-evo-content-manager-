@@ -109,6 +109,20 @@ def focus():
         return False
 
 
+def destroy():
+    """Close the window so the process unwinds and exits. Used by the self-
+    updater to make a running install let go of its .exe. Returns False when
+    there is no window (a headless instance), so the caller can hard-exit."""
+    w = WINDOW
+    if w is None:
+        return False
+    try:
+        w.destroy()
+        return True
+    except Exception:
+        return False
+
+
 def run(url, title="Assetto Corsa EVO Content Manager"):
     """Open the window. Blocks until it is closed."""
     import webview
@@ -125,4 +139,11 @@ def run(url, title="Assetto Corsa EVO Content Manager"):
         winproc.hide_console()
     except Exception:
         pass
-    webview.start(private_mode=False, storage_path=_storage_path())
+    from . import logs
+    logs.LOG.info("opening native WebView2 window at %s", url)
+    try:
+        webview.start(private_mode=False, storage_path=_storage_path())
+    except Exception as ex:
+        logs.LOG.exception("native window failed: %s", ex)
+        raise
+    logs.LOG.info("native window closed")

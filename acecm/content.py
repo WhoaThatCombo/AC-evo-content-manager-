@@ -105,8 +105,20 @@ def _cars_uncached():
         from . import carsmap
         cmap = carsmap.table()
         presets = cmap.get("presets") or {}
+        variants = cmap.get("variants") or {}
     except Exception:
         presets = {}
+        variants = {}
+
+    # ⚠ Only disambiguate where there IS ambiguity. 25 of the base cars ship
+    # several mechanical presets and every one of them rendered as the same
+    # row - "BMW M2 Coupe / preset_m2_mech_1" twice over, which tells a player
+    # nothing about which is which. The game names its own variants, so use
+    # its word for it (Performance, Weissach, Kouki, 450) and leave the
+    # single-preset cars exactly as they were rather than hanging a pointless
+    # "Standard" off every name in the list.
+    def variant_of(preset_id):
+        return (variants.get(preset_id) or {}).get("variant", "")
     # ⚠ carsmap is built from the BASE archive, so a mod's presets are never in
     # it and every modded car came back with no model at all. That is the one
     # group where it matters most: no model means no thumbnail, and mods are
@@ -121,12 +133,26 @@ def _cars_uncached():
     except Exception:
         pass
 
+    # The mod manifests say outright which folder ships which preset, so ask
+    # them before guessing from the spelling of the id.
+    mod_models = {}
+    try:
+        mod_models = install.car_models()
+    except Exception:
+        pass
+
     def guess_model(name):
         """The model folder a preset belongs to, when carsmap cannot say.
 
         preset_mazda_rx_s_mech_1 -> ks_mazda_rx_s. Only ids the viewer actually
         found are returned, so this can name a model that does not exist.
         """
+        # ⚠ exact first: the substring guess below cannot connect
+        # preset_m8x_mech_1 to ks_bmw_m8_comp_mod_v1, so such a car got no
+        # model and therefore no picture.
+        hit = mod_models.get(name)
+        if hit:
+            return hit
         if name in viewer_ids:
             return name
         code = re.sub(r"^preset_|_mech_\d+$", "", name)
@@ -148,10 +174,19 @@ def _cars_uncached():
             label = _pretty(model)
         else:
             label = _pretty(name)
+        # base_label is the car; variant is which of its presets. The UI
+        # needs them apart: the group header shows the car once, and the rows
+        # under it show only what distinguishes them. The suffix itself is
+        # applied in a SECOND pass below, once we know how many rows a car
+        # actually has.
+        base_label = label
+        var = variant_of(name)
         out.append({
             "id": name,
             "model": model,
             "label": label,
+            "base_label": base_label,
+            "variant": var,
             "named": name in declared or bool(model),
             "brand": (label.split(" ") or [""])[0],
             "kunos": is_kunos,
@@ -175,7 +210,35 @@ def _cars_uncached():
                         "brand": label.split(" ")[0],
                         "kunos": False, "mod": True, "named": True,
                         "from_mod": True})
-    out.sort(key=lambda c: (not c["kunos"], c["label"]))
+    # ⚠ Disambiguate on the rows that actually EXIST, not on what the archive
+    # holds. The Escort RS Cosworth and RX7 FD ship a second mechanical preset
+    # that cars.json does not offer, so counting archive presets hung a lone
+    # "- Standard" off a car with nothing to tell it apart from.
+    _rows_per_model = {}
+    for c in out:
+        key = c.get("model") or c["id"]
+        _rows_per_model[key] = _rows_per_model.get(key, 0) + 1
+    for c in out:
+        key = c.get("model") or c["id"]
+        var = c.get("variant") or ""
+        if not var or _rows_per_model.get(key, 0) < 2:
+            c["variant"] = ""
+            continue
+        base = c.get("base_label") or c["label"]
+        if not base.lower().endswith(var.lower()):
+            c["label"] = f"{base} · {var}"
+
+    def _mech_n(cid):
+        """The N in ..._mech_N, so a car's variants stay in the game's order."""
+        m = re.search(r"_mech_(\d+)$", cid or "")
+        return int(m.group(1)) if m else 0
+
+    # ⚠ Sort on the BASE name, then the preset number - not on the full label.
+    # Sorting by label put "M2 Coupe - Performance" above "- Standard", so the
+    # variant list read backwards and the group header showed mech_2 first.
+    out.sort(key=lambda c: (not c["kunos"],
+                            (c.get("base_label") or c["label"]).lower(),
+                            _mech_n(c["id"])))
     return {"cars": out, "total": len(out),
             "kunos": sum(1 for c in out if c["kunos"]),
             "mods": sum(1 for c in out if c["mod"]),

@@ -15,7 +15,7 @@ import time
 import uuid
 import urllib.request
 
-from . import config, content, install, logs
+from . import config, content, install, logs, winproc
 
 PROFILES = os.path.join(config.DATA, "profiles.json")
 # profile id -> {pid, started}. Written when we launch, so a profile can be
@@ -62,6 +62,10 @@ TEMPLATE = {
     # profiles is inferred: a list of only mods meant "add these", not
     # "ban every Kunos car".
     "allow_kunos": True,
+    # "all" | "none" | "pick" - modded cars, independent of allow_kunos.
+    # "" means unset: infer_mods() falls back to the pre-switch rules so
+    # profiles written before this field keep behaving as they did.
+    "mods": "",
     "entry_list_path": "",
     "results_path": "",
     "entry_list_url": "",
@@ -148,13 +152,38 @@ def infer_allow_kunos(profile):
     return all(_looks_mod(c) for c in chosen)
 
 
+MODS_MODES = ("all", "none", "pick")
+
+
+def infer_mods(profile):
+    """"all" | "none" | "pick" - what to do about MODDED cars.
+
+    Mods used to have no switch of their own: with no cars picked you got
+    every installed mod, and the only way to say "stock cars only" was the
+    whitelist with nothing in it, which the UI described as "only the cars I
+    pick" and therefore read as broken. Worse, "all Kunos + the mods I pick"
+    with nothing picked collapsed straight back to every mod, so a server
+    that wanted no mods had to whitelist every Kunos car by hand.
+
+    ⚠ The explicit field is only consulted when it is set. Profiles written
+    before it existed fall through to the old inference below and keep the
+    behaviour they already had.
+    """
+    want = (profile.get("mods") or "").strip().lower()
+    if want in MODS_MODES:
+        return want
+    chosen_mods = [c for c in (profile.get("cars") or []) if c and _looks_mod(c)]
+    if chosen_mods:
+        return "pick"
+    return "all" if infer_allow_kunos(profile) else "none"
+
+
 def allowed_car_ids(profile):
     """What the dedicated server should actually accept.
 
-    allow_kunos + empty extras  -> every Kunos car and every installed mod
-    allow_kunos + extras        -> every Kunos car plus those extras
-    not allow_kunos + extras    -> only those extras
-    not allow_kunos + empty     -> every Kunos car (no mods)
+    Two independent axes, which is the point: stock cars on or off, and mods
+    all / none / just the ones picked. Every combination the old rules could
+    express still comes out the same - see infer_mods.
     """
     from . import content, install
     try:
@@ -168,6 +197,7 @@ def allowed_car_ids(profile):
         mods_all = []
     chosen = [c for c in (profile.get("cars") or []) if c]
     allow_kunos = infer_allow_kunos(profile)
+    mods = infer_mods(profile)
     seen, out = set(), []
 
     def add(cid):
@@ -178,33 +208,47 @@ def allowed_car_ids(profile):
     if allow_kunos:
         for c in kunos:
             add(c)
-        extras = chosen if chosen else mods_all
-        for c in extras:
-            add(c)
     else:
-        if chosen:
-            for c in chosen:
+        # a whitelist may name stock cars too
+        for c in chosen:
+            if not _looks_mod(c):
                 add(c)
-        else:
-            for c in kunos:
+    if mods == "all":
+        for c in mods_all:
+            add(c)
+    elif mods == "pick":
+        for c in chosen:
+            if _looks_mod(c):
                 add(c)
+    # ⚠ Never hand the server an empty allow-list: it accepts nobody and the
+    # join fails with "wrong car", which looks like a client problem.
+    if not out:
+        for c in kunos:
+            add(c)
     return out
 
 
 def car_policy(profile):
     allow_kunos = infer_allow_kunos(profile)
-    extras = [c for c in (profile.get("cars") or []) if c]
-    if allow_kunos and not extras:
+    mods = infer_mods(profile)
+    extras = [c for c in (profile.get("cars") or []) if c and _looks_mod(c)]
+    picked = [c for c in (profile.get("cars") or []) if c]
+    if allow_kunos and mods == "all":
         kind, label = "all", "all cars"
+    elif allow_kunos and mods == "none":
+        kind, label = "kunos_only", "all Kunos, no mods"
     elif allow_kunos:
-        kind, label = "kunos_plus", "all Kunos + " + str(len(extras))
-    elif extras:
-        kind, label = "only", str(len(extras)) + (
-            " car only" if len(extras) == 1 else " cars only")
+        kind, label = "kunos_plus", "all Kunos + " + str(len(extras)) + " mod"             + ("" if len(extras) == 1 else "s")
+    elif mods == "all":
+        kind, label = "mods_only", "mods only"
+    elif not picked:
+        # nothing at all was allowed, so allowed_car_ids() fell back to stock
+        kind, label = "kunos_only", "all Kunos, no mods"
     else:
-        kind, label = "kunos_only", "all Kunos"
+        kind, label = "only", str(len(picked)) + (
+            " car only" if len(picked) == 1 else " cars only")
     return {"kind": kind, "label": label, "allow_kunos": allow_kunos,
-            "extras": extras, "count": len(allowed_car_ids(profile))}
+            "mods": mods, "extras": extras, "count": len(allowed_car_ids(profile))}
 
 
 def load():
@@ -904,7 +948,7 @@ def _pid_on_port(port):
     try:
         ps = (f"(Get-NetTCPConnection -State Listen -LocalPort {int(port)} "
               f"-ErrorAction SilentlyContinue).OwningProcess")
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+        r = winproc.hidden_run(["powershell", "-NoProfile", "-NonInteractive",
                             "-Command", ps], capture_output=True, text=True,
                            timeout=8)
         for line in (r.stdout or "").split():

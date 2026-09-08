@@ -63,7 +63,11 @@ LOG = os.path.join(SRV, "serverConfig",
 NAME = os.environ.get("SERVER_NAME", "vAI local test")
 PORT = int(os.environ.get("PORT", "9700"))
 HTTP = int(os.environ.get("HTTP_PORT", "8080"))
-N_AI = os.environ.get("N_AI", "4")
+# ⚠ 0, and nothing reads it any more. ACECM never hosted AI on
+# purpose, but this defaulted to 4, so every server it started was
+# quietly passed -virtual_ai_cars=4. Kept as a name so old configs
+# that set it do not crash; the flags below are gone.
+N_AI = "0"
 MAX_PLAYERS = int(os.environ.get("MAX_PLAYERS", "24"))
 EVENT_IDX = int(os.environ.get("EVENT_IDX", "0"))   # 0 = Brands Hatch GP
 SKILL_MIN = os.environ.get("SKILL_MIN", "70")
@@ -294,8 +298,6 @@ def main():
     # Only ask for virtual-AI cars if some were actually requested. With no
     # bots the flag is noise, and it only means anything on the vAI-patched
     # binary - a normal build runs the stock server and never passes it.
-    if int(N_AI or 0) > 0:
-        args.append(f"-virtual_ai_cars={N_AI}")
     # NOTE: no -no_lobby here, so it registers and appears in the browser.
 
     # Skill SPREAD. Without it every vAI gets the same skill, so all cars run
@@ -305,11 +307,6 @@ def main():
     # across. Deliberately NOT setting ai_disable_variations, which "disables
     # the consistency skill" and would remove the very inconsistency that
     # separates them.
-    if int(N_AI or 0) > 0:
-        if SKILL_MIN:
-            args.append(f"-simexpo_ai_skill_min={SKILL_MIN}")
-        if SKILL_MAX:
-            args.append(f"-simexpo_ai_skill_max={SKILL_MAX}")
     # NOTE: -no_lobby is normally OFF so the server registers and appears in
     # the in-game browser. Turning it on makes the server invisible there.
     if NO_LOBBY:
@@ -378,7 +375,6 @@ def main():
     print(f"  name  : {NAME}")
     print(f"  track : {ev['track']} / {ev['layout']}")
     print(f"  ports : TCP/UDP {PORT}, HTTP {HTTP}")
-    print(f"  vAI   : {N_AI}")
     print(f"  slots : {MAX_PLAYERS}")
     print(f"  mode  : {_enum('GameModeType_', GAME_MODE)} / "
           f"{_enum('MultiplayerServerListSessionType_', SESSION_TYPE)}")
