@@ -5,8 +5,9 @@
 #
 #     git tag v0.4.0 && git push origin v0.4.0
 #
-# ⚠ Windows runner only: the app uses ReadProcessMemory, PowerShell and the
-# Edge WebView2 runtime. There is nothing to cross-compile here.
+# Two jobs, one release. The Windows build produces `ACECM.exe`; the Linux
+# build produces `ACECM` (no extension), which is the asset name the Linux
+# updater looks for. Neither is cross-compiled - each runs natively.
 name: release
 
 on:
@@ -83,3 +84,93 @@ jobs:
         with:
           name: ACECM-exe
           path: dist/ACECM.exe
+
+  linux:
+    # ⚠ needs: build. One release, two jobs. Uploading concurrently races on
+    # creating it, and worse, the "does this release already exist" guard each
+    # job runs would see the OTHER job's upload and skip its own. Serialising
+    # costs a few minutes and removes both failure modes.
+    needs: build
+    runs-on: ubuntu-latest
+    # ⚠ Build inside manylinux, NOT on ubuntu-latest. A PyInstaller onefile
+    # links against the glibc of the machine that built it and refuses to
+    # start on anything older, so an ubuntu-latest build (glibc 2.39) would
+    # die on Debian stable, Ubuntu 22.04 and SteamOS - the machines most
+    # likely to be running this. manylinux_2_28 puts the floor at glibc 2.28
+    # (RHEL 8 / Ubuntu 18.10 and newer), and that is also the oldest glibc
+    # GitHub's own node20 actions will run on, so it is the lowest floor a
+    # job here can actually use.
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the container's Python 3.12
+        # manylinux ships interpreters under /opt/python; there is no
+        # actions/setup-python that would keep the glibc floor.
+        run: echo /opt/python/cp312-cp312/bin >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        # ⚠ From requirements-linux.txt, not a hand-copied list: it is what a
+        # source install uses, so the two cannot drift. The extras match the
+        # Windows job - texture2ddecoder and Pillow are imported lazily, and
+        # without them the build silently ships four track covers instead of
+        # nineteen with nothing in the log saying why.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller texture2ddecoder capstone certifi                       -r requirements-linux.txt
+
+      - name: Check the version matches the tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER=$(python -c "import re;print(re.search(r'VERSION = \"([^\"]+)\"', open('acecm/version.py').read()).group(1))")
+          echo "tag=$TAG  acecm/version.py=$VER"
+          if [ -n "$TAG" ] && [ "$TAG" != "$VER" ]; then
+            echo "::error::tag $TAG does not match VERSION $VER in acecm/version.py"
+            exit 1
+          fi
+
+      - name: Build
+        run: python build.py --clean
+
+      - name: Report the glibc floor
+        # The number this prints IS the compatibility answer: the oldest glibc
+        # that can run the binary. If it ever rises above 2.28 the container
+        # changed under us and the build quietly stopped working on older
+        # distros - which nobody would notice until a user reported it.
+        run: |
+          FLOOR=$(objdump -T dist/ACECM | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+          echo "highest glibc symbol required: $FLOOR"
+          echo "Linux build requires glibc >= $FLOOR" >> "$GITHUB_STEP_SUMMARY"
+          MIN=$( { echo "$FLOOR"; echo 2.28; } | sort -V | head -1 )
+          if [ "$MIN" != "2.28" ]; then
+            echo "::warning::glibc floor rose to $FLOOR (was 2.28); older distros lose support"
+          fi
+
+      - name: Checksum
+        run: |
+          cd dist
+          sha256sum ACECM | tee ACECM.sha256
+
+      - name: Skip upload if the release already has ACECM
+        # Asset-level, not release-level: by now the Windows job has created
+        # the release, so asking "does the release exist" would always be yes
+        # and this job would never upload anything.
+        id: already
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          HAVE=$(curl -s             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer ${{ github.token }}"             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${GITHUB_REF_NAME}"             | grep -o '"name": *"ACECM"' | head -1)
+          if [ -n "$HAVE" ]; then echo "exists=yes" >> "$GITHUB_OUTPUT"
+          else echo "exists=no" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') && steps.already.outputs.exists != 'yes'
+        with:
+          files: |
+            dist/ACECM
+            dist/ACECM.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        with:
+          name: ACECM-linux
+          path: dist/ACECM
