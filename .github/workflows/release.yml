@@ -37,6 +37,12 @@ jobs:
         # A build whose reported version does not match its tag makes the
         # updater loop: it downloads "0.4.0", still reports 0.3.0, and offers
         # the same update forever.
+        #
+        # ⚠ Tag pushes only. On workflow_dispatch GITHUB_REF_NAME is the
+        # BRANCH, so this compared "linux-port" against "1.0.0" and failed -
+        # which made the manual trigger, the one meant for testing a build
+        # without tagging, impossible to use.
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME#v}"
@@ -120,6 +126,8 @@ jobs:
           pip install pyinstaller texture2ddecoder capstone certifi                       -r requirements-linux.txt
 
       - name: Check the version matches the tag
+        # Tag pushes only - see the note in the windows job.
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           VER=$(python -c "import re;print(re.search(r'VERSION = \"([^\"]+)\"', open('acecm/version.py').read()).group(1))")
