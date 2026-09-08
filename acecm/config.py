@@ -36,6 +36,10 @@ else:
 DATA = os.environ.get("ACECM_DATA") or os.path.join(ROOT, "data")
 
 DEFAULTS = {
+    # ⚠ The UI accent, kept HERE and not only in localStorage: an update wipes
+    # the WebView2 profile (ui._storage_path) to avoid painting stale JS, and
+    # that took the user's chosen colour with it every single time.
+    "ui_theme": "",
     # ⚠ Remembered, not re-tested every launch. Starting the game ourselves is
     # the only way to pass it flags, but Steam refuses it when our token
     # cannot claim ownership (elevated, or Family Share) - and it refuses by
@@ -89,7 +93,12 @@ DEFAULTS = {
     # Where to look for new builds. update_repo is a GitHub "owner/name" and
     # is checked against that project's latest Release; update_url is the
     # older manual-manifest route and is only used if update_repo is empty.
-    "update_repo": "WhoaThatCombo/AC-evo-content-manager-",
+    # ⚠ EMPTY on purpose. Releases go out by hand (post the exe; running it
+    # offers to replace an existing install), so there is no update
+    # channel to point at. A repo name here shipped in every copy, told
+    # everyone where the project lives, and - since that repo is not
+    # public - could only ever answer 404.
+    "update_repo": "",
     "update_url": "",
     # only needed if update_repo is PRIVATE (a token with repo scope)
     "update_token": "",
@@ -286,6 +295,14 @@ def tool_script(name):
         p = os.path.join(base, name)
         if os.path.isfile(p):
             return p
+        # A hardened release ships tools as sourceless .pyc (docstrings
+        # stripped, no .py). Dev keeps the .py, which is found above, so this
+        # branch only ever fires inside the frozen exe. runpy.run_path and
+        # import-by-name both accept a .pyc, so nothing downstream changes.
+        if name.endswith(".py"):
+            pyc = os.path.join(base, name[:-3] + ".pyc")
+            if os.path.isfile(pyc):
+                return pyc
     return os.path.join(BUNDLED_TOOLS, name)
 
 

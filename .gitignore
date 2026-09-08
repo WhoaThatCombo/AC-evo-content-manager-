@@ -33,6 +33,10 @@ __pycache__/
 # --- scratch ------------------------------------------------------------------
 *.tmp
 *.bak
+# ⚠ `*.bak` does NOT catch these: a suffixed backup like
+# app.js.bak_carpolicy is a different name, and three of them very
+# nearly went into a release commit.
+*.bak_*
 *.log
 # ⚠ tools/evoview.exe is COMMITTED, like every other tool. It is built
 # separately with cargo from a checkout that is not in this repo, so a CI

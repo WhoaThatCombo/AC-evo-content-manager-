@@ -1,0 +1,73 @@
+ASSETTO CORSA EVO CONTENT MANAGER (ACECM)
+=========================================
+
+Copyright (c) 2026. All rights reserved.
+
+THIS IS PROPRIETARY SOFTWARE. IT IS NOT OPEN SOURCE AND IT IS NOT PUBLIC
+DOMAIN. Read this before doing anything else with this file.
+
+
+LICENCE
+-------
+
+You are granted a personal, non-exclusive, non-transferable licence to install
+and run one copy of ACECM on machines you own or control, for your own use,
+for as long as your access to it remains current.
+
+That is the whole of what is granted. Everything else is reserved.
+
+
+YOU MAY NOT
+-----------
+
+  1. Redistribute this program, in whole or in part, by any means. That
+     includes re-uploading it, mirroring it, bundling it with other software,
+     sharing it in a Discord or on a forum, or passing on a copy to someone
+     who did not obtain their own.
+
+  2. Sell, rent, sublicense or otherwise commercially exploit it, or any part
+     of it, or anything derived from it.
+
+  3. Remove, obscure or alter this notice, the copyright notice, the version
+     resource, or any other attribution in the program or its files.
+
+  4. Decompile, disassemble or otherwise attempt to reconstruct the source
+     code of this program, or create derivative works from it, except to the
+     limited extent that doing so cannot lawfully be prohibited (see below).
+
+  5. Present this program, modified or unmodified, as your own work.
+
+
+WHAT THIS NOTICE DOES NOT CLAIM
+-------------------------------
+
+This notice is a statement of licence terms. It is not a claim that analysing
+software is inherently unlawful, and it is deliberately not written to imply
+that.
+
+Some jurisdictions grant rights that a licence cannot take away - for example
+decompilation for interoperability under Article 6 of EU Directive 2009/24/EC
+and equivalent provisions elsewhere, and analysis for security research or
+for determining whether software is safe to run. Clause 4 above does not
+purport to override any right of that kind, and nothing here is intended to
+discourage a person from satisfying themselves that this program is safe.
+
+If you are examining this binary to check what it does before trusting it on
+your machine: that is a reasonable thing to do, and this notice is not aimed
+at you.
+
+
+NO WARRANTY
+-----------
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+ACECM manages content for, and interoperates with, Assetto Corsa EVO. It is
+an independent tool. It is not affiliated with, endorsed by, or supported by
+Kunos Simulazioni or 505 Games, and it redistributes none of their content:
+it reads and writes the copy of the game already installed on your machine.
