@@ -197,11 +197,22 @@ def _pool():
     from google.protobuf import descriptor_pb2 as dp
     from google.protobuf import descriptor_pool, message_factory
 
-    # Provision on demand. Nothing else triggers extraction, so without this
-    # a fresh install shows an empty Game settings page and never explains why.
-    if not glob.glob(os.path.join(cache_dir(), "*.desc")):
+    # ⚠ ALWAYS ask extract(), not only when the cache is empty. It is cheap
+    # when nothing moved - it stats the source exes, compares .sources and
+    # returns - and it is the ONLY thing that notices a game update.
+    #
+    # Gating it on "no .desc files exist" made the whole invalidation dead
+    # code: a cache extracted once was reused forever. A profile still holding
+    # August's schemas parsed 0.9 data with the old layout, and
+    # RacingSettingsAssistPreset had no damage_rate field at all - so saving
+    # assists died with "Protocol message ... has no damage_rate field" and
+    # every other message was quietly a version behind too.
+    try:
         r = extract()
-        logs.LOG.info("first-run schema extraction: %s", r)
+        if not r.get("cached"):
+            logs.LOG.info("schema extraction: %s", r)
+    except Exception as ex:
+        logs.LOG.warning("schema extraction failed: %s", ex)
 
     pool = descriptor_pool.DescriptorPool()
     files = {}

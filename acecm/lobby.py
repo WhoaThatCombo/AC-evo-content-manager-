@@ -9,7 +9,7 @@ backend restart.
 import json
 import os
 
-from . import config, content, logs
+from . import config, content, logs, winproc
 from . import netutil
 
 # GameModeType as the client enum numbers it. PRACTICE is the only value we
@@ -99,6 +99,13 @@ def from_profile(profile):
         "udp_port": int(profile.get("tcp_port") or 9700),
         "http_port": int(profile.get("http_port") or 8080),
         "max_players": int(profile.get("max_players") or 90),
+        # ⚠ BOOLEAN flags, not the passwords. Field 6/7 of the wire
+        # entry are bools meaning "this server asks for one" - the client
+        # only uses them to draw the lock and to run its "unlocked only"
+        # filter. Never put the plaintext in an advertisement: the lobby
+        # row goes to every client that lists servers.
+        "driver_password": bool(profile.get("driver_password")),
+        "spectator_password": bool(profile.get("spectator_password")),
         "time_of_day": f"{hour:02d}:{minute:02d}",
         "game_mode": profile.get("game_mode") or "PRACTICE",
         "game_mode_type": _mode_type(profile.get("game_mode")),
@@ -116,8 +123,13 @@ def write(profile):
     return blob
 
 
-def refresh():
+def refresh(want_port=None):
     """Write the corrected advertisement back to lobby.json.
+
+    ⚠ want_port names the server being advertised. Without it, with two
+    servers up, this cheerfully overwrote the advertisement with the OTHER
+    server's name, track and ports - which is how "join Monaco on 9500" put
+    you on "Barber on 9700".
 
     ⚠ This is the part that actually matters. The backend does NOT call into
     ACECM - it re-reads this FILE on every list request - so correcting the
@@ -126,13 +138,20 @@ def refresh():
 
     Returns the blob written, or {} when nothing changed.
     """
-    live = running_config()
-    if not live:
-        return {}
     try:
         cur = json.load(open(PATH, encoding="utf-8"))
     except Exception:
         cur = {}
+    # ⚠ Default to the port ALREADY advertised. Every caller then corrects the
+    # right server without having to know about this: the pid watcher in
+    # app.py calls refresh() bare every few seconds, and with two servers up
+    # it would otherwise keep rewriting the advertisement with the other
+    # server's identity moments after Drive set it correctly.
+    if not want_port:
+        want_port = cur.get("tcp_port") or cur.get("server_tcp_port")
+    live = running_config(want_port)
+    if not live:
+        return {}
     merged = {**cur, **live}
     if merged == cur:
         return {}
@@ -157,42 +176,31 @@ def read():
         blob = json.load(open(PATH, encoding="utf-8"))
     except Exception:
         blob = {}
-    live = running_config()
+    # ⚠ Correct against the server this advertisement is FOR, identified by
+    # its own port - not against whichever server happens to be running.
+    live = running_config(blob.get("tcp_port") or blob.get("server_tcp_port"))
     if live:
         blob.update(live)
     return blob
 
 
-def running_config():
+def running_config(want_port=None):
     """What the live dedicated server was ACTUALLY started with.
+
+    ⚠ Pass want_port whenever more than one server can be up. Without it this
+    describes whichever server Windows listed first, and the caller then
+    advertises that one under the profile it meant to advertise.
 
     Its own HTTP port reports only `clients`, `version` and `protocol` - no
     name and no track. But the server is launched with its whole configuration
     and season encoded on the command line, so the truth is readable from the
     running process itself, whoever started it.
     """
-    import base64
-    import struct
-    import zlib
-
-    cmd = _server_cmdline()
+    cmd = _server_cmdline(want_port)
     if not cmd:
         return {}
-
-    def blob(flag):
-        i = cmd.find(flag)
-        if i < 0:
-            return {}
-        raw = cmd[i + len(flag):].split(" ")[0].strip().strip('"')
-        try:
-            data = base64.b64decode(raw)
-            # 4-byte big-endian length, then zlib
-            return json.loads(zlib.decompress(data[4:]).decode("utf-8"))
-        except Exception as ex:
-            logs.LOG.info("could not decode %s: %s", flag, ex)
-            return {}
-
-    cfg, season = blob("-serverconfig="), blob("-seasondefinition=")
+    cfg = _decode_blob(cmd, "-serverconfig=")
+    season = _decode_blob(cmd, "-seasondefinition=")
     ev = (season.get("event") or {}) if isinstance(season, dict) else {}
     out = {}
     if cfg.get("server_name"):
@@ -220,19 +228,63 @@ def running_config():
     return out
 
 
-def _server_cmdline():
-    """The command line of the running dedicated server, or ''."""
+def _server_cmdlines():
+    """Command lines of EVERY running dedicated server.
+
+    ⚠ Every one, not the first. This used to be `Select-Object -First 1`, so
+    with two servers up it read whichever Windows listed first and the caller
+    then described the WRONG server. Joining "Monaco on 9500" advertised - and
+    joined - "Barber on 9700" because that was the process it happened to find.
+    """
     try:
         from . import winproc
-        # ⚠ Match BOTH exe names. The launcher can run the stock binary
-        # (AssettoCorsaEVOServer.stock.exe), and filtering on the plain name
-        # alone reported "nothing running" while a server was plainly up -
-        # so the advertisement silently kept using stale profile values.
+        # ⚠ EVERY server, as a list - not the first one. The prefix match
+        # also covers the stock binary (AssettoCorsaEVOServer.stock.exe); an
+        # exact-name filter missed it and reported "nothing running" while a
+        # server was plainly up, so the advertisement kept stale values.
+        out = []
         for pid in winproc.pids_named_prefix("assettocorsaevoserver"):
             cmd = winproc.cmdline(pid)
             if cmd:
-                return cmd.strip()
-        return ""
+                out.append(cmd.strip())
+        return out
     except Exception as ex:
-        logs.LOG.info("could not read the server command line: %s", ex)
+        logs.LOG.info("could not read the server command lines: %s", ex)
+        return []
+
+
+def _server_cmdline(want_port=None):
+    """The command line of ONE running server.
+
+    want_port picks the server actually listening on that TCP port; without it
+    the first is returned, which is only safe when a single server is up.
+    """
+    lines = _server_cmdlines()
+    if not lines:
         return ""
+    if want_port:
+        for ln in lines:
+            cfg = _decode_blob(ln, "-serverconfig=")
+            if int(cfg.get("server_tcp_listener_port") or 0) == int(want_port):
+                return ln
+        logs.LOG.info("no running server on tcp %s (%d server(s) up)",
+                      want_port, len(lines))
+        return ""
+    return lines[0]
+
+
+def _decode_blob(cmd, flag):
+    """One base64+zlib blob out of a server command line."""
+    import base64
+    import zlib
+    i = cmd.find(flag)
+    if i < 0:
+        return {}
+    raw = cmd[i + len(flag):].split(" ")[0].strip().strip('"')
+    try:
+        data = base64.b64decode(raw)
+        # 4-byte big-endian length, then zlib
+        return json.loads(zlib.decompress(data[4:]).decode("utf-8"))
+    except Exception as ex:
+        logs.LOG.info("could not decode %s: %s", flag, ex)
+        return {}

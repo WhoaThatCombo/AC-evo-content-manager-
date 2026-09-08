@@ -69,7 +69,13 @@ function toast(msg, bad) {
 /* Content Manager's home: pick car + track + mode, then Drive walks the
    client into a dedicated session. EVO has no -car/-track launch flags. */
 let driveTimer = null;
+let driveRate = 0;
 let driveReloadT = null;
+// ⚠ poll() is defined INSIDE drivePage(), so this top-level helper
+// cannot name it directly - drivePage hands it over here. Calling
+// setInterval(poll, ...) from out here threw ReferenceError on every
+// arm, which is why the heartbeat never started.
+let drivePollFn = null;
 let driveFilter = {
   car: '', track: '',
   sort: 'players',
@@ -85,13 +91,39 @@ let driveLocal = null;
 // not in the captured list, so serverOf falls back to this
 let directPicked = null;
 
+/* ⚠ The Drive poll must not stop when the launch job finishes.
+   /api/drive/status is the ONLY thing that reports whether the game is
+   running, so stopping at the terminal phase froze the screen on its last
+   state: close the game and the button kept its old label and disabled flag
+   until you switched tabs and back, which rebuilt the page from scratch.
+   Now it drops to a slow heartbeat instead of going dark. */
+function armDrivePoll(ms) {
+  if (!drivePollFn) return;
+  if (driveTimer && driveRate === ms) return;
+  if (driveTimer) clearInterval(driveTimer);
+  driveRate = ms;
+  driveTimer = setInterval(drivePollFn, ms);
+}
+
 function stopDrivePoll() {
   if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
+  driveRate = 0;
   if (driveReloadT) { clearTimeout(driveReloadT); driveReloadT = null; }
 }
 
 async function drivePage() {
   stopDrivePoll();
+  /* ⚠ Declared HERE, at the top, not next to the code that reads them.
+     paintModeBar() assigns pullBtn while it builds the Public-servers row,
+     and it runs long before the bottom of this function is reached - so a
+     `let` further down put the binding in the temporal dead zone and the
+     whole page died with "Cannot access 'pullBtn' before initialization",
+     but ONLY in the Online > Public servers sub-mode, which is why it
+     survived a build. Anything a paint function touches belongs up here. */
+  // Refresh-list button, when the Public servers sub-mode has built one.
+  let pullBtn = null;
+  // bumped whenever something changes what the car LOOKS like
+  let thumbBust = 0;
   const d = await api('drive');
   if (d && d.error && !d.cars) {
     $('#page').innerHTML = `<div class="err">${esc(d.error)}</div>`;
@@ -120,7 +152,12 @@ async function drivePage() {
   const carCol = el('div', 'card drive-col');
   const trkCol = el('div', 'card drive-col');
   const goCol = el('div', 'card drive-col drive-go');
-  wrap.append(carCol, trkCol, goCol);
+  // Car and Track stack in one left column. As three equal columns they each
+  // held a single row while owning two-thirds of the width, so the page was
+  // mostly empty space with the session settings squeezed into the rest.
+  const leftCol = el('div', 'drive-left');
+  leftCol.append(carCol, trkCol);
+  wrap.append(leftCol, goCol);
   p.append(viaBar, wrap);
 
   const sel = {
@@ -136,6 +173,7 @@ async function drivePage() {
     custom_track: pick.custom_track || '',
     game_mode: pick.game_mode || 'PRACTICE',
     weather: pick.weather || 'CLEAR',
+    grip: pick.grip || 'OPTIMUM',
     tod_hour: pick.tod_hour ?? 13,
     num_opponents: pick.num_opponents ?? 10,
     skill_min: pick.skill_min ?? 80,
@@ -147,6 +185,9 @@ async function drivePage() {
     quali_min: pick.quali_min ?? 15,
     warmup_min: pick.warmup_min ?? 10,
     race_laps: pick.race_laps ?? 10,
+    race_type: pick.race_type || 'LAPS',
+    race_minutes: pick.race_minutes ?? 20,
+    time_mult: pick.time_mult ?? 1,
     starting_position: pick.starting_position ?? 0,
   };
   // ⚠ Must run again when the public list lands, not only here: the list is
@@ -242,30 +283,67 @@ async function drivePage() {
     return bit;
   }
 
-  [['sp', 'Single player'], ['local', 'My server'], ['server', 'Public servers']].forEach(([v, lab]) => {
-    const b = el('button', 'sm' + (sel.via === v ? ' primary' : ''), lab);
-    b.dataset.via = v;
-    b.onclick = () => {
-      sel.via = v;
-      viaBar.querySelectorAll('button[data-via]').forEach(x => {
-        x.classList.toggle('primary', x.dataset.via === v);
-      });
-      paintVia();
-    };
-    viaBar.append(b);
-  });
-  const manage = el('button', 'sm', 'Full browser');
-  manage.onclick = () => go('browser');
-  const pull = el('button', 'sm', 'Refresh list');
-  pull.title = 'Launch the game, open Multiplayer, save the public list, then quit';
-  pull.onclick = async () => {
-    const r = await api('drive/capture', {});
-    if (!r.ok) { toast(r.error || 'Could not start', true); return; }
-    stopDrivePoll();
-    driveTimer = setInterval(poll, 1200);
-    poll();
-  };
-  viaBar.append(manage, pull);
+  /* Two top-level modes, not five buttons in a row. "Single player" and
+     "Online" are the actual decision; which KIND of online (your own server
+     vs the public list) is a second, smaller choice that only appears once
+     you are online. The old bar put all three modes plus "Full browser" and
+     "Refresh list" on one line, so the first thing the page asked you was a
+     five-way question where only two answers were top-level.
+     Online remembers the sub-mode you last used, so nothing moves under you. */
+  const ONLINE = ['local', 'server'];
+  const isOnline = () => ONLINE.includes(sel.via);
+  if (!sel.onlineVia) sel.onlineVia = isOnline() ? sel.via : 'local';
+
+  const modeRow = el('div', 'row');
+  const subRow = el('div', 'row subrow');
+
+  function setVia(v) {
+    sel.via = v;
+    if (ONLINE.includes(v)) sel.onlineVia = v;
+    paintModeBar();
+    paintVia();
+  }
+  function paintModeBar() {
+    modeRow.innerHTML = '';
+    subRow.innerHTML = '';
+    [['sp', 'Single player'], ['online', 'Online']].forEach(([v, lab]) => {
+      const on = v === 'sp' ? sel.via === 'sp' : isOnline();
+      const b = el('button', 'sm' + (on ? ' primary' : ''), lab);
+      b.onclick = () => setVia(v === 'sp' ? 'sp' : sel.onlineVia);
+      modeRow.append(b);
+    });
+    if (!isOnline()) { subRow.style.display = 'none'; return; }
+    subRow.style.display = '';
+    [['local', 'My servers'], ['server', 'Public servers']].forEach(([v, lab]) => {
+      const b = el('button', 'sm' + (sel.via === v ? ' primary' : ''), lab);
+      b.onclick = () => setVia(v);
+      subRow.append(b);
+    });
+    // Actions belong to the sub-mode they act on, rather than sitting on the
+    // top row where they read as modes themselves.
+    if (sel.via === 'server') {
+      const pull = el('button', 'sm', 'Refresh list');
+      // ⚠ poll() has to be able to disable this, and it lives in a different
+      // scope - see the note there. Hand it out through the outer binding.
+      pullBtn = pull;
+      pull.title = 'Launch the game, open Multiplayer, save the public list, then quit';
+      pull.onclick = async () => {
+        const r = await api('drive/capture', {});
+        if (!r.ok) { toast(r.error || 'Could not start', true); return; }
+        stopDrivePoll();
+        armDrivePoll(1200);
+        poll();
+      };
+      subRow.append(pull);
+    }
+    // ⚠ no "Full browser" link any more - the server-browser page is gone and
+    // its one genuinely useful part (fetch from a host) now lives on Content.
+    const manage = el('button', 'sm', 'Manage servers');
+    manage.onclick = () => go('servers');
+    subRow.append(manage);
+  }
+  viaBar.append(modeRow, subRow);
+  paintModeBar();
 
   carCol.innerHTML = '<h2>Car</h2>';
   const carHead = el('div', 'drive-pick');
@@ -273,6 +351,7 @@ async function drivePage() {
   carSearch.placeholder = 'Filter cars…';
   carSearch.value = driveFilter.car;
   const carList = el('div', 'list drive-list');
+  const specsBox = el('div', 'car-specs');
   const liveryBox = el('div');
   liveryBox.style.marginTop = '10px';
   // ⚠ Directly under the SELECTED car, not after the list. The list is a
@@ -285,13 +364,67 @@ async function drivePage() {
   // open or not - building them lazily would mean painting into nothing.
   carSearch.style.display = 'none';
   carList.style.display = 'none';
-  carCol.append(carHead, liveryBox, carSearch, carList);
+  carCol.append(carHead, specsBox, liveryBox, carSearch, carList);
 
   /* ---- livery -----------------------------------------------------------
      Colours come from the CAR's own design, never from the brand's folder:
      the brand list is a superset, and writing a colour the car does not offer
      crashes the game on load. Everything here is wrapped, because this column
      is the main screen and a fault in a nice-to-have must not take it down. */
+  /* Headline numbers for the selected car, read from the game's own physics
+     files (see carspecs.py). Power is DERIVED from the engine's torque curve
+     and its boost, so it is close but not a manufacturer figure; top speed is
+     the AI's hint and ignores a real limiter - both are labelled as such
+     rather than presented as exact. A car we have nothing for (a mod, whose
+     files live in its own package) simply shows no strip. */
+  async function drawSpecs(carId) {
+    specsBox.innerHTML = '';
+    if (!carId) return;
+    let sp = {};
+    try {
+      const r = await api('car/specs?preset=' + encodeURIComponent(carId));
+      sp = (r && r.specs) || {};
+    } catch (e) { return; }
+    if (!Object.keys(sp).length) return;
+    const bits = [];
+    /* ⚠ `exact` means these came from the TRIM's own spec sheet in the game
+       files, so they need no hedging. Only a car with no sheet (nearly every
+       mod) falls back to numbers derived from the torque curve, and those
+       keep the "~" and say so. */
+    const exact = !!sp.exact;
+    if (sp.power_hp) bits.push(['Power', (exact ? '' : '~') + sp.power_hp + ' hp',
+      exact ? "The game's own figure for this trim"
+        : 'Derived from the engine torque curve'
+          + (sp.boost_bar ? ' at ' + sp.boost_bar + ' bar boost' : '')
+          + ' - approximate, not a manufacturer figure']);
+    if (sp.mass_kg) bits.push(['Weight', sp.mass_kg + ' kg', '']);
+    if (sp.accel_s) bits.push(['0-100', sp.accel_s + ' s', "km/h, from the game's spec sheet"]);
+    // ⚠ Spell the unit out. "PWR/WT 588 hp/t" reads as jargon and the number
+    // looks wrong beside "382 hp" until you know it is scaled to a tonne.
+    // "PER TONNE 588 hp" says what it is without needing the abbreviation.
+    if (sp.hp_per_tonne) bits.push(['Per tonne', sp.hp_per_tonne + ' hp',
+      'Power-to-weight: ' + (sp.power_hp || '?') + ' hp in '
+      + (sp.mass_kg || '?') + ' kg, so ' + sp.hp_per_tonne
+      + ' hp per 1000 kg. Higher is quicker.']);
+    if (sp.top_speed_kmh) {
+      bits.push(['Top spd', sp.top_speed_kmh + ' km/h',
+        "The game's own figure for this trim"]);
+    } else if (sp.top_speed_kmh_est) {
+      bits.push(['Top spd', '~' + sp.top_speed_kmh_est,
+        "The AI's estimate, in km/h - it ignores a manufacturer limiter"]);
+    }
+    if (sp.drive) bits.push(['Drive', sp.drive, '']);
+    if (sp.gears) bits.push(['Gears', String(sp.gears), '']);
+    if (sp.redline_rpm) bits.push(['Redline', Math.round(sp.redline_rpm / 100) / 10 + 'k',
+      sp.redline_rpm.toLocaleString() + ' rpm']);
+    bits.forEach(([k, v, tip]) => {
+      const c = el('span', 'spec');
+      c.innerHTML = `<b>${esc(k)}</b>${esc(v)}`;
+      if (tip) c.title = tip;
+      specsBox.append(c);
+    });
+  }
+
   async function drawLivery(carId) {
     liveryBox.innerHTML = '';
     if (!carId) return;
@@ -341,60 +474,54 @@ async function drivePage() {
       }
       const info = await api('livery?model=' + encodeURIComponent(model));
       const list = ((info && info.allowed) || {})['EXT SKIN'] || [];
+      const names = (info && info.names) || {};
       if (!list.length) return;
 
-      /* ⚠ Collapsed by default. Thirteen colours listed under every car
-         pushes the track and session columns off the screen, and the colour
-         is not what you came to this page to choose - so show only which
-         livery is on, and open the list when asked. */
+      /* ⚠ A real <select>, not a disclosure row. The expanding list put a
+         thirteen-item column under the car - and even collapsed it left a
+         line of its own plus the dead space the card reserved for it. The
+         colour is a one-line setting, so it looks like one. */
       const short = p => (p.split('\\').pop() || p)
         .replace(/\.oemmultilayercolor$/, '')
         .replace(/^[a-z0-9]+_paint_/, '').replace(/_/g, ' ');
       const cur = owned.slots['EXT SKIN'] || '';
 
-      const head = el('div', 'livery-head');
-      const caret = el('span', 'livery-caret', '▸');
-      const label = el('span', 'livery-name', esc(short(cur) || 'default'));
-      head.append(caret, label);
-      head.title = 'Change this car’s colour';
-
-      const body = el('div', 'livery-body');
-      const note = el('div', 'tiny dim');
-
-      let open = false;
-      head.onclick = () => {
-        open = !open;
-        body.classList.toggle('on', open);
-        caret.textContent = open ? '▾' : '▸';
-        if (open && !body.dataset.built) {
-          body.dataset.built = '1';
-          list.forEach(pth => {
-            const row = el('a', 'livery-opt' + (pth === cur ? ' on' : ''),
-                           esc(short(pth)));
-            row.onclick = async () => {
-              if (row.classList.contains('busy')) return;
-              row.classList.add('busy');
-              note.textContent = 'applying…';
-              const r = await api('livery/apply', {
-                file: owned.file, model: model,
-                slot: 'EXT SKIN', color: pth,
-              });
-              row.classList.remove('busy');
-              if (r && r.ok) {
-                [...body.children].forEach(c => c.classList.remove('on'));
-                row.classList.add('on');
-                label.textContent = short(pth);
-                note.textContent = 'Saved — applies next time the game starts';
-              } else {
-                note.textContent = (r && r.error) || 'could not apply that colour';
-                if (r && r.error) toast(r.error, true);
-              }
-            };
-            body.append(row);
-          });
+      const row = el('label', 'livery-row');
+      row.append(el('span', 'livery-lab', 'Livery'));
+      const sel2 = el('select');
+      sel2.title = 'Change this car’s colour';
+      list.forEach(pth => {
+        const o = document.createElement('option');
+        o.value = pth;
+        /* ⚠ The paint's OWN name first. Deriving a label from the filename
+           works for Kunos ("bmw_paint_blue_zandvoort" -> "blue zandvoort")
+           and fails for mods, whose files are ac1_paint_4 - the prefix strip
+           left a bare "4" in the dropdown. */
+        o.textContent = names[pth] || short(pth) || '(unnamed)';
+        if (pth === cur) o.selected = true;
+        sel2.append(o);
+      });
+      const note = el('span', 'tiny dim livery-note');
+      sel2.onchange = async () => {
+        const pth = sel2.value;
+        sel2.disabled = true;
+        note.textContent = 'applying…';
+        const r = await api('livery/apply', {
+          file: owned.file, model: model, slot: 'EXT SKIN', color: pth,
+        });
+        sel2.disabled = false;
+        if (r && r.ok) {
+          note.textContent = 'saved — applies next game start';
+          // the car is a different colour now: re-render this card's picture
+          thumbBust = Date.now();
+          paintSelected();
+        } else {
+          note.textContent = (r && r.error) || 'could not apply that colour';
+          if (r && r.error) toast(r.error, true);
         }
       };
-      liveryBox.append(head, body, note);
+      row.append(sel2, note);
+      liveryBox.append(row);
     } catch (e) {
       // never let this blank the Drive screen
       console.warn('livery picker unavailable', e);
@@ -416,7 +543,16 @@ async function drivePage() {
   // and only shows it for the public-server list.
   trkSearch.style.display = 'none';
   trkList.style.display = 'none';
-  trkCol.append(trkHead, directBox, trkSearch, srvFilters, trkList);
+  /* ⚠ The preview and the LIST are two different things and they live in
+     two different places. The card under the car is only ever a picture of
+     what is selected - track in Single player, the server's track online.
+     Everything you act on (search, filters, the rows, direct connect) is
+     joining, so it belongs beside the Join button on the right. Putting the
+     whole lot under the car turned the left column into the busy half and
+     left the pane holding one button. */
+  const srvBox = el('div', 'drive-srvbox');
+  srvBox.append(directBox, trkSearch, srvFilters, trkList);
+  trkCol.append(trkHead, srvBox);
 
   /* ---- direct connect + favourites --------------------------------------
      The captured list only exists after launching the game and opening
@@ -558,7 +694,26 @@ async function drivePage() {
     });
   }
 
-  goCol.innerHTML = '<h2>Session</h2>';
+  /* Two panes in the right column rather than one long scroll with a folded
+     section at the bottom. Assists is a thing you set, not a thing you read
+     past, so it gets equal billing and is always fully open once selected. */
+  goCol.innerHTML = '';
+  const paneTabs = el('div', 'panetabs');
+  const sessionPane = el('div', 'pane');
+  const assistPane = el('div', 'pane');
+  assistPane.style.display = 'none';
+  [['session', 'Session'], ['assists', 'Assists']].forEach(([k, lab]) => {
+    const b = el('button', 'sm' + (k === 'session' ? ' primary' : ''), lab);
+    b.dataset.pane = k;
+    b.onclick = () => {
+      paneTabs.querySelectorAll('button').forEach(x =>
+        x.classList.toggle('primary', x.dataset.pane === k));
+      sessionPane.style.display = k === 'session' ? '' : 'none';
+      assistPane.style.display = k === 'assists' ? '' : 'none';
+    };
+    paneTabs.append(b);
+  });
+  goCol.append(paneTabs, sessionPane, assistPane);
   const mode = el('select');
   (d.game_modes || []).forEach(m => {
     const o = el('option', null, m.replace(/_/g, ' '));
@@ -573,6 +728,20 @@ async function drivePage() {
     if (m === sel.weather) o.selected = true;
     weather.append(o);
   });
+  /* ⚠ Three steps, not a slider. The game stores track grip as an enum -
+     UIInitialGrip_GREEN / _FAST / _OPTIMUM - on the weather preset. The only
+     continuous grip in the schema belongs to championship data, which this
+     screen never writes, so a 0-100 slider here would be inventing a
+     precision the save file cannot hold. */
+  const grip = el('select');
+  [['OPTIMUM', 'Optimum — rubbered in'],
+   ['FAST', 'Fast — some rubber'],
+   ['GREEN', 'Green — dusty, low grip']].forEach(([v, lab]) => {
+    const o = el('option', null, lab);
+    o.value = v;
+    if (v === sel.grip) o.selected = true;
+    grip.append(o);
+  });
   const hour = el('select');
   for (let h = 0; h < 24; h++) {
     const o = el('option', null, String(h).padStart(2, '0') + ':00');
@@ -586,7 +755,27 @@ async function drivePage() {
     return l;
   };
   const extras = el('div', 'drive-fields');
-  goCol.append(mkf('Game mode', mode), mkf('Weather', weather), mkf('Time', hour), extras);
+  /* ⚠ EXACTLY the values the game's own slider offers:
+       <ks-slider values="[1,2,4,6,12,24,48]" data-setting="time_multiplier">
+     Anything else makes the game show "undefined X" and apply no multiplier
+     at all - which is what a free number field was doing here. */
+  const tmult = el('select');
+  [1, 2, 4, 6, 12, 24, 48].forEach(v => {
+    const o = el('option', null, v + '×');
+    o.value = String(v);
+    if (Number(sel.time_mult) === v) o.selected = true;
+    tmult.append(o);
+  });
+  if (![1, 2, 4, 6, 12, 24, 48].includes(Number(sel.time_mult))) {
+    tmult.value = '1';
+    sel.time_mult = 1;
+  }
+  tmult.title = 'How fast the clock runs. These are the only values the game '
+    + 'accepts.';
+  tmult.onchange = () => { sel.time_mult = Number(tmult.value); };
+  sessionPane.append(mkf('Game mode', mode), mkf('Weather', weather),
+                     mkf('Track grip', grip), mkf('Time', hour),
+                     mkf('Time multiplier', tmult), extras);
   const driveBtn = el('button', 'primary go-btn', 'Drive');
   const st = el('div', 'drive-status tiny dim');
   const pwField = el('label', 'f');
@@ -600,8 +789,160 @@ async function drivePage() {
   const hint = el('div', 'tiny dim',
     'Writes the session, launches the game, and opens the pit menu '
     + 'so you can change setup. Close the game first so the save sticks.');
-  goCol.append(pwField, driveBtn, st, hint);
-  const spFields = goCol.querySelectorAll(':scope > label.f');
+  sessionPane.append(pwField, driveBtn, st, hint);
+  // ⚠ computed BEFORE the assists block is added: it selects direct-child
+  // label.f, and the assists fields live one level down so they cannot be
+  // caught by the single-player show/hide.
+  const spFields = sessionPane.querySelectorAll(':scope > label.f');
+
+  /* ---- assists ----------------------------------------------------------
+     The game stores these in the profile (Saved Games\ACE\AssistSettings), so
+     writing them is exactly what the in-game Assists page does: no patching,
+     nothing in content.kspkg, and joining a server is unaffected because the
+     server hashes CAR CONTENT, not the profile.
+     ⚠ Damage is shown as a percentage because that is what the game shows;
+     it is stored offset by one (0% == -1.0). assists.py does the conversion. */
+  const asBadge = el('div', 'tiny dim assists-note');
+  const asBody = el('div', 'assists-body');
+  assistPane.append(asBadge, asBody);
+
+  const penBox = el('div', 'sp-pen');
+  assistPane.append(penBox);
+
+  async function loadSpPenalties() {
+    penBox.innerHTML = '';
+    let pens = null;
+    try {
+      pens = await api('penalties');
+    } catch (e) { return; }
+    const info = pens && pens.client;
+    if (!info) return;
+    const isOff = info.state === 'off';
+    const isOn = info.state === 'on';
+    const head = el('div', 'sp-pen-head');
+    head.innerHTML = '<b>Single player penalties</b>'
+      + `<span class="tiny dim">currently ${esc(isOff ? 'OFF' : isOn ? 'ON'
+                                                : String(info.state))}</span>`;
+    penBox.append(head);
+    penBox.append(el('div', 'tiny dim',
+      'Cutting, speeding in the pits and so on, for your own offline sessions. '
+      + 'This edits the game’s own content, so a Kunos update resets it.'));
+    if (isOff || isOn) {
+      const b = el('button', 'sm' + (isOn ? ' danger' : ''),
+                   isOn ? 'Turn penalties off' : 'Turn penalties on');
+      b.onclick = async () => {
+        b.disabled = true;
+        const r = await api('penalties/set', { side: 'client', off: isOn });
+        b.disabled = false;
+        toast(r.ok ? `Single player penalties ${(r.state || '').toUpperCase()}`
+                   : (r.error || 'Failed'), !r.ok);
+        loadSpPenalties();
+      };
+      penBox.append(b);
+    }
+    matchPaneHeights();
+  }
+
+  async function loadAssists() {
+    const r = await api('assists');
+    asBody.innerHTML = '';
+    if (!r || !r.ok) {
+      asBadge.textContent = '';
+      asBody.append(el('div', 'tiny dim', (r && r.error) || 'unavailable'));
+      return;
+    }
+    asBadge.textContent = 'Applies to the game itself, not to a session - '
+      + 'these are the same settings as the in-game Assists page.';
+    const pending = {};
+    const grid = el('div', 'assists-grid');
+    function mkNum(key, label, val) {
+      const l = el('label', 'f');
+      const i = el('input');
+      i.type = 'number'; i.min = '0'; i.max = '100'; i.value = val;
+      i.onchange = () => { pending[key] = i.value; };
+      l.append(el('span', null, label), i);
+      return l;
+    }
+    grid.append(mkNum('damage_pct', 'Damage %', r.damage_pct),
+                mkNum('stability_control', 'Stability %', r.stability_control));
+    (r.toggles || []).forEach(t => {
+      const l = el('label', 'f');
+      const s = el('select');
+      /* ⚠ Off/On only. RacingSetting has a third value, FREE (2), and it is
+         the game's own name - but it belongs to the FIXED presets
+         (Beginner/Rookie/Expert/Pro), where it means "this preset does not
+         dictate this assist, use the driver's own". ACECM only ever writes
+         the CUSTOM preset, which IS the driver's own setting, so offering
+         Free here asked a question with no meaning. It is still shown if the
+         file already holds it, rather than silently rewriting a value we did
+         not put there. */
+      const opts = [['off', 'Off'], ['on', 'On']];
+      if (t.value === 'free') opts.push(['free', 'Free (from a preset)']);
+      opts.forEach(([v, lab]) => {
+        const o = el('option', null, lab);
+        o.value = v;
+        if (v === t.value) o.selected = true;
+        s.append(o);
+      });
+      s.onchange = () => { pending[t.name] = s.value; };
+      l.append(el('span', null, t.label), s);
+      grid.append(l);
+    });
+    const save = el('button', 'sm primary', 'Save assists');
+    save.onclick = async () => {
+      if (!Object.keys(pending).length) { toast('Nothing changed'); return; }
+      save.disabled = true;
+      const res = await api('assists', pending);
+      save.disabled = false;
+      if (!res || !res.ok) { toast((res && res.error) || 'Could not save', true); return; }
+      toast('Assists saved');
+      loadAssists();
+    };
+    asBody.append(grid, save);
+    /* ⚠ Single-player penalties belong HERE, not on the Servers page. They
+       are a property of your own client - "affects only your own
+       singleplayer" - so sitting beside the dedicated-server switch made them
+       read as a server setting. The server half stays on Servers, where it
+       does belong. Appended last: it is a separate concern from the assists
+       above it, and it writes to content.kspkg rather than the profile. */
+    loadSpPenalties();
+    matchPaneHeights();
+  }
+
+  /* ⚠ Both panes claim the same height, so switching Session <-> Assists does
+     not resize the card under them - that jump is what made the UI feel like
+     it morphed. Measured rather than a magic number in the CSS: the panes are
+     different heights on different windows, and a guessed value is wrong on
+     every window except the one it was guessed on. */
+  /* ⚠ The grid's height is measured, never assumed. What sits above it is
+     not a constant: the header can carry an attention banner, and the mode
+     bar wraps to a second row in a narrow window - so every hard-coded
+     subtraction was right at one size and wrong at the next, which is what
+     made the page overflow on first open and while resizing. */
+  function fitDrive() {
+    if (_page !== 'drive' || !wrap.isConnected) return;
+    const top = wrap.getBoundingClientRect().top;
+    // the .page bottom padding is the only thing below the grid
+    const pad = parseFloat(getComputedStyle(p).paddingBottom) || 0;
+    const h = Math.max(340, Math.round(innerHeight - top - pad));
+    document.documentElement.style.setProperty('--drive-h', h + 'px');
+  }
+  addEventListener('resize', fitDrive);
+  requestAnimationFrame(fitDrive);
+
+  function matchPaneHeights() {
+    sessionPane.style.minHeight = '';
+    assistPane.style.minHeight = '';
+    const hidden = assistPane.style.display === 'none';
+    if (hidden) { assistPane.style.visibility = 'hidden'; assistPane.style.display = ''; }
+    const h = Math.max(sessionPane.offsetHeight, assistPane.offsetHeight);
+    if (hidden) { assistPane.style.display = 'none'; assistPane.style.visibility = ''; }
+    if (h > 0) {
+      sessionPane.style.minHeight = h + 'px';
+      assistPane.style.minHeight = h + 'px';
+    }
+  }
+  loadAssists();
 
   function numInp(key, min, max) {
     const n = el('input');
@@ -618,6 +959,23 @@ async function drivePage() {
   function paintExtras() {
     extras.innerHTML = '';
     const m = sel.game_mode;
+    /* ⚠ The game's RACE TYPE toggle. A race is LAPS or TIME and the duration
+       box has to follow it - we used to write LAPS unconditionally, so a
+       timed race could not be set up here at all. */
+    const raceBits = () => {
+      const t = el('select');
+      [['LAPS', 'Laps'], ['TIME', 'Time']].forEach(([v, lab]) => {
+        const o = el('option', null, lab);
+        o.value = v;
+        if (v === sel.race_type) o.selected = true;
+        t.append(o);
+      });
+      t.onchange = () => { sel.race_type = t.value; paintExtras(); };
+      return [mkf('Race type', t),
+              sel.race_type === 'TIME'
+                ? mkf('Race (minutes)', numInp('race_minutes', 1, 600))
+                : mkf('Race (laps)', numInp('race_laps', 1, 200))];
+    };
     const span = (label, node) => {
       const l = mkf(label, node);
       l.classList.add('span2');
@@ -628,7 +986,8 @@ async function drivePage() {
     }
     if (aiModes.includes(m)) {
       extras.append(
-        mkf('AI cars', numInp('num_opponents', 1, 40)),
+        // the game's slider is min=1 max=32
+        mkf('AI cars', numInp('num_opponents', 1, 32)),
         mkf('Same car as you', (() => {
           const c = el('select');
           [['true', 'Yes'], ['false', 'No']].forEach(([v, lab]) => {
@@ -640,8 +999,10 @@ async function drivePage() {
           c.onchange = () => { sel.single_make = c.value === 'true'; };
           return c;
         })()),
-        mkf('AI skill min', numInp('skill_min', 0, 100)),
-        mkf('AI skill max', numInp('skill_max', 0, 100)),
+        // ⚠ the game's skill slider starts at 80, not 0 - anything lower has
+        // no position on it
+        mkf('AI skill min', numInp('skill_min', 80, 100)),
+        mkf('AI skill max', numInp('skill_max', 80, 100)),
       );
       const agg = el('select');
       (d.aggressiveness || ['Safe', 'Normal', 'Competitive']).forEach(a => {
@@ -658,13 +1019,13 @@ async function drivePage() {
         mkf('Practice (min)', numInp('practice_min', 1, 240)),
         mkf('Qualifying (min)', numInp('quali_min', 1, 120)),
         mkf('Warmup (min)', numInp('warmup_min', 0, 60)),
-        mkf('Race (laps)', numInp('race_laps', 1, 200)),
+        ...raceBits(),
       );
     }
     if (m === 'INSTANT_RACE') {
       extras.append(
-        mkf('Race (laps)', numInp('race_laps', 1, 200)),
-        mkf('Start position (0=auto)', numInp('starting_position', 0, 40)),
+        ...raceBits(),
+        mkf('Grid position (0=auto)', numInp('starting_position', 0, 40)),
       );
     }
   }
@@ -707,9 +1068,9 @@ async function drivePage() {
      close. That keeps every behaviour they already have - the variant
      grouping, the server's allowed-cars filter, the incremental repaint -
      instead of a second implementation that would drift from the first. */
-  function openPicker(title, search, list, extra) {
+  function openPicker(title, search, list, extra, wide) {
     const veil = el('div', 'pk-veil');
-    const box = el('div', 'pk-box');
+    const box = el('div', 'pk-box' + (wide ? ' pk-wide' : ''));
     const head = el('div', 'pk-head');
     const h = el('h3', null, title);
     const x = el('button', 'pk-x', '×');
@@ -736,14 +1097,30 @@ async function drivePage() {
 
     const close = () => {
       // ⚠ put them back where they were, in order, or the next open finds
-      // them detached and the column is left empty
-      mark.parentNode.insertBefore(search, mark);
-      if (extra) mark.parentNode.insertBefore(extra, mark);
-      mark.parentNode.insertBefore(list, mark);
+      // them detached and the column is left empty.
+      // ⚠ The placeholder can itself be DETACHED by the time we close: the
+      // Drive poll repaints while the picker is open, and Online mode moves
+      // the server box between columns, either of which takes the comment
+      // node with it. Reading .parentNode blind threw here, which aborted
+      // close() and left the search box and list stranded inside a dialog
+      // that was already gone - the column then came back empty. Fall back
+      // to the container we borrowed them from.
+      const back = mark.parentNode || home;
+      const at = mark.parentNode ? mark : null;
+      back.insertBefore(search, at);
+      if (extra) back.insertBefore(extra, at);
+      back.insertBefore(list, at);
       mark.remove();
       search.style.display = wasSearch;
       list.style.display = wasList;
-      if (extra) extra.style.display = wasExtra;
+      // ⚠ Not the value captured when the picker OPENED - the mode may have
+      // changed while it was open, and restoring the old one is how the
+      // server filters ended up visible in Single player.
+      if (extra === srvFilters) {
+        srvFilters.style.display = sel.via === 'server' ? '' : 'none';
+      } else if (extra) {
+        extra.style.display = wasExtra;
+      }
       veil.remove();
       document.removeEventListener('keydown', onKey);
     };
@@ -801,12 +1178,23 @@ async function drivePage() {
             const img = el('img');
             img.loading = 'lazy';
             img.alt = '';
-            img.src = 'api/thumb/car?id=' + encodeURIComponent(c.model || c.id);
+            // ⚠ preset too: trims share a model folder, so id alone showed
+            // the same picture for every trim and never your livery.
+            img.src = 'api/thumb/car?id=' + encodeURIComponent(c.model || c.id)
+                    + '&preset=' + encodeURIComponent(c.id);
             img.onerror = () => { img.style.visibility = 'hidden'; };
             r.append(img);
           }
           const t = el('div', 'grow');
-          t.innerHTML = `<div class="name">${esc(c.label)}</div>`
+          /* ⚠ Head rows name the CAR, variant rows name only the VARIANT.
+             The base cars ship up to four mechanical presets and every one of
+             them used to render as the same full label, so the list showed
+             "BMW M2 Coupe" twice with nothing but "_mech_1" / "_mech_2" to
+             tell them apart. The game names its own variants (Performance,
+             Weissach, Kouki, 450); base_label / variant come from it. */
+          const shown = variant ? (c.variant || c.label)
+                                : (c.base_label || c.label);
+          t.innerHTML = `<div class="name">${esc(shown)}</div>`
             + `<div class="tiny dim">${esc(c.id)}</div>`;
           r.append(t);
           if (c.mod) r.append(el('span', 'pill warn', 'mod'));
@@ -958,6 +1346,18 @@ async function drivePage() {
     }
   }
 
+  /* A server row carries the same track photo the Single player track list
+     uses - the track is how you recognise a server at a glance, and a wall of
+     text rows was the thing that made this list hard to read. */
+  function trackThumb(track) {
+    const img = el('img');
+    img.loading = 'lazy';
+    img.alt = '';
+    img.src = 'api/thumb/track?folder=' + encodeURIComponent(track || '');
+    img.onerror = () => { img.style.visibility = 'hidden'; };
+    return img;
+  }
+
   function paintServers() {
     paintSrvFilters();
     delete trkList.dataset.built;
@@ -1040,7 +1440,7 @@ async function drivePage() {
           track: s.track || '',
         });
       };
-      r.append(t, get);
+      r.append(trackThumb(s.track), t, get);
       r.onclick = () => {
         sel.server_id = s.id;
         sel.server_ip = s.server_ip;
@@ -1052,6 +1452,7 @@ async function drivePage() {
         paintCars();
         paintSelected();
         paintVia();
+  fitDrive();
       };
       trkList.append(r);
     });
@@ -1116,7 +1517,7 @@ async function drivePage() {
           : (r.error || 'Could not list'), !r.ok);
         if (r.ok) drivePage();
       };
-      r.append(t, listB);
+      r.append(trackThumb(s.track), t, listB);
       r.onclick = () => {
         sel.local_id = s.id;
         const allow = allowedCars();
@@ -1200,9 +1601,17 @@ async function drivePage() {
     if (paintSelected._lastCar !== sel.car) {
       paintSelected._lastCar = sel.car;
       drawLivery(sel.car);
+      drawSpecs(sel.car);
     }
+    /* ⚠ make=1 and a bust token, for this ONE card only. A livery change
+       asks for a picture that has never been rendered, so without make=1 the
+       server falls back to the plain model render and you keep looking at the
+       old colour under the words "saved". The token is what gets past the
+       browser's own cache, since the URL is otherwise identical. */
     paintHead(carHead,
-      'api/thumb/car?id=' + encodeURIComponent((c && (c.model || c.id)) || ''),
+      'api/thumb/car?make=1&id=' + encodeURIComponent((c && (c.model || c.id)) || '')
+        + '&preset=' + encodeURIComponent((c && c.id) || '')
+        + (thumbBust ? '&t=' + thumbBust : ''),
       c ? c.label : 'Pick a car',
       c ? c.id : '',
       () => { paintCars(); openPicker('Choose a car', carSearch, carList); });
@@ -1219,7 +1628,10 @@ async function drivePage() {
              : `${s.track || ''} · ${s.players || 0}/${s.max_players || 0}`
                + ` · ${carsLine(s)}`
                + (s.locked ? ' · password' : '')) : '',
-        null, true);
+        () => {
+          paintServers();
+          openPicker('Public servers', trkSearch, trkList, srvFilters, true);
+        });
       showTrackList(true);
       return;
     }
@@ -1232,7 +1644,10 @@ async function drivePage() {
           + ` · ${carsLine(s)}`
           + (s.running ? ' · running' : ' · stopped')
           + (s.no_lobby ? ' · private' : '') : '',
-        null, true);
+        () => {
+          paintLocal();
+          openPicker('My servers', trkSearch, trkList);
+        });
       showTrackList(true);
       return;
     }
@@ -1252,6 +1667,15 @@ async function drivePage() {
      alone meant switching from Public servers back to Single player left the
      server list sitting under the track card. */
   function showTrackList(inline) {
+    srvBox.classList.toggle('has-list', !!inline);
+    /* ⚠ The public-server filters are re-asserted HERE, on every repaint,
+       not just where they are first hidden. Their visibility was set at four
+       scattered points (paintTracks, paintLocal, paintSrvFilters, and
+       openPicker restoring whatever it captured on open), so any path that
+       repainted in a different order could leave "Most players / Hide full /
+       ACECM only" sitting under the TRACK card in Single player. This runs
+       for every mode on every repaint, so the rule is stated once. */
+    srvFilters.style.display = sel.via === 'server' ? '' : 'none';
     trkSearch.style.display = inline ? '' : 'none';
     trkList.style.display = inline ? '' : 'none';
     trkSearch.placeholder = sel.via === 'server'
@@ -1264,6 +1688,17 @@ async function drivePage() {
     const on = sel.via === 'server' || sel.via === 'local';
     spFields.forEach(n => { n.style.display = on ? 'none' : ''; });
     extras.style.display = on ? 'none' : '';
+    /* The preview card never moves - it is the left column's second tile in
+       every mode. Only the list travels: online it sits above the Join
+       button, in Single player it goes back under its own preview so the
+       picker dialog can borrow it. */
+    if (trkCol.parentNode !== leftCol) leftCol.append(trkCol);
+    if (on) {
+      if (srvBox.parentNode !== sessionPane) sessionPane.prepend(srvBox);
+    } else if (srvBox.parentNode !== trkCol) {
+      trkCol.append(srvBox);
+    }
+    if (typeof matchPaneHeights === 'function') matchPaneHeights();
     if (sel.via === 'server') {
       const s = serverOf();
       const meta = d.servers_meta || {};
@@ -1307,28 +1742,41 @@ async function drivePage() {
   };
   mode.onchange = () => { sel.game_mode = mode.value; paintExtras(); };
   weather.onchange = () => { sel.weather = weather.value; };
+  grip.onchange = () => { sel.grip = grip.value; };
   hour.onchange = () => { sel.tod_hour = Number(hour.value); };
   paintVia();
 
   async function poll() {
-    if (_page !== 'drive') {
+    /* ⚠ _wanted, not just _page. `_page` is only assigned AFTER the page
+       function resolves, so the poll() call at the end of drivePage() always
+       saw the previous page here and returned before arming anything - the
+       heartbeat never started on a freshly opened Drive screen. `_wanted` is
+       set synchronously by go() before the builder runs. */
+    if (_page !== 'drive' && _wanted !== 'drive') {
       stopDrivePoll();
       return;
     }
+    let pollBusy = false;
     try {
       const r = await fetch('/api/drive/status').then(x => x.json());
-      if (_page !== 'drive') {
+      if (_page !== 'drive' && _wanted !== 'drive') {
         stopDrivePoll();
         return;
       }
       const phase = r.phase || 'idle';
-      const busy = ['writing', 'launching_game', 'starting_backend',
+      const busy = pollBusy = ['writing', 'launching_game', 'starting_backend',
                     'waiting_for_menu', 'waiting_for_session',
                     'entering', 'selecting_car', 'starting_session',
                     'starting_server', 'joining',
                     'capturing_list', 'quitting_game'].includes(phase);
       driveBtn.disabled = busy;
-      pull.disabled = busy;
+      /* ⚠ `pull` is declared inside `if (sel.via === 'server')` in
+         paintModeBar - a block scope this function cannot see. Referencing it
+         here threw ReferenceError on EVERY poll, and the empty catch below
+         swallowed it, so everything after this line was dead: the button was
+         never re-enabled, the status text never updated, and the screen only
+         recovered when switching tabs rebuilt the page. */
+      if (pullBtn) pullBtn.disabled = busy;
       driveBtn.textContent = busy ? (r.hint || phase)
         : (sel.via === 'local'
           ? ((localOf() && !localOf().running) ? 'Start & Join' : 'Join')
@@ -1357,11 +1805,18 @@ async function drivePage() {
             ? 'Pick a public server and an allowed car, then Join.'
             : 'Pick a car and track, then Drive.');
       }
-      if (!busy && driveTimer) {
-        clearInterval(driveTimer);
-        driveTimer = null;
+    } catch (e) {
+      // ⚠ Not silent. An empty catch here hid a ReferenceError that broke
+      // this whole function for weeks; a dead poll must be visible.
+      console.warn('drive poll', e);
+    } finally {
+      // fast while the job is moving, slow once it settles - but never off,
+      // or nothing notices the game starting or closing (see armDrivePoll).
+      // In `finally` so a throw in the body can never kill the heartbeat.
+      if (_page === 'drive' || _wanted === 'drive') {
+        armDrivePoll(pollBusy ? 1200 : 3000);
       }
-    } catch (e) {}
+    }
   }
 
   driveBtn.onclick = async () => {
@@ -1387,6 +1842,7 @@ async function drivePage() {
       custom_track: sel.custom_track || '',
       game_mode: sel.game_mode,
       weather: sel.weather,
+      grip: sel.grip,
       tod_hour: sel.tod_hour,
       num_opponents: sel.num_opponents,
       skill_min: sel.skill_min,
@@ -1398,6 +1854,9 @@ async function drivePage() {
       quali_min: sel.quali_min,
       warmup_min: sel.warmup_min,
       race_laps: sel.race_laps,
+      race_type: sel.race_type,
+      race_minutes: sel.race_minutes,
+      time_mult: sel.time_mult,
       starting_position: sel.starting_position,
     });
     if (!r.ok) {
@@ -1407,9 +1866,10 @@ async function drivePage() {
       return;
     }
     stopDrivePoll();
-    driveTimer = setInterval(poll, 1200);
+    armDrivePoll(1200);
     poll();
   };
+  drivePollFn = poll;
   poll();
 }
 
@@ -1467,31 +1927,13 @@ function stopAllLogFollows() {
 
 async function serversPage() {
   stopAllLogFollows();
-  const [pr, trkWrap, worker] = await Promise.all([
-    api('profiles'), api('tracks'), api('game/worker'),
+  const [pr, trkWrap] = await Promise.all([
+    api('profiles'), api('tracks'),
   ]);
   const { profiles, template, options, telemetry: telState } = pr || {};
   const trk = (trkWrap && trkWrap.tracks) || [];
   const p = $('#page');
   p.innerHTML = '';
-  if (worker && worker.attached) {
-    const wc = el('div', 'card');
-    const sc = worker.scan || {};
-    wc.innerHTML = `<h2>AI worker</h2>
-      <div class="tiny dim">phase <b>${esc(worker.phase || '?')}</b>
-      &middot; profile ${esc(worker.profile_id || '')}
-      &middot; game ${worker.game_running ? 'running' : 'not running'}
-      &middot; AiDriverEvo lines: ${sc.ai_driver_evo_lines ?? 0}
-      &middot; joined: ${sc.joined ? 'yes' : 'not yet'}</div>`;
-    const hits = (sc.client_hits || []).slice(-8);
-    if (hits.length) {
-      const pre = el('pre', 'log', hits.map(esc).join('\n'));
-      pre.style.maxHeight = '10em';
-      wc.append(pre);
-    }
-    p.append(wc);
-  }
-
   // Penalties: install-wide, not per-profile - the trigger list lives inside
   // content.kspkg itself, so every profile hosted from this server shares
   // one on/off state. Shown here rather than in the per-profile editor
@@ -1505,11 +1947,12 @@ async function serversPage() {
     + 'looks flipped after an update, that is why, not a bug.');
   pc.append(pdim);
   const prow = el('div', 'row');
-  for (const side of ['server', 'client']) {
+  // ⚠ server only. The client/single-player switch moved to Drive > Assists,
+  // where it reads as the personal setting it is.
+  for (const side of ['server']) {
     const info = pens && pens[side];
     if (!info) continue;
-    const label = side === 'server' ? 'Dedicated server (affects everyone who joins)'
-                                    : 'This client (affects only your own singleplayer)';
+    const label = 'Dedicated server (affects everyone who joins)';
     const box = el('div', 'card');
     box.style.flex = '1';
     const isOff = info.state === 'off';
@@ -1744,15 +2187,52 @@ async function serversPage() {
       if (tok === null) return;
       localStorage.setItem('acecm_push_token', tok.trim());
       const list = items.map(x => '• ' + x).join('\n');
-      if (!confirm('Send to ' + base + ':\n\n' + list)) return;
+      if (!await ask('Send to ' + base + ':\n\n' + list)) return;
       const r = await api('push/send', { id: prof.id, base: base.trim(), token: tok.trim() });
       if (!r || !r.ok) { toast((r && r.error) || 'could not start', true); return; }
       toast('Sending ' + items.length + ' item(s) - watch the bar');
       progKick();
     };
+    /* ---- shareable package -------------------------------------------
+       For the person on bad internet or the far side of the world: one zip
+       with this server's track and mod cars, to hand over however they like.
+       It holds exactly what ACECM would have sent them over the network - no
+       stock content, nothing from your other servers. */
+    const packBtn = el('button', 'sm', 'Export package');
+    packBtn.title = 'Save this server’s track and car mods as one zip to '
+      + 'share - the other person drags it onto their ACECM';
+    packBtn.onclick = async () => {
+      const pv = await api('pack/preview?id=' + encodeURIComponent(prof.id));
+      if (!pv || !pv.ok) { toast((pv && pv.error) || 'could not read', true); return; }
+      if (!pv.files) {
+        toast('Nothing to package - this server is all stock content', true);
+        return;
+      }
+      const mb = (pv.bytes / 1e6).toFixed(0);
+      const what = [
+        pv.tracks.length ? pv.tracks.length + ' track' : '',
+        pv.mods.length ? pv.mods.length + ' car mod' + (pv.mods.length > 1 ? 's' : '') : '',
+      ].filter(Boolean).join(' + ');
+      const NL = String.fromCharCode(10);
+      const msg = [
+        'Package "' + prof.name + '"?', '',
+        what,
+        pv.files + ' files, about ' + mb + ' MB', '',
+        'Saved to your Downloads folder. This can take a few minutes and',
+        'the progress bar will show it.',
+      ].join(NL);
+      if (!await ask(msg, 'Build it')) return;
+      packBtn.disabled = true;
+      progKick();
+      const r = await apiLong('pack/build', { id: prof.id });
+      packBtn.disabled = false;
+      if (!r || !r.ok) { toast((r && r.error) || 'could not build', true); return; }
+      toast('Saved ' + r.path.split(/[\/]/).pop()
+            + ' (' + (r.bytes / 1e6).toFixed(0) + ' MB)');
+    };
     const del = el('button', 'sm danger', 'Delete');
     del.onclick = async () => {
-      if (!confirm('Delete "' + prof.name + '"?')) return;
+      if (!await ask('Delete "' + prof.name + '"?')) return;
       await api('profiles/delete', { id: prof.id }); editing = null; serversPage();
     };
     // --- per-server telemetry -------------------------------------------
@@ -1789,19 +2269,16 @@ async function serversPage() {
       try { await navigator.clipboard.writeText(url); } catch (e) {}
       toast('Copied ' + url);
     };
-    const wAI = el('button', 'sm', 'Attach AI worker');
-    wAI.title = 'One client joins this server with -ai_player_car (AiDriverEvo), not vAI ghosts';
-    wAI.onclick = async () => {
-      const r = await api('game/attach_worker', { id: prof.id, ai_player: true });
-      toast(r.ok ? (r.hint || 'Worker launching') : (r.error || 'Failed'), !r.ok);
-      setTimeout(serversRefresh, 2000);
-    };
     const more = el('details');
     more.style.marginTop = '8px';
-    more.append(el('summary', 'tiny dim', 'More — logs, telemetry, AI worker, delete'));
+    more.append(el('summary', 'tiny dim',
+                   'More — logs, share package, delete'));
     const extra = el('div', 'row wrap');
     extra.style.marginTop = '8px';
-    extra.append(logs, capture, tOn, tOff, tView, tLink, wAI, tpill, del);
+    // ⚠ telemetry controls (tOn/tOff/tView/tLink/tpill) are deliberately not
+    // rendered - only useful when hosting a multiplayer race. They are still
+    // built above, so restoring them is adding them back to this line.
+    extra.append(logs, capture, packBtn, del);
     more.append(extra, pre);
     row.append(start, stop, edit);
     card.append(row, more);
@@ -2094,7 +2571,7 @@ function editor(prof, trk, opts, extra) {
         return !m || m.mod;
       });
   g = section('Cars allowed',
-    'All Kunos stays on unless you switch to “only the cars I pick”.');
+    'Stock and modded are separate switches — one click each.');
   const cars = ((extra && extra.cat && extra.cat.cars) || []);
   const chosen = new Set(prof.cars || []);
   const box = el('div');
@@ -2102,43 +2579,70 @@ function editor(prof, trk, opts, extra) {
   const policy = el('div', 'row wrap');
   policy.style.marginBottom = '8px';
   const chips = el('div', 'row wrap');
-  const setPolicy = (kind) => {
-    if (kind === 'all') {
-      prof.allow_kunos = true;
-      chosen.clear();
-    } else if (kind === 'kunos_plus') {
-      prof.allow_kunos = true;
+  // Two INDEPENDENT axes. The old three buttons could not express "all
+  // Kunos, no mods": picking "all Kunos + the mods I pick" with nothing
+  // picked fell straight back to every installed mod, so the only way to run
+  // a stock-only server was to whitelist ~100 Kunos cars by hand.
+  if (prof.mods == null || prof.mods === '') {
+    const pickedMods = (prof.cars || []).filter(id => {
+      const m = cars.find(x => x.id === id);
+      return m ? m.mod : true;
+    });
+    prof.mods = pickedMods.length ? 'pick'
+              : (prof.allow_kunos === false ? 'none' : 'all');
+  }
+  const setStock = (on) => {
+    prof.allow_kunos = !!on;
+    if (!on && prof.mods === 'none') prof.mods = 'pick';
+    prof.cars = [...chosen];
+    redraw();
+  };
+  const setMods = (mode) => {
+    prof.mods = mode;
+    if (mode !== 'pick') {
+      // drop mod picks so the tiles do not contradict the switch
       [...chosen].forEach(id => {
         const m = cars.find(x => x.id === id);
-        if (m && !m.mod) chosen.delete(id);
+        if (!m || m.mod) chosen.delete(id);
       });
-    } else {
-      prof.allow_kunos = false;
     }
+    if (mode === 'none' && prof.allow_kunos === false && !chosen.size)
+      prof.allow_kunos = true;
     prof.cars = [...chosen];
     redraw();
   };
   const redraw = () => {
     policy.innerHTML = '';
-    const kind = prof.allow_kunos
-      ? (chosen.size ? 'kunos_plus' : 'all')
-      : 'only';
-    [['all', 'All cars'],
-     ['kunos_plus', 'All Kunos + the mods I pick'],
-     ['only', 'Only the cars I pick']].forEach(([k, lab]) => {
-      const b = el('button', 'sm' + (kind === k ? ' primary' : ''), lab);
-      b.onclick = () => setPolicy(k);
-      policy.append(b);
+    const stockRow = el('div', 'row wrap');
+    stockRow.append(el('span', 'tiny dim', 'Stock cars'));
+    [[true, 'All Kunos'], [false, 'Only the ones I pick']].forEach(([v, lab]) => {
+      const b = el('button',
+        'sm' + ((!!prof.allow_kunos === v) ? ' primary' : ''), lab);
+      b.onclick = () => setStock(v);
+      stockRow.append(b);
     });
+    const modRow = el('div', 'row wrap');
+    modRow.style.marginTop = '6px';
+    modRow.append(el('span', 'tiny dim', 'Modded cars'));
+    [['all', 'All mods'], ['none', 'No mods'],
+     ['pick', 'Only the ones I pick']].forEach(([k, lab]) => {
+      const b = el('button', 'sm' + (prof.mods === k ? ' primary' : ''), lab);
+      b.onclick = () => setMods(k);
+      modRow.append(b);
+    });
+    policy.append(stockRow, modRow);
     chips.innerHTML = '';
-    if (kind === 'all') {
-      chips.append(el('span', 'tiny dim',
-        'Every stock car and every installed mod is allowed.'));
-    } else {
-      chips.append(el('span', 'tiny dim',
-        kind === 'kunos_plus'
-          ? 'Stock cars are allowed. Click mods below to add them.'
-          : 'Only the highlighted cars can join.'));
+    const note =
+      prof.mods === 'all'
+        ? (prof.allow_kunos ? 'Every stock car and every installed mod is allowed.'
+                            : 'Every installed mod is allowed. No stock cars.')
+      : prof.mods === 'none'
+        ? (prof.allow_kunos ? 'Stock cars only. Mods cannot join.'
+                            : 'Only the stock cars you highlight below can join.')
+        : 'Click mods below to allow them'
+          + (prof.allow_kunos ? '. Stock cars stay allowed.' : ' (stock cars off).');
+    chips.append(el('span', 'tiny dim', note));
+    if (prof.mods === 'pick' || !prof.allow_kunos) {
       [...chosen].forEach(id => {
         const meta = cars.find(x => x.id === id);
         const b = el('button', 'sm',
@@ -2185,7 +2689,8 @@ function editor(prof, trk, opts, extra) {
       img.alt = '';   // blank, not a broken-image glyph + caption
       img.style.cssText = 'width:100%;display:block;aspect-ratio:3/2;'
         + 'object-fit:cover;background:#0c0e11';
-      img.src = 'api/thumb/car?id=' + encodeURIComponent(x.model || x.id);
+      img.src = 'api/thumb/car?id=' + encodeURIComponent(x.model || x.id)
+              + '&preset=' + encodeURIComponent(x.id);
       // a car with no render yet (server-only mods have no client package)
       // shows a blank tile rather than a broken image
       img.onerror = () => { img.style.visibility = 'hidden'; };
@@ -2203,16 +2708,11 @@ function editor(prof, trk, opts, extra) {
       t.append(img, cap);
       t.title = x.model ? x.id : x.id + ' — no content installed for this car';
       t.onclick = () => {
-        const kind = prof.allow_kunos ? (chosen.size ? 'kunos_plus' : 'all') : 'only';
-        if (kind === 'all') {
-          prof.allow_kunos = !!x.mod;
-          chosen.clear();
-          chosen.add(x.id);
-        } else if (on()) {
-          chosen.delete(x.id);
-        } else {
-          chosen.add(x.id);
-        }
+        // Clicking a tile is a PICK, so flip that axis into pick mode rather
+        // than silently wiping the other one.
+        if (x.mod && prof.mods !== 'pick') { prof.mods = 'pick'; chosen.clear(); }
+        if (!x.mod && prof.allow_kunos) { prof.allow_kunos = false; chosen.clear(); }
+        if (on()) chosen.delete(x.id); else chosen.add(x.id);
         prof.cars = [...chosen];
         redraw();
       };
@@ -2226,7 +2726,10 @@ function editor(prof, trk, opts, extra) {
   panel('Modded cars', cars.filter(x => x.mod), true);
   panel('Kunos cars', cars.filter(x => !x.mod), false);
 
-  box.append(chips, panels);
+  // ⚠ `policy` was BUILT and repainted but never put in the DOM, so the
+  // whole car-policy control has been invisible: the only way to change
+  // what a server allows was clicking the car tiles one at a time.
+  box.append(policy, chips, panels);
   g.append(box);
   redraw();
 
@@ -2249,7 +2752,6 @@ function editor(prof, trk, opts, extra) {
   mk(g, 'entry_list_url', 'Entry list URL', 'text');
   mk(g, 'results_post_url', 'Results POST URL', 'text');
   mk(g, 'log', 'Log file', 'text');
-  mk(g, 'telemetry', 'Start telemetry with this server', 'bool');
 
   /* ---- what this server pulls in ---------------------------------------
      Shown where the track and cars are chosen, because that is where the
@@ -2617,7 +3119,7 @@ async function modStrip(p) {
       const td = el('td');
       const rm = el('button', 'sm danger', 'Remove');
       rm.onclick = async () => {
-        if (!confirm(`Remove "${n}" from both sides?`)) return;
+        if (!await ask(`Remove "${n}" from both sides?`)) return;
         const r = await api('mods/remove', { name: n });
         toast(r && r.error ? r.error : 'Removed', !!(r && r.error));
         carsPage();
@@ -3107,7 +3609,7 @@ async function backendPage() {
   };
   const rs = el('button', null, 'Restore Kunos URL');
   rs.onclick = async () => {
-    if (!confirm('Put the official lobby URL back in the client?')) return;
+    if (!await ask('Put the official lobby URL back in the client?')) return;
     const r = await api('backend/redirect', { action: 'restore' });
     toast(r.ok ? (r.already ? 'Already on Kunos' : 'Restored official URL')
                : (r.error || 'Restore failed'), !r.ok);
@@ -3117,32 +3619,6 @@ async function backendPage() {
   red.append(rrow);
   c.append(red);
   p.append(c);
-
-  const ai = el('div', 'card');
-  ai.innerHTML = '<h2>Real AI (client Instant Race)</h2>'
-    + '<div class="tiny dim" style="margin-bottom:10px">'
-    + 'Dedicated-server <code>-virtual_ai_cars</code> is a replay along a '
-    + 'reference lap (<code>sendCarPhysicsUpdate</code> is not implemented). '
-    + 'The real driver, <code>AiDriverEvo</code>, lives in the <b>client</b>. '
-    + 'This starts <em>one</em> game process with '
-    + '<code>-ai_enable_evo_next</code> and <code>-opponent_count</code>, '
-    + 'and points Instant Race at that grid. Not a bot farm.</div>';
-  const arow = el('div', 'row wrap');
-  const nIn = el('input');
-  nIn.type = 'number'; nIn.min = 1; nIn.max = 40; nIn.value = 16;
-  nIn.style.width = '4.5em';
-  nIn.title = 'Opponent count';
-  const go = el('button', 'primary', 'Launch real AI race');
-  go.onclick = async () => {
-    const r = await api('game/launch_ai', {
-      opponents: parseInt(nIn.value, 10) || 16,
-      min_strength: 70, max_strength: 95,
-    });
-    toast(r.ok ? (r.hint || 'Launched') : (r.error || 'Launch failed'), !r.ok);
-  };
-  arow.append(nIn, go);
-  ai.append(arow);
-  p.append(ai);
 
   const l = el('div', 'card');
   l.innerHTML = '<h2>Backend log</h2>';
@@ -3160,67 +3636,57 @@ async function settingsPage() {
   const p = $('#page');
   p.innerHTML = '';
 
-  // ---- run as a server ---------------------------------------------------
-  const srvcard = el('div', 'card');
-  srvcard.innerHTML = '<h2>Run as a server</h2>'
-    + '<div class="tiny dim" style="margin-bottom:10px">Starts ACECM with no '
-    + 'window, so a machine you do not sit at can host modded content and be '
-    + 'managed from your phone or laptop. It prints a link with its own '
-    + 'access token &mdash; over Tailscale or your LAN.<br><br>'
-    + 'The same app, not a cut-down panel: server profiles, start/stop, track '
-    + 'deploy and drag-drop upload all work remotely. From a profile, '
-    + '<b>Send content to server</b> uploads the mods and track it needs.</div>';
-  const srow = el('div', 'row wrap');
-  const mk = el('button', 'sm primary', 'Create server shortcut');
-  mk.title = 'Start Menu + Desktop shortcut that launches ACECM --headless';
-  mk.onclick = async () => {
-    const was = mk.textContent;
-    mk.disabled = true; mk.textContent = 'Creating...';
+  /* ---- launch the game, on its own -------------------------------------
+     ⚠ Deliberately NOT on Drive. Drive writes a session and then launches;
+     this just starts the game with nothing set up, which is only useful for
+     poking at menus and reading what the game writes back. Putting it on the
+     page you use every day is how it gets pressed by accident, so it lives
+     at the top of Settings - somewhere you have to mean to go - and asks
+     before it does anything. */
+  const lc = el('div', 'card');
+  lc.innerHTML = '<h2>Launch the game</h2>';
+  lc.append(el('div', 'tiny dim',
+    'Starts Assetto Corsa EVO on its own, with no session written - for '
+    + 'checking what the game does to its own files. To actually drive, use '
+    + 'Drive: it writes the session first.'));
+  const lrow = el('div', 'row');
+  const lbtn = el('button', 'sm', 'Launch game');
+  const lnote = el('span', 'tiny dim');
+  lbtn.onclick = async () => {
+    if (!await ask('Launch Assetto Corsa EVO now? No session is written - '
+                 + 'the game starts with whatever it last had.')) return;
+    lbtn.disabled = true;
+    lnote.textContent = 'launching…';
     try {
-      const r = await api('server_shortcut', { desktop: true });
-      if (!r || !r.ok) { toast((r && r.error) || 'could not create it', true); return; }
-      toast('Created "ACECM Server" in the Start Menu and on the Desktop');
+      const r = await api('game/launch', {});
+      lnote.textContent = r && r.ok
+        ? 'launched' + (r.via ? ' (' + r.via + ')' : '')
+        : ((r && r.error) || 'could not launch');
+      if (!r || !r.ok) toast((r && r.error) || 'Could not launch', true);
     } finally {
-      mk.disabled = false; mk.textContent = was;
+      lbtn.disabled = false;
     }
   };
-  /* Update a remote box's dedicated-server BUILD from this machine's copy.
-     For a server that is not installed through Steam and so cannot update
-     itself. Excludes serverConfig - that is the other machine's own account
-     and configuration, not part of the build. */
-  const sb = el('button', 'sm', 'Update a server’s build');
-  sb.title = "Send this PC's dedicated-server files to a remote ACECM";
-  sb.onclick = async () => {
-    const base = prompt('Address of the ACECM on the server box:',
-                        localStorage.getItem('acecm_push_base') || 'http://100.x.y.z:8092');
-    if (!base) return;
-    localStorage.setItem('acecm_push_base', base.trim());
-    const tok = prompt("That server's admin token:",
-                       localStorage.getItem('acecm_push_token') || '');
-    if (tok === null) return;
-    localStorage.setItem('acecm_push_token', tok.trim());
-    const warn = 'Their serverConfig is left alone. Their server must be stopped.';
-    if (!confirm('Send this PC\u2019s dedicated-server build to '
-                 + base + '?' + '\n\n' + warn)) return;
-    const r = await api('push/server_build', { base: base.trim(), token: tok.trim() });
-    if (!r || !r.ok) { toast((r && r.error) || 'could not start', true); return; }
-    toast('Packing ' + (r.files || '?') + ' file(s) - watch the bar');
-    progKick();
-  };
-  const tokbtn = el('button', 'sm', 'Show admin token');
-  tokbtn.title = 'The token a remote browser needs';
-  tokbtn.onclick = async () => {
-    const a = await api('auth');
-    if (!a || !a.remote_admin) {
-      toast('Remote admin is off - it turns on when ACECM runs as a server');
-      return;
-    }
-    const r = await api('auth/rotate');
-    if (r && r.token) prompt('Admin token (a NEW one - the old is now dead):', r.token);
-  };
-  srow.append(mk, sb, tokbtn);
-  srvcard.append(srow);
-  p.append(srvcard);
+  lrow.append(lbtn, lnote);
+  lc.append(lrow);
+  p.append(lc);
+
+  // Backend and Logs used to own a slot in the top bar each. They are things
+  // you go looking for, not things you switch between, so they live here.
+  const more = el('div', 'card');
+  more.innerHTML = '<h2>More</h2>';
+  const moreRow = el('div', 'row wrap');
+  [['gamesettings', 'Game settings', 'FFB, graphics, audio and bindings'],
+   ['backend', 'Backend', 'Host through our own lobby'],
+   ['logs', 'Logs', 'What ACECM did, and every error in full']].forEach(
+    ([page, label, why]) => {
+      const b = el('button', null, label);
+      b.title = why;
+      b.onclick = () => go(page);
+      moreRow.append(b);
+    });
+  more.append(moreRow);
+
 
   // ---- faster loading ----------------------------------------------------
   const boot = el('div', 'card');
@@ -3375,7 +3841,7 @@ async function settingsPage() {
     if (ins.installed) {
       const rm = el('button', 'sm danger', 'Remove shortcuts');
       rm.onclick = async () => {
-        if (!confirm('Remove the Start Menu and Desktop shortcuts?\n\n'
+        if (!await ask('Remove the Start Menu and Desktop shortcuts?\n\n'
                      + 'Your profiles and settings are kept.')) return;
         const r = await api('install/remove', {});
         toast(r.ok ? 'Shortcuts removed' : (r.error || 'Failed'), !r.ok);
@@ -3471,71 +3937,11 @@ async function settingsPage() {
   redo.onclick = () => showPaths(true);
   showPaths(false);
 
-  // ---- updates ----------------------------------------------------------
-  const uc = el('div', 'card');
-  uc.innerHTML = '<h2>Updates</h2>'
-    + '<div class="tiny dim">Checks this project&rsquo;s latest GitHub Release '
-    + 'for an <code>ACECM.exe</code>, verifies it against the SHA-256 GitHub '
-    + 'publishes, and swaps the exe on restart. The old build is kept as '
-    + '<code>.old</code>.</div>';
-  const urow = el('div', 'row wrap');
-  urow.style.margin = '10px 0';
-  const vpill = el('span', 'pill off', '<i class="dot"></i>checking version…');
-  const chk = el('button', 'sm', 'Check for updates');
-  const get = el('button', 'sm primary', 'Download & install');
-  get.style.display = 'none';
-  const unote = el('div', 'tiny dim');
-  urow.append(chk, get, vpill);
-  uc.append(urow, unote);
-  p.append(uc);
-
-  api('version').then(v => {
-    vpill.className = 'pill on';
-    vpill.innerHTML = `<i class="dot"></i>v${esc(v.version)}`
-      + (v.frozen ? '' : ' (running from source)');
-  });
-  chk.onclick = async () => {
-    unote.textContent = 'checking…';
-    const r = await api('update/check');
-    if (!r.ok) { unote.innerHTML = `<b>${esc(r.error || 'check failed')}</b>`
-      + (r.hint ? '<br>' + esc(r.hint) : ''); return; }
-    if (!r.checked) { unote.textContent = r.hint || 'update checks are off'; return; }
-    if (r.available) {
-      unote.innerHTML = `<b>v${esc(r.latest)}</b> is available `
-        + `(you have v${esc(r.current)})`
-        + (r.notes ? '<pre class="log" style="max-height:160px">'
-                     + esc(r.notes) + '</pre>' : '');
-      get.style.display = '';
-    } else {
-      unote.textContent = `up to date (latest is v${r.latest || '?'})`;
-      get.style.display = 'none';
-    }
-    if (r.error) unote.innerHTML += '<br>' + esc(r.error);
-  };
-  get.onclick = async () => {
-    unote.textContent = 'downloading…';
-    const r = await api('update/apply', {});
-    unote.textContent = r.ok ? (r.note || 'downloaded') : (r.error || 'failed');
-    if (r.ok) {
-      toast('Update downloaded — restart to finish', false);
-      rst.style.display = '';
-    }
-  };
-  // ⚠ The swap happens when this process EXITS - the downloaded exe cannot
-  // replace a running one. Without a restart button the update just sits
-  // there looking finished, and people report that it did not apply.
-  const rst = el('button', 'primary', 'Restart ACECM to finish');
-  rst.style.display = 'none';
-  rst.onclick = async () => {
-    const r = await api('app/restart', {});
-    if (!r.ok) { toast(r.error || 'restart failed', true); return; }
-    unote.textContent = 'restarting…';
-    // the window this page lives in is about to go away
-    setTimeout(() => { document.body.style.opacity = '0.4'; }, 400);
-  };
-  urow.append(rst);
   c.append(save);
   p.append(c);
+  // ⚠ appended LAST: 'More' is a way out of Settings, so it belongs at the
+  // bottom rather than above the settings themselves.
+  p.append(more);
 }
 
 
@@ -3575,9 +3981,11 @@ async function shareCard(p) {
   c.innerHTML = '<h2>Shared for download</h2>'
     + '<div class="tiny dim" style="margin-bottom:10px">A player who does not '
     + 'have your track cannot join, and the game will not send it to them. '
-    + 'Share it here, copy the link, and they paste it into '
-    + '<b>Server browser → Fetch from ACECM</b>. Only tracks you imported '
-    + 'are listed — stock tracks everyone already has.</div>';
+    + 'Share or stop each imported track below. The hosted server\'s track '
+    + 'starts shared so joiners can download it; Stop sharing turns that off. '
+    + 'Copy the link; they paste it into '
+    + '<b>Server browser → Fetch from ACECM</b>. Stock tracks everyone already '
+    + 'has are not listed.</div>';
   // ⚠ TWO links, labelled by who they are for. Handing out one LAN address and
   // telling people to "swap in your public IP" is how a share link that cannot
   // possibly work gets sent to a friend on another network - the server list
@@ -3624,10 +4032,6 @@ async function shareCard(p) {
   if (!rows.length) {
     c.append(el('div', 'empty', 'No imported tracks yet'));
   } else {
-    /* ⚠ No Share / Stop sharing buttons any more. Working out which of your
-       content a joining player is missing is a question ACECM can answer from
-       the server profiles, so sharing follows what you host instead of being a
-       list to keep in step by hand. This is the READ-OUT of that. */
     rows.forEach(([name, folder]) => {
       const row = el('div', 'chk');
       const auto = (autoWho[folder] || []);
@@ -3639,6 +4043,7 @@ async function shareCard(p) {
         + `<div class="tiny dim">${esc(folder)} — ${esc(why)}</div></span>`
         + `<span class="pill ${on ? 'on' : 'off'}"><i class="dot"></i>`
         + `${on ? 'shared' : 'idle'}</span>`;
+      row.append(shareTrackBtn(folder, name, on));
       c.append(row);
     });
   }
@@ -3732,20 +4137,61 @@ function dropId() {
   });
 }
 
+/* ⚠ Our OWN confirmation, because window.confirm() is not reliable here.
+   The embedded webview returns FALSE from confirm() without ever showing a
+   dialog, so every `if (!await ask(...)) return;` in this file silently did
+   nothing - delete a profile, deploy a track, restore a backup, launch the
+   game: all dead, with no error to explain it. This renders a real element,
+   so it cannot be suppressed by the host.
+   Returns a promise; call it as `if (!await ask(msg)) return;`. */
+function ask(msg, okLabel) {
+  return new Promise(resolve => {
+    const veil = el('div', 'pk-veil ask-veil');
+    const box = el('div', 'pk-box ask-box');
+    const body = el('div', 'ask-msg');
+    // the messages carry newlines and bullets - keep them readable
+    body.textContent = String(msg == null ? '' : msg);
+    const row = el('div', 'row ask-row');
+    const no = el('button', 'sm', 'Cancel');
+    const yes = el('button', 'sm primary', okLabel || 'OK');
+    let done = false;
+    const close = (val) => {
+      if (done) return;
+      done = true;
+      removeEventListener('keydown', onKey, true);
+      veil.remove();
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); close(true); }
+    };
+    no.onclick = () => close(false);
+    yes.onclick = () => close(true);
+    veil.onclick = (e) => { if (e.target === veil) close(false); };
+    addEventListener('keydown', onKey, true);
+    row.append(no, yes);
+    box.append(body, row);
+    veil.append(box);
+    document.body.append(veil);
+    yes.focus();
+  });
+}
+
 function overwritePrompt(r) {
   const name = (r && (r.label || r.name)) || 'this';
   if (r && r.same) {
-    return confirm('"' + name + '" is already installed and these files '
+    return ask('"' + name + '" is already installed and these files '
       + 'are the same.\n\nOverwrite it anyway?');
   }
-  return confirm('"' + name + '" is already installed, but these files '
+  return ask('"' + name + '" is already installed, but these files '
     + 'are different.\n\nOverwrite the installed copy?');
 }
 
 async function finishIngest(payload) {
   let r = await apiLong('drop', payload);
   if (r && r.need_confirm) {
-    if (!overwritePrompt(r)) {
+    if (!await overwritePrompt(r)) {
       if (payload.id) await api('drop', { id: payload.id, cancel: true });
       toast('Install cancelled');
       return { ok: false, cancelled: true };
@@ -4066,6 +4512,22 @@ function bindDropAnywhere() {
   });
 }
 
+function shareTrackBtn(folder, label, on) {
+  const b = el('button', on ? 'sm danger' : 'sm primary',
+               on ? 'Stop sharing' : 'Share');
+  b.onclick = async (ev) => {
+    if (ev) ev.stopPropagation();
+    const r = await api('share/track', {
+      folder, share: !on, label: label || folder,
+    });
+    if (!(r && r.error)) {
+      toast(on ? 'No longer shared' : (label || folder) + ' is now downloadable');
+    }
+    contentPage();
+  };
+  return b;
+}
+
 function libRow(item, shareUrl) {
   const row = el('div', 'chk');
   const cars = (item.cars || []).map(x => esc(x.label || x.id)).join(', ');
@@ -4125,14 +4587,18 @@ function libRow(item, shareUrl) {
       + '&name=' + encodeURIComponent(item.name));
     await copyText((r && r.path) || item.path, 'path');
   };
+  const shareB = item.kind === 'track'
+    ? shareTrackBtn(item.folder || item.name, item.label || item.name,
+                    !!item.shared)
+    : null;
+  let link = null;
   if (item.shared && shareUrl) {
-    const link = el('button', 'sm', 'Link');
+    link = el('button', 'sm', 'Link');
     link.title = 'Copy the Get content share URL';
     link.onclick = (ev) => {
       ev.stopPropagation();
       copyText(shareUrl, shareUrl);
     };
-    act.append(link);
   }
   const rm = el('button', 'sm danger', 'Delete');
   rm.onclick = async (ev) => {
@@ -4141,14 +4607,17 @@ function libRow(item, shareUrl) {
       ? `Delete track "${item.label}"?\n\nRemoves the imported files. `
         + 'Stock tracks are not touched.'
       : `Delete car "${item.name}" from client and server?`;
-    if (!confirm(what)) return;
+    if (!await ask(what)) return;
     const r = await api('library/remove',
                         { kind: item.kind, name: item.name });
     toast(r && r.ok ? 'Removed ' + item.name : (r.error || 'Delete failed'),
           !(r && r.ok));
     contentPage();
   };
-  act.append(exp, copy, pathB, rm);
+  act.append(exp, copy, pathB);
+  if (shareB) act.append(shareB);
+  if (link) act.append(link);
+  act.append(rm);
   row.append(act);
   return row;
 }
@@ -4214,7 +4683,11 @@ async function contentPage() {
   const p = $('#page');
   p.innerHTML = '';
 
-  // Library first: install, export, delete, copy. Host/share stay below.
+  // Fetching from a host goes FIRST. It was third, which is fine in the DOM
+  // and useless on screen: the installed-mods card above it is 42 rows tall,
+  // so anything after it is off the bottom of the page.
+  p.append(fetchHostCard());
+  // Then the library: install, export, delete, copy. Host/share stay below.
   await libraryCard(p);
   await shareCard(p);
   // --- custom track deploy -------------------------------------------------
@@ -4253,7 +4726,7 @@ async function contentPage() {
         ? 'Stop the server first — it holds content.kspkg open'
         : 'Install at its own paths and publish it for download';
       go.onclick = async () => {
-        if (!confirm(`Deploy "${t.display_name}" to the server?\n\n`
+        if (!await ask(`Deploy "${t.display_name}" to the server?\n\n`
             + 'It is installed under its own name, so no stock track is '
             + 'overwritten, and it is published so players can download it.'))
           return;
@@ -4274,7 +4747,7 @@ async function contentPage() {
   rest.disabled = !td.backup;
   rest.title = 'Put the server archive back the way it was before the last deploy';
   rest.onclick = async () => {
-    if (!confirm('Restore the server archive from the backup taken before deploy?'))
+    if (!await ask('Restore the server archive from the backup taken before deploy?'))
       return;
     const r = await api('trackdeploy/restore', {});
     toast(r.ok ? 'Archive restored' : (r.error || 'Restore failed'), !r.ok);
@@ -4299,7 +4772,7 @@ async function contentPage() {
       return;
     }
     const names = dry.candidates.map(c => c.display_name).join(', ');
-    if (!confirm(`${n} track(s) missing from tracks.table:\n\n${names}\n\n`
+    if (!await ask(`${n} track(s) missing from tracks.table:\n\n${names}\n\n`
         + 'Re-register them now? This rewrites a 300 MB archive.'))
       return;
     toast('Redeclaring — please wait…');
@@ -4328,7 +4801,7 @@ async function contentPage() {
       toast('Nothing to redeclare — every loose track is already registered on the client');
       return;
     }
-    if (!confirm(`${n} track(s) missing from the client's tracks.table:\n\n`
+    if (!await ask(`${n} track(s) missing from the client's tracks.table:\n\n`
         + `${dry.candidates.join(', ')}\n\nRe-register them now?`))
       return;
     toast('Redeclaring on the client — please wait…');
@@ -4534,7 +5007,7 @@ async function patchesPage() {
     const rs = el('button', 'sm danger', 'Restore');
     rs.disabled = st.state === 'clean' || st.state === 'missing';
     rs.onclick = async () => {
-      if (!confirm('Restore the original bytes?')) return;
+      if (!await ask('Restore the original bytes?')) return;
       const r = await api('patches/restore', { id: pt.id });
       toast(r.ok ? 'Restored' : (r.error || 'Failed'), !r.ok);
       patchesPage();
@@ -4544,7 +5017,7 @@ async function patchesPage() {
       const f = el('button', 'sm', 'Apply anyway');
       f.title = 'Offsets almost certainly do not match this build';
       f.onclick = async () => {
-        if (!confirm('This patch was built for a different game version.\n'
+        if (!await ask('This patch was built for a different game version.\n'
             + 'Offsets will very likely be wrong. Continue?')) return;
         const r = await api('patches/apply', { id: pt.id, force: true });
         toast(r.ok ? 'Applied (forced)' : (r.error || 'Failed'), !r.ok);
@@ -4666,7 +5139,7 @@ async function gameSettingsPage() {
       try { bundle = JSON.parse(await f.text()); }
       catch (e) { toast('That file is not valid JSON', true); return; }
       const names = Object.keys(bundle.files || {});
-      if (!confirm(`Apply ${names.length} settings file(s) from ${f.name}?
+      if (!await ask(`Apply ${names.length} settings file(s) from ${f.name}?
 
 `
                    + 'Whatever they replace is backed up first.')) return;
@@ -4695,7 +5168,7 @@ async function gameSettingsPage() {
         + `${new Date(b.mtime * 1000).toLocaleString()} · ${b.size} bytes</div></span>`);
       const rb = el('button', 'sm', 'Restore');
       rb.onclick = async () => {
-        if (!confirm('Restore ' + b.name + '?')) return;
+        if (!await ask('Restore ' + b.name + '?')) return;
         const res = await api('gamesettings/restore_backup',
                               { file: gsFile, name: b.name });
         toast(res.ok ? 'Restored' : (res.error || 'Failed'), !res.ok);
@@ -4774,7 +5247,7 @@ async function gameSettingsPage() {
   };
   const rest = el('button', 'sm danger', 'Restore backup');
   rest.onclick = async () => {
-    if (!confirm('Restore this file from the ACECM backup?')) return;
+    if (!await ask('Restore this file from the ACECM backup?')) return;
     const res = await api('gamesettings/restore', { file: gsFile });
     toast(res.ok ? 'Restored' : (res.error || 'Failed'), !res.ok);
     gameSettingsPage();
@@ -4833,10 +5306,10 @@ async function contentFrom(s) {
   const fixing = wanted.reduce((a, x) => a + (x.p.needs_register || []).length, 0);
   const mb = (wanted.reduce((a, x) => a + (x.p.bytes || 0), 0) / 1e6).toFixed(0);
   if (!files && fixing) {
-    if (!confirm(fixing + ' track(s) are already downloaded but missing from '
+    if (!await ask(fixing + ' track(s) are already downloaded but missing from '
         + "the game's track list.\n\nAdd them now? "
         + '(Assetto Corsa EVO must be closed.)')) return;
-  } else if (!confirm(wanted.map(x => '• ' + x.e.name).join('\n')
+  } else if (!await ask(wanted.map(x => '• ' + x.e.name).join('\n')
       + `\n\nMissing ${files} file(s), ${mb} MB.`
       + (fixing ? `\n${fixing} track(s) also need adding to the game.` : '')
       + `\n\nDownload from ${d.base} and install?`)) return;
@@ -4869,7 +5342,19 @@ async function contentFrom(s) {
         ? `Content installed in ${secs}s — you can join now`
         : st.detail, st.state === 'error');
       brLocal = await api('browser/local');
-      if (_page === 'browser') browserPage();
+      // ⚠ Refresh whatever page the user is actually ON. This only ever
+      // refreshed the server-browser page, so after fetching from Content (or
+      // from Drive) the new cars stayed invisible until you navigated away and
+      // back - the download had worked, the screen just never redrew. With the
+      // browser page gone this refreshed nothing at all.
+      const spec = PAGES[_page];
+      if (spec && typeof spec[2] === 'function') spec[2]();
+      // ⚠ Freshly fetched cars have no render yet. The list GET deliberately
+      // never renders (it would spawn an evoview console per row on every
+      // Drive keystroke), so without this the new cars sit there as blank
+      // tiles until someone happens to run a render pass from the Cars page.
+      // Kick one in the background; it skips cars already rendered.
+      if (st.state === 'done') api('thumbs/build', {});
     }
   }, 1000);
 }
@@ -5593,12 +6078,9 @@ const PAGES = {
   drive: ['Drive', 'Single player or a local server — same car picker', drivePage],
   servers: ['Servers', 'Create, configure and run dedicated servers', serversPage],
   cars: ['Cars', 'What the dedicated server can actually load', carsPage],
-  content: ['Content', 'Install, export and manage cars and tracks', contentPage],
   tracks: ['Tracks', 'Layouts available to host', tracksPage],
+  content: ['Content', 'Install, export and manage cars and tracks', contentPage],
   backend: ['Backend', 'Host through our own lobby', backendPage],
-  browser: ['Server browser', 'Every public EVO server', browserPage],
-  telemetry: ['Telemetry', 'Live car positions from the server', telemetryPage],
-  patches: ['Patches', 'Verified, reversible binary patches', patchesPage],
   gamesettings: ['Game settings', 'FFB, graphics, audio and bindings', gameSettingsPage],
   logs: ['Logs', 'What ACECM did, and every error in full', logsPage],
   settings: ['Settings', 'Paths and ports', settingsPage],
@@ -5708,12 +6190,15 @@ function go(name) {
    so adding a page cannot leave the nav out of step with it. The everyday
    sections read as words next to the title; the occasional ones sit small on
    the right so the main row stays short enough to scan. */
-const PRIMARY = ['drive', 'servers', 'cars', 'tracks', 'content',
-                 'backend', 'browser', 'telemetry'];
+const PRIMARY = ['drive', 'servers', 'cars', 'tracks', 'content'];
+// Reachable, but not worth a permanent place in the bar: you go to them
+// from Settings, which is where you were heading anyway.
+const NAV_HIDDEN = ['backend', 'logs', 'gamesettings'];
 function buildSections() {
   const main = $('#sections'), side = $('#sections2');
   main.innerHTML = ''; side.innerHTML = '';
   Object.keys(PAGES).forEach(name => {
+    if (NAV_HIDDEN.includes(name)) return;
     const a = el('a', null, PAGES[name][0]);
     a.dataset.page = name;
     a.onclick = () => go(name);
@@ -5721,6 +6206,87 @@ function buildSections() {
   });
 }
 buildSections();
+
+/* ------------------------------------------------------------- themes ---
+   Accent-only, and stored per browser profile. index.html applies the saved
+   theme before first paint so there is no flash of the default colour. */
+const THEMES = [
+  ['teal', '#2ee6c8'], ['blue', '#4c8dff'], ['purple', '#a78bfa'],
+  ['red', '#ff5c7a'], ['orange', '#ff9d47'], ['green', '#3fb950'],
+  ['pink', '#f472b6'], ['amber', '#ffd166'],
+];
+function currentTheme() {
+  try { return localStorage.getItem('acecm.theme') || 'teal'; } catch (e) { return 'teal'; }
+}
+function setTheme(name) {
+  // teal is the stylesheet default, so it is the ABSENCE of data-theme
+  if (name === 'teal') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = name;
+  try { localStorage.setItem('acecm.theme', name); } catch (e) {}
+  // ⚠ and in config, so it survives the profile wipe an update performs
+  api('config', { ui_theme: name }).catch(() => {});
+  paintThemeMenu();
+}
+function closeThemeMenu() {
+  const m = $('#thememenu');
+  if (!m) return;
+  m.hidden = true;
+  m.classList.remove('open');
+}
+function paintThemeMenu() {
+  const m = $('#thememenu');
+  if (!m) return;
+  m.innerHTML = '';
+  const cur = currentTheme();
+  THEMES.forEach(([name, swatch]) => {
+    const b = el('button', name === cur ? 'on' : null);
+    b.style.background = swatch;
+    b.title = name;
+    b.onclick = (e) => {
+      e.stopPropagation();
+      setTheme(name);
+      closeThemeMenu();
+    };
+    m.append(b);
+  });
+}
+function bindThemes() {
+  const btn = $('#themebtn'), m = $('#thememenu');
+  if (!btn || !m) return;
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    if (m.classList.contains('open')) { closeThemeMenu(); return; }
+    paintThemeMenu();
+    const r = btn.getBoundingClientRect();
+    m.style.top = (r.bottom + 8) + 'px';
+    m.style.right = Math.max(8, innerWidth - r.right) + 'px';
+    m.hidden = false;
+    m.classList.add('open');
+  };
+  /* ⚠ CAPTURE phase, and more than one event name. Bubble-phase
+     pointerdown works in a plain browser tab but not reliably in the desktop
+     WebView shell - anything downstream that stops propagation (or a shell
+     that delivers mouse without pointer events) swallowed the dismiss, and
+     the menu then stayed open until the app was restarted. Capture sees the
+     event before any handler can eat it. */
+  const away = (e) => {
+    if (!m.classList.contains('open')) return;
+    if (m.contains(e.target) || btn.contains(e.target)) return;
+    closeThemeMenu();
+  };
+  ['pointerdown', 'mousedown', 'click', 'touchstart'].forEach(
+    ev => addEventListener(ev, away, true));
+  // the menu is fixed-positioned against the button, so anything that moves
+  // it out from under the cursor should close it rather than leave it adrift
+  ['resize', 'blur'].forEach(ev => addEventListener(ev, closeThemeMenu));
+  addEventListener('scroll', closeThemeMenu, true);
+  addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeThemeMenu();
+  }, true);
+}
+bindThemes();
+{ const b = $('#brand'); if (b) b.onclick = () => go('drive'); }
+
 go((location.hash || '#drive').slice(1));
 // problems are worth noticing wherever you are, but they do not change
 // often - a slow tick is plenty and costs one small request.
@@ -5729,6 +6295,5 @@ setInterval(refreshAttention, 20000);
 // the user happens to be, not only on the page that started it
 startProgressWatch();
 bindDropAnywhere();
-api('state').then(s => {
-  $('#navfoot').textContent = s.server_exe_ok ? 'server ready' : 'server not found';
-});
+// ⚠ nothing writes #navfoot any more - the element is gone. A missing server
+// exe still surfaces through refreshAttention(), which is the place for it.

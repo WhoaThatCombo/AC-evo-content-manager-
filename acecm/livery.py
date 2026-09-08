@@ -37,6 +37,7 @@ path), which is a quirk to ignore, not to copy: we write values that match.
 folder is a superset; ks_renault has 45 while the A110 S allows 12 on its
 exterior skin.
 """
+import json
 import os
 import re
 import struct
@@ -119,6 +120,147 @@ def _current_color(state):
 
 
 # ------------------------------------------------------------- colours --
+def color_names(model, paths):
+    """path -> display name, in as few package walks as possible.
+
+    ⚠ Batched deliberately. color_info() walks a package index per call, and
+    the base archive's index is 64 MiB - doing that once per colour turned a
+    twelve-colour car into twelve full walks. The picker needs every name at
+    once, so collect them in one pass.
+    """
+    want = {str(p).lower().replace("/", chr(92)): p for p in (paths or [])}
+    out = {}
+    if not want:
+        return out
+    # ⚠ Cached on disk per model. Walking the BASE archive index costs ~2.2s,
+    # and this runs every time you select a car - paying it once per car ever
+    # is the difference between instant and a visible stall on the picker.
+    ck = _names_key(model)
+    cached = _NAMES.get(model)
+    if cached is None:
+        cached = _names_cache().get(model)
+    if cached and cached.get("key") == ck:
+        _NAMES[model] = cached
+        got = cached.get("names") or {}
+        if all(p in got for p in want.values()):
+            return dict(got)
+    order = []
+    try:
+        own = viewer._package_for(model)
+        if own:
+            order.append(own)
+        base = viewer.package()
+        if base:
+            order.append(base)
+        order += [pk for _m, pk in viewer.packages() if pk]
+    except Exception:
+        pass
+    seen = []
+    for pk in order:
+        if not pk or pk in seen or not os.path.isfile(pk) or len(out) == len(want):
+            continue
+        seen.append(pk)
+        try:
+            with open(pk, "rb") as f:
+                for p, s, o in kspkg.iter_entries(pk):
+                    low = p.lower().replace("/", chr(92))
+                    if low not in want or want[low] in out:
+                        continue
+                    try:
+                        blob = bytes(kspkg.read_entry(f, s, o, p))
+                        info = _color_from_blob(blob)
+                        if info.get("name"):
+                            out[want[low]] = info["name"]
+                    except Exception:
+                        continue
+        except Exception as ex:
+            logs.LOG.debug("livery names %s: %s", os.path.basename(pk), ex)
+    if out:
+        _NAMES[model] = {"key": ck, "names": out}
+        _save_names()
+    return out
+
+
+NAMES_CACHE = os.path.join(config.DATA, "livery_names.json")
+_NAMES = {}
+
+
+def _names_key(model):
+    """Changes when the packages a model could come from change."""
+    bits = []
+    try:
+        for pk in (viewer._package_for(model), viewer.package()):
+            if pk and os.path.isfile(pk):
+                st = os.stat(pk)
+                bits.append(f"{os.path.basename(pk)}:{st.st_mtime_ns}:{st.st_size}")
+    except Exception:
+        pass
+    return "|".join(sorted(set(bits)))
+
+
+def _names_cache():
+    if _NAMES:
+        return _NAMES
+    try:
+        _NAMES.update(json.load(open(NAMES_CACHE, encoding="utf-8")))
+    except Exception:
+        pass
+    return _NAMES
+
+
+def _save_names():
+    try:
+        os.makedirs(config.DATA, exist_ok=True)
+        json.dump(_NAMES, open(NAMES_CACHE, "w", encoding="utf-8"))
+    except OSError as ex:
+        logs.LOG.debug("livery names cache: %s", ex)
+
+
+def _read_from_packages(want, pkg=None):
+    """One entry, from whichever package actually holds it.
+
+    ⚠ A modded car's paints live in ITS package, so reading them from the base
+    archive failed with a "could not read ...oemmultilayercolor" error
+    the moment you tried to change a modded car's colour. Order: the caller's
+    package if given, then the car's own (derived from the path), then the
+    base, then anything else installed - so a paint shared from somewhere
+    unexpected is still found rather than reported missing.
+    """
+    tried, order = [], []
+    if pkg:
+        order.append(pkg)
+    model = ""
+    parts = want.split("\\")
+    if len(parts) > 2 and parts[0] == "content" and parts[1] == "cars":
+        model = parts[2]
+    if model:
+        try:
+            own = viewer._package_for(model)
+            if own:
+                order.append(own)
+        except Exception:
+            pass
+    try:
+        base = viewer.package()
+        if base:
+            order.append(base)
+        order += [pk for _m, pk in viewer.packages() if pk]
+    except Exception:
+        pass
+    for pk in order:
+        if not pk or pk in tried or not os.path.isfile(pk):
+            continue
+        tried.append(pk)
+        try:
+            with open(pk, "rb") as f:
+                for p, s, o in kspkg.iter_entries(pk):
+                    if p.lower().replace("/", "\\") == want:
+                        return bytes(kspkg.read_entry(f, s, o, p))
+        except Exception as ex:
+            logs.LOG.debug("livery read %s: %s", os.path.basename(pk), ex)
+    return None
+
+
 def color_info(path, pkg=None):
     """Name, rgb and material params out of a .oemmultilayercolor.
 
@@ -127,16 +269,15 @@ def color_info(path, pkg=None):
     field number, because the values map straight onto the channel state and
     a missing one must stay missing rather than become a default.
     """
-    pkg = pkg or viewer.package()
     want = path.lower().replace("/", "\\")
-    blob = None
-    with open(pkg, "rb") as f:
-        for p, s, o in kspkg.iter_entries(pkg):
-            if p.lower().replace("/", "\\") == want:
-                blob = bytes(kspkg.read_entry(f, s, o, p))
-                break
+    blob = _read_from_packages(want, pkg)
     if blob is None:
         return {}
+    return _color_from_blob(blob, path)
+
+
+def _color_from_blob(blob, path=""):
+    """The decode, split out so a batched name lookup can reuse it."""
     out = {"path": path, "name": "", "rgb": None}
     # ⚠ Walk the fields properly. The first version searched for the 0x1a tag
     # byte with blob.find(), which silently matched a NAME LENGTH instead:
@@ -198,7 +339,11 @@ def designs(model, pkg=None):
     scraper that half-works is worse - it would offer colours the car does not
     allow, which is precisely what crashes the game.
     """
-    pkg = pkg or viewer.package()
+    # ⚠ The car's OWN package, not the base one. A mod ships its skins
+    # in its own .kspkg, so defaulting to the base archive found no
+    # designs at all and every modded car reported "no livery" - the
+    # whole class of them, not any particular mod.
+    pkg = pkg or viewer._package_for(model) or viewer.package()
     prefix = f"content\\cars\\{model}\\skins\\".lower()
     out = []
     with open(pkg, "rb") as f:
@@ -394,26 +539,50 @@ def populate(dry_run=False, pkg=None):
     if not d:
         return {"ok": False, "error": "no SavedCars folder - launch the game "
                                       "once so it creates your profile"}
-    pkg = pkg or viewer.package()
-    if not pkg:
+    # ⚠ EVERY package, not just the base one. A mod ships its shipped state in
+    # its own .kspkg, so a base-only scan gave garage records - and therefore
+    # a livery picker - to stock cars alone. viewer.packages() finds the mods
+    # folder itself, so no mod is named here.
+    if pkg:
+        pkgs = [pkg]
+    else:
+        try:
+            pkgs = [pk for _m, pk in viewer.packages() if pk]
+        except Exception:
+            pkgs = [viewer.package()]
+    pkgs = [pk for pk in dict.fromkeys(pkgs) if pk and os.path.isfile(pk)]
+    if not pkgs:
         return {"ok": False, "error": "content.kspkg not found"}
     have = {e["model"] for e in garage()}
-    shipped = states_in_package(pkg)
-    todo = sorted(m for m in shipped if m not in have)
+    # model -> (package, entry path) for the state we would copy
+    src_of = {}
+    for pk in pkgs:
+        for model, paths in states_in_package(pk).items():
+            if model not in have and model not in src_of and paths:
+                src_of[model] = (pk, sorted(paths)[0])
+    todo = sorted(src_of)
     made, failed = [], []
     if dry_run:
         return {"ok": True, "dry_run": True, "would_add": todo,
                 "already": sorted(have), "count": len(todo)}
 
-    with open(pkg, "rb") as f:
-        offs = {}
-        for path, size, off in kspkg.iter_entries(pkg):
+    # entry offsets, per package, built once
+    offs = {}
+    for pk in {p for p, _s in src_of.values()}:
+        table = {}
+        for path, size, off in kspkg.iter_entries(pk):
             if path.lower().endswith(".carfinalstate"):
-                offs[path] = (size, off)
+                table[path] = (size, off)
+        offs[pk] = table
+    handles = {}
+    try:
         for model in todo:
             try:
-                src = shipped[model][0]
-                size, off = offs[src]
+                pk, src = src_of[model]
+                if pk not in handles:
+                    handles[pk] = open(pk, "rb")
+                f = handles[pk]
+                size, off = offs[pk][src]
                 blob = bytes(kspkg.read_entry(f, size, off, src))
                 data = protos.new("CarFinalStateData")
                 if data is None:
@@ -436,6 +605,12 @@ def populate(dry_run=False, pkg=None):
             except Exception as ex:
                 logs.LOG.warning("livery: could not add %s: %s", model, ex)
                 failed.append({"model": model, "error": str(ex)})
+    finally:
+        for fh in handles.values():
+            try:
+                fh.close()
+            except OSError:
+                pass
     logs.LOG.info("livery: added %d saved car(s)", len(made))
     return {"ok": True, "added": made, "failed": failed,
             "count": len(made), "already": len(have)}

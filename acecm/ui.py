@@ -409,6 +409,32 @@ def _child_env():
     return winproc.child_env()
 
 
+def destroy():
+    """Close the window so the process unwinds and exits. Used by the self-
+    updater to make a running install let go of its .exe. Returns False when
+    there is no window (a headless instance), so the caller can hard-exit.
+
+    ⚠ Two kinds of window now. pywebview owns WINDOW; the Linux fallbacks
+    run the UI in a CHILD process (APP_PROC), and destroying nothing there
+    would leave the updater waiting on an exe the child still holds.
+    """
+    w = WINDOW
+    if w is not None:
+        try:
+            w.destroy()
+            return True
+        except Exception:
+            return False
+    proc = APP_PROC
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            return True
+        except Exception:
+            return False
+    return False
+
+
 def run(url, title="Assetto Corsa EVO Content Manager"):
     """Open the window. Blocks until it is closed.
 
@@ -451,7 +477,15 @@ def run(url, title="Assetto Corsa EVO Content Manager"):
             # autodetect imports each toolkit in turn, and a half-installed
             # Qt earlier in that order wins over a working GTK.
             kw["gui"] = gui
-        webview.start(**kw)
+        from . import logs
+        logs.LOG.info("opening native window at %s (backend=%s)",
+                      url, kw.get("gui") or "webview2")
+        try:
+            webview.start(**kw)
+        except Exception as ex:
+            logs.LOG.exception("native window failed: %s", ex)
+            raise
+        logs.LOG.info("native window closed")
         return
 
     # A frozen build cannot import the distro's PyGObject, but it can ask the

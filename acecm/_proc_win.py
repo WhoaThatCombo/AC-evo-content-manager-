@@ -146,6 +146,27 @@ def cmdline(pid):
         return ""
 
 
+def exe_path(pid):
+    """Full path of a process's executable, or "" if it cannot be read.
+
+    Needed to tell one ACECM from another: the name alone cannot distinguish
+    the installed copy from one run out of a build folder or a source tree.
+    """
+    h = _k32.OpenProcess(PROCESS_QUERY_LIMITED, False, int(pid))
+    if not h:
+        return ""
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return ""
+    except Exception:
+        return ""
+    finally:
+        _k32.CloseHandle(h)
+
+
 def pids_named(*names):
     """PIDs whose exe name matches any of `names` (with or without .exe)."""
     want = {_norm(n) for n in names}

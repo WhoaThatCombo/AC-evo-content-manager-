@@ -27,7 +27,7 @@ import urllib.request
 
 from . import config, logs
 
-VERSION = "0.15.0"
+VERSION = "1.0.0"
 _ROLLBACK = None
 NAME = "Assetto Corsa EVO Content Manager"
 
@@ -394,9 +394,14 @@ def schedule_relaunch(exe, pid, bat=None):
         f.writelines(lines)
     CREATE_NO_WINDOW = 0x08000000
     CREATE_NEW_PROCESS_GROUP = 0x00000200
+    # ⚠ env: the batch re-launches ACECM.exe, so without scrubbing PyInstaller's
+    # _MEIPASS2 the relaunched app reuses THIS process's extraction folder and
+    # the exiting copy cannot delete it ("Failed to remove temporary
+    # directory"). cmd inherits our environment and passes it straight on.
+    from . import winproc as _wpv
     subprocess.Popen(["cmd", "/c", bat],
                      creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
-                     close_fds=True, cwd=config.DATA)
+                     close_fds=True, env=_wpv.child_env(), cwd=config.DATA)
     return bat
 
 
@@ -660,9 +665,14 @@ def apply(url=None, sha256=None):
     # when this process and its group go away.
     CREATE_NO_WINDOW = 0x08000000
     CREATE_NEW_PROCESS_GROUP = 0x00000200
+    # ⚠ env: the batch re-launches ACECM.exe, so without scrubbing PyInstaller's
+    # _MEIPASS2 the relaunched app reuses THIS process's extraction folder and
+    # the exiting copy cannot delete it ("Failed to remove temporary
+    # directory"). cmd inherits our environment and passes it straight on.
+    from . import winproc as _wpv
     subprocess.Popen(["cmd", "/c", bat],
                      creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
-                     close_fds=True, cwd=config.DATA)
+                     close_fds=True, env=_wpv.child_env(), cwd=config.DATA)
     logs.LOG.info("update to %s downloaded and verified; swap scheduled (%s)",
                   info.get("latest"), blog)
     return {"ok": True, "version": info.get("latest"), "log": blog,

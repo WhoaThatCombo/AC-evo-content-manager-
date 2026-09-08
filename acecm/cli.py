@@ -41,6 +41,7 @@ def _run_tool(name, argv):
         return 0
     # Frozen or not, the tool scripts live somewhere findable; run them as
     # __main__ so their `if __name__ == "__main__"` blocks fire.
+    # tool_script already resolves .py (dev) or .pyc (hardened release).
     path = config.tool_script(name + ".py")
     if not os.path.isfile(path):
         print(f"tool not found: {path}")
@@ -66,7 +67,38 @@ def _take_opt(name):
     return val
 
 
+# Modes that exist to be READ in a terminal. Everything else is the desktop
+# app, which must never show a console window - see winproc.ensure_console.
+_CONSOLE_ARGS = ("--tool", "--headless", "--no-ui", "--install", "--uninstall",
+                 "--help", "-h", "--version", "--update-check")
+
+
+def _console_bootstrap():
+    """Decide whether this run gets a console, before anything prints.
+
+    ⚠ FIRST thing in main(). The shipped exe is a GUI-subsystem binary with no
+    stdout, so a bare print() anywhere before this raises AttributeError - and
+    a --console build instead shows a black window behind the app for the whole
+    startup, which is the thing this exists to stop.
+    """
+    try:
+        from . import winproc
+    except Exception:
+        return
+    wants = any(a in _CONSOLE_ARGS for a in sys.argv[1:])
+    # a --tool child is a background process: attach to a terminal if one is
+    # already there, but never conjure a window for it.
+    tool = len(sys.argv) > 1 and sys.argv[1] == "--tool"
+    try:
+        if wants:
+            winproc.ensure_console(alloc=not tool)
+        winproc.safe_stdio()
+    except Exception:
+        pass
+
+
 def main():
+    _console_bootstrap()
     if len(sys.argv) > 2 and sys.argv[1] == "--tool":
         raise SystemExit(_run_tool(sys.argv[2], sys.argv[3:]))
     # Written by the update swap script. The new exe must create this
@@ -98,6 +130,79 @@ def main():
             print(f"  shortcut: {s}")
         print("launch it from the Start Menu from now on")
         raise SystemExit(0)
+    # A support/diagnostic switch: print what the updater decides and exit,
+    # without showing the dialog. "it just boots and never offers" is
+    # otherwise invisible from outside the exe.
+    if "--update-check" in sys.argv:
+        from . import installer
+        import json as _json
+        try:
+            print(_json.dumps(installer.pending_update(), indent=2))
+        except Exception as ex:
+            print(f"pending_update() raised: {type(ex).__name__}: {ex}")
+            import traceback
+            traceback.print_exc()
+            raise SystemExit(2)
+        raise SystemExit(0)
+
+    # ----------------------------------------------------------------------
+    # Self-update on launch. A build run from OUTSIDE the install folder (i.e.
+    # a fresh download posted to Patreon) offers to replace an older installed
+    # copy, then relaunches it and exits. The installed copy never reaches
+    # this - installer.pending_update() short-circuits on running_installed,
+    # so there is no updater inside the app you launch normally.
+    #
+    # --no-update-prompt skips it (used by the swap relaunch, and handy for
+    # testing). Any failure here must fall through to a normal boot, never
+    # strand the user without an app.
+    # ----------------------------------------------------------------------
+    from . import config as _config
+    if _config.FROZEN and "--no-update-prompt" not in sys.argv and not _relaunch:
+        # ⚠ Say what was decided, and why. This branch used to swallow every
+        # exception into `pu = None` and run before logs.setup(), so a launch
+        # that quietly declined to offer an update left NO evidence anywhere -
+        # which is exactly what happened: the download just booted in place
+        # and the install was untouched, with nothing to explain it.
+        try:
+            from . import logs as _logs
+            _logs.setup()
+        except Exception:
+            _logs = None
+        pu = None
+        try:
+            from . import installer
+            pu = installer.pending_update()
+            if _logs:
+                _logs.LOG.info(
+                    "update check: this=%s installed=%s running_installed=%s "
+                    "installed_flag=%s -> offer=%s offer_install=%s",
+                    pu.get("this_version"), pu.get("installed_version"),
+                    pu.get("running_installed"), pu.get("installed"),
+                    pu.get("offer"), pu.get("offer_install"))
+        except Exception as ex:
+            if _logs:
+                _logs.exception("update check", ex)
+        if pu and (pu.get("offer") or pu.get("offer_install")):
+            update = pu.get("offer")
+            want = (installer.prompt_update(pu) if update
+                    else installer.prompt_install(pu))
+            if _logs:
+                _logs.LOG.info("update prompt answered: %s", want)
+            if want:
+                r = installer.apply_update(relaunch=update)
+                if r.get("ok"):
+                    # replaced (and, for an update, relaunched) the installed
+                    # copy - this download's job is done
+                    if not update:
+                        print(f"installed to {r['exe']}")
+                    raise SystemExit(0)
+                # the swap failed (most often: install still running and would
+                # not close). Say why, then boot this copy in place so the user
+                # is not left with nothing.
+                if _logs:
+                    _logs.LOG.warning("update failed: %s", r.get("error"))
+                installer.warn(r.get("error") or "update failed")
+
     # A native window is the default, but this is also a server tool - it has
     # to be runnable on a box with no desktop at all.
     mode = "window"

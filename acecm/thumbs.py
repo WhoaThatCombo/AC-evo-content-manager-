@@ -17,6 +17,7 @@ are left alone for now.
 ⚠ Rendering is serialised deliberately. Each car costs a GPU context and ~2 s,
 and firing 74 at once would fight the viewer the user may have open.
 """
+import hashlib
 import os
 import re
 import subprocess
@@ -29,7 +30,10 @@ from . import config, kspkg, logs, viewer
 CACHE = os.path.join(config.DATA, "thumbs")
 CARS = os.path.join(CACHE, "cars")
 TRACKS = os.path.join(CACHE, "tracks")
-SIZE = "480x320"
+# ⚠ The card on Drive is ~460px wide on a normal window, so a 480px render
+# was being displayed at roughly 1:1 and looked soft on any hi-dpi screen.
+# 900x600 costs the same single evoview launch and survives being shown big.
+SIZE = "900x600"
 # ⚠ The detail pane shows one car much larger than a list row does, and a
 # 480px render blown up to fill it is visibly soft - it reads as a low-quality
 # app rather than a low-resolution file. Big renders are made ON DEMAND for the
@@ -47,10 +51,78 @@ def _dirs():
         os.makedirs(d, exist_ok=True)
 
 
-def car_path(car_id, big=False):
+def car_path(car_id, big=False, visual="", paint=""):
+    """Where one car's render lives.
+
+    ⚠ Keyed by the LOOK, not just the model. A car's trims share one model
+    folder, so a model-only name meant "BMW M2 Coupe Standard" and
+    "Performance" fought over a single file - whichever rendered last won and
+    both rows showed it. The livery is in the key for the same reason: change
+    your colour and the old picture is no longer of your car.
+    """
     _dirs()
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", car_id)
-    return os.path.join(CARS, safe + ("@big.png" if big else ".png"))
+    tag = ""
+    if visual or paint:
+        raw = f"{visual}|{paint}".lower()
+        tag = "@" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+    return os.path.join(CARS, safe + tag + ("@big.png" if big else ".png"))
+
+
+def preset_look(preset_id):
+    """(model, visual preset, EXT SKIN paint) for a mechanical preset id.
+
+    The trim comes from the game's own preset data; the paint from the
+    player's garage, so the preview is of THEIR car rather than the showroom
+    default. Anything unknown comes back empty and the render falls back to
+    evoview's own defaults.
+    """
+    model = visual = paint = ""
+    try:
+        from . import carsmap
+        t = carsmap.table()
+        model = (t.get("presets") or {}).get(preset_id, "")
+        visual = ((t.get("variants") or {}).get(preset_id) or {}).get("visual", "")
+    except Exception:
+        pass
+    if not model:
+        model = preset_id
+    paint = _garage_paints().get(model, "")
+    return model, visual, paint
+
+
+_GARAGE = {"key": None, "map": {}}
+
+
+def _garage_paints():
+    """model -> the EXT SKIN paint the player has on it.
+
+    ⚠ Memoised. livery.garage() walks and parses every saved car (84 files
+    here), and preset_look() is called once per thumbnail REQUEST and once per
+    car in a render pass - so reading it each time turned one page of the car
+    list into thousands of file reads and stalled the render job before it
+    had listed a single car.
+    """
+    try:
+        from . import livery
+        d = livery._saved_cars_dir()
+        key = (d, os.path.getmtime(d)) if d and os.path.isdir(d) else (d, 0)
+    except Exception:
+        d, key = "", ("", 0)
+    if _GARAGE["key"] == key:
+        return _GARAGE["map"]
+    out = {}
+    try:
+        from . import livery
+        for c in livery.garage() or []:
+            model = c.get("model")
+            skin = ((c.get("slots") or {}).get("EXT SKIN") or "").strip()
+            if model and skin and model not in out:
+                out[model] = skin.replace(chr(92), "/").rsplit("/", 1)[-1]
+    except Exception as ex:
+        logs.LOG.info("garage paints: %s", ex)
+    _GARAGE["key"], _GARAGE["map"] = key, out
+    return out
 
 
 def track_path(folder):
@@ -60,7 +132,8 @@ def track_path(folder):
 
 # ------------------------------------------------------------------- cars --
 
-def render_car(car_id, force=False, timeout=180, make=True, big=False):
+def render_car(car_id, force=False, timeout=180, make=True, big=False,
+               visual="", paint=""):
     """One car, rendered by evoview into the cache. Returns the path or None.
 
     make=False (the list GET) never launches evoview. Typing in Drive used
@@ -69,7 +142,7 @@ def render_car(car_id, force=False, timeout=180, make=True, big=False):
     """
     if not car_id:
         return None
-    out = car_path(car_id, big=big)
+    out = car_path(car_id, big=big, visual=visual, paint=paint)
     if os.path.isfile(out) and not force:
         return out
     if not make:
@@ -82,12 +155,24 @@ def render_car(car_id, force=False, timeout=180, make=True, big=False):
         return None
     cmd = [exe, pkg, "--car", car_id, "--shot", out,
            "--size", BIG if big else SIZE,
-           "--yaw", "2.35", "--pitch", "0.17"]
+           "--yaw", "2.35", "--pitch", "0.17",
+           # zoom > 1 moves the camera closer (shot.rs: distance /= zoom).
+           # The default framing leaves a lot of empty floor around the car.
+           "--zoom", "1.35"]
     base = viewer.package()
     # a mod package holds only its own car; the base game supplies shared tyres
     if base and os.path.abspath(base) != os.path.abspath(pkg):
         cmd += ["--base", base]
     from . import winproc
+    # ⚠ Tell evoview WHICH trim and colour. Without EVOVIEW_VISUAL it takes
+    # the first visual preset it finds, so every trim of a car came out the
+    # same; EVOVIEW_PAINT overrides the showroom default with the colour the
+    # player actually has on the car.
+    env = winproc.child_env()
+    if visual:
+        env["EVOVIEW_VISUAL"] = visual
+    if paint:
+        env["EVOVIEW_PAINT"] = paint
     try:
         cmd, env = viewer.viewer_cmd(cmd)
         r = winproc.hidden_run(cmd, capture_output=True, text=True,
@@ -103,6 +188,12 @@ def render_car(car_id, force=False, timeout=180, make=True, big=False):
     return out
 
 
+def render_preset(preset_id, **kw):
+    """Render the car as this PRESET wears it - its trim and your livery."""
+    model, visual, paint = preset_look(preset_id)
+    return render_car(model, visual=visual, paint=paint, **kw)
+
+
 def build_all(force=False):
     """Render every car in the background; poll job() for progress."""
     with _LOCK:
@@ -112,26 +203,93 @@ def build_all(force=False):
                      "current": "", "made": 0})
 
     def run():
-        cars = viewer.index().get("cars", [])
-        _JOB["total"] = len(cars)
+        # ⚠ One render per PRESET, not per model: the picker asks for a
+        # picture of the trim you chose wearing your livery, so a pass over
+        # models alone left every trim row falling back to the same photo.
+        # Trims that look identical (the M2 CS Racing 350 and 450 differ
+        # mechanically) resolve to the same visual+paint and therefore the
+        # same cache file, so this costs no extra renders for them.
+        jobs = _render_jobs()
+        _JOB["total"] = len(jobs)
         t0 = time.time()
-        for i, c in enumerate(cars, 1):
-            _JOB["done"], _JOB["current"] = i, c.get("label") or c["id"]
+        for i, (pid, label, model, visual, paint) in enumerate(jobs, 1):
+            _JOB["done"], _JOB["current"] = i, label or pid
             try:
                 # ⚠ render_car returns the cached path for a car it did not
                 # render, so counting a truthy result made "made" equal to the
                 # number of cars looked at - a run that rendered 12 reported
                 # 86. Ask whether the file was there BEFORE.
-                had = os.path.isfile(car_path(c["id"]))
-                if render_car(c["id"], force) and (force or not had):
+                had = os.path.isfile(car_path(model, visual=visual,
+                                              paint=paint))
+                if (render_car(model, force, visual=visual, paint=paint)
+                        and (force or not had)):
                     _JOB["made"] += 1
             except Exception as ex:
-                logs.LOG.warning("thumb %s: %s", c["id"], ex)
+                logs.LOG.warning("thumb %s: %s", pid, ex)
         _JOB.update({"state": "done", "current": "",
                      "seconds": round(time.time() - t0, 1)})
 
     threading.Thread(target=run, daemon=True).start()
     return {"ok": True}
+
+
+def _render_jobs():
+    """(preset id, label, model, visual, paint) for everything the UI shows.
+
+    Falls back to the viewer's model list if the car inventory cannot be read,
+    so a broken catalogue degrades to the old behaviour instead of rendering
+    nothing at all.
+    """
+    jobs, seen = [], set()
+    try:
+        from . import content
+        for c in content.cars().get("cars", []):
+            pid = c.get("id")
+            if not pid:
+                continue
+            model, visual, paint = preset_look(pid)
+            key = (model, visual, paint)
+            if not model or key in seen:
+                continue
+            seen.add(key)
+            jobs.append((pid, c.get("label") or pid, model, visual, paint))
+    except Exception as ex:
+        logs.LOG.info("render jobs from content: %s", ex)
+    if jobs:
+        return jobs
+    return [(c["id"], c.get("label") or c["id"], c["id"], "", "")
+            for c in viewer.index().get("cars", []) if c.get("id")]
+
+
+def ensure_renders():
+    """Kick a background render pass when cars are missing their picture.
+
+    ⚠ The list GET deliberately never renders - doing so spawned an evoview
+    console per row on every Drive keystroke. The consequence was that a car
+    only ever got a picture if somebody happened to run a pass from the Cars
+    page, so newly installed or freshly fetched cars stayed blank tiles
+    indefinitely, and so did any stock car that was not present the last time
+    a pass ran.
+
+    Safe to call often: build_all() skips cars that already have a render and
+    refuses to start while one is running.
+    """
+    try:
+        if _JOB.get("state") == "running":
+            return False
+        # ⚠ Compare real FILES, not bare model ids. Renders are keyed by
+        # trim and livery now, so a name-based check against the model list
+        # said "all present" while every trim picture was still missing.
+        missing = [j for j in _render_jobs()
+                   if not os.path.isfile(car_path(j[2], visual=j[3],
+                                                  paint=j[4]))]
+        if not missing:
+            return False
+        build_all()
+        return True
+    except Exception as ex:
+        logs.LOG.info("ensure_renders: %s", ex)
+        return False
 
 
 def job():
@@ -181,8 +339,37 @@ def _cover_index():
     return _COVERS
 
 
+def _resolve_folder(folder):
+    """Accept either a folder id or the DISPLAY NAME the UI sometimes sends.
+
+    ⚠ The drive track list carries a display name in `track` for some layouts
+    ("Circuit Of The Americas" rather than "cota"), so the cover lookup missed
+    every Time Attack layout of COTA, Spa, Donington, Fuji, Red Bull Ring,
+    Sebring and Watkins Glen - which read as "some base game tracks have no
+    photo". Resolving here fixes it for every caller at once.
+    """
+    if not folder:
+        return folder
+    try:
+        from . import contentsync
+        m = contentsync.track_map()
+    except Exception:
+        return folder
+    if folder in set(m.values()):
+        return folder
+    hit = m.get(folder)
+    if hit:
+        return hit
+    low = folder.strip().lower()
+    for name, f in m.items():
+        if name.strip().lower() == low:
+            return f
+    return folder
+
+
 def track_cover(folder):
     """Path to a cached cover PNG, or None when the game ships none."""
+    folder = _resolve_folder(folder)
     out = track_path(folder)
     if os.path.isfile(out):
         return out

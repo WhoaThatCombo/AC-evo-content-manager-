@@ -167,6 +167,27 @@ def cmdline(pid):
     return " ".join(_cmdline(int(pid)))
 
 
+def exe_path(pid):
+    """Full path of a process's executable, or "" if it cannot be read.
+
+    /proc/<pid>/exe is the kernel's own answer, so it needs no parsing - but
+    it is readable only for our own processes, and it is a dangling link for
+    a deleted image (" (deleted)" appended). Callers use this to tell one
+    ACECM from another, which is exactly the case it answers well: our own
+    copies, still on disk.
+
+    ⚠ For a Windows binary under Proton this is the WINE loader, not the
+    .exe - identify those by cmdline (see _basenames), never by this.
+    """
+    try:
+        got = os.readlink(f"/proc/{int(pid)}/exe")
+    except (OSError, ValueError):
+        return ""
+    if got.endswith(" (deleted)"):
+        got = got[:-len(" (deleted)")]
+    return got
+
+
 def pids_named(*names):
     """PIDs whose image name matches any of `names` (with or without .exe)."""
     want = set().union(*(_norm(n) for n in names)) if names else set()

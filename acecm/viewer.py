@@ -422,12 +422,14 @@ def open_car(car_id, paint=""):
     cmd, env = viewer_cmd(cmd)
     if paint:
         env["EVOVIEW_PAINT"] = paint
-    kw = {}
-    if sys.platform == "win32":
-        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kw["start_new_session"] = True
-    subprocess.Popen(cmd, env=env, cwd=os.path.dirname(exe), **kw)
+    # ⚠ evoview.exe is a CONSOLE-subsystem binary (Rust's default), so under a
+    # GUI-subsystem ACECM it allocates its own console window - a black box
+    # beside the viewer every time one is opened. hidden_console_popen still
+    # GIVES it a console (CREATE_NO_WINDOW breaks console CRT startup - see the
+    # dedicated-server note) but hides the window.
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    _wp.hidden_console_popen(cmd, env=env, cwd=os.path.dirname(exe),
+                             creationflags=flags)
     _set(car_id, "open", "")
     return {"ok": True, "package": pkg}
 
@@ -465,13 +467,11 @@ def open_track(folder):
             raise RuntimeError("game install not found")
         cmd = [exe, pkg, "--track", folder]
         src = pkg
-    cmd, env = viewer_cmd(cmd)
-    kw = {}
-    if sys.platform == "win32":
-        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kw["start_new_session"] = True
-    subprocess.Popen(cmd, env=env, cwd=os.path.dirname(exe), **kw)
+    # same as open_car: give it a console, hide the window
+    from . import winproc as _wp
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    _wp.hidden_console_popen(cmd, cwd=os.path.dirname(exe),
+                             creationflags=flags)
     _set("track:" + folder, "open", "")
     logs.LOG.info("viewer track %s from %s", folder, src)
     return {"ok": True, "folder": folder, "source": src}

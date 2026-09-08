@@ -22,11 +22,11 @@ from . import (auth, backend, config, content, contentsync, detect, drive,
                push as pushmod,
                gameui, hooking, hotkey, install,
                installer,
-               logs, lobby, netutil, overview, patching, penalties, realai,
+               logs, lobby, netutil, overview, patching, penalties,
                shell,
                version,
                registry, servers, settings as gamesettings,
-               telemetry, thumbs, tracks as trackdeploy, viewer)
+               telemetry, thumbs, tracks as trackdeploy, viewer, winproc)
 
 
 _INSTALL = {"state": "idle", "detail": "", "done": 0, "total": 0, "files": []}
@@ -325,10 +325,15 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/lobby":
                 return _json(self, {"path": lobby.PATH, "lobby": lobby.read(),
                                     "lan_ip": netutil.lan_ipv4()})
-            if path == "/api/game/worker":
-                return _json(self, realai.worker_status())
             if path == "/api/drive":
+                # Fills in any car that has no picture yet, in the background.
+                # Cheap when everything is rendered, and it is what makes newly
+                # installed or fetched cars stop being blank tiles.
+                thumbs.ensure_renders()
                 return _json(self, drive.options())
+            if path == "/api/assists":
+                from . import assists
+                return _json(self, assists.read())
             if path == "/api/progress":
                 return _json(self, _progress())
             if path == "/api/drop/status":
@@ -372,6 +377,14 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"ok": True, "cars": livery.garage()}
                 if model:
                     out["allowed"] = livery.allowed(model)
+                    # the paints' own display names, so the picker can show
+                    # "Zandvoort Blue" instead of the filename's leftovers
+                    # (a modded car's ac1_paint_4 read as just "4")
+                    try:
+                        out["names"] = livery.color_names(
+                            model, out["allowed"].get("EXT SKIN") or [])
+                    except Exception:
+                        out["names"] = {}
                     out["designs"] = [
                         {"name": d["name"], "slots": sorted(d["slots"])}
                         for d in livery.designs(model)]
@@ -384,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
                 out = []
                 for p in servers.load():
                     out.append({"id": p.get("id"), "name": p.get("name"),
-                                "needs": autoshare.needs(p),
+                                "needs": autoshare.share_needs(p),
                                 "gaps": autoshare.server_gaps(p)})
                 return _json(self, {"ok": True, "servers": out})
             if path in ("/live", "/live.html"):
@@ -431,14 +444,54 @@ class Handler(BaseHTTPRequestHandler):
                 big = (q.get("big") or ["0"])[0] == "1"
                 force = (q.get("force") or ["0"])[0] == "1"
                 cid = (q.get("id") or [""])[0]
+                # ⚠ preset, not just model: a car's trims share one model
+                # folder, so without this every trim showed the same picture
+                # and your livery never appeared at all.
+                pid = (q.get("preset") or [""])[0]
+                visual = paint = ""
+                if pid:
+                    model, visual, paint = thumbs.preset_look(pid)
+                    cid = cid or model
                 if big:
                     shot = thumbs.render_car(cid, big=True, force=force,
-                                             make=True)
+                                             make=True, visual=visual,
+                                             paint=paint)
                     # fall back to the small one rather than showing nothing
                     return self._send_png(shot or thumbs.render_car(
-                        cid, make=False))
-                return self._send_png(thumbs.render_car(cid, make=False,
-                                                        force=force))
+                        cid, make=False, visual=visual, paint=paint)
+                        or thumbs.render_car(cid, make=False))
+                # ⚠ make=1 is for the ONE car on the Drive card, never for
+                # list rows. Changing your livery makes a picture that has
+                # never been rendered, and the fallback below would then serve
+                # the old colour forever - "saved" with the wrong car on
+                # screen. One deliberate render is worth ~2s; 100 are not.
+                make = (q.get("make") or ["0"])[0] == "1"
+                shot = thumbs.render_car(cid, make=make, force=force,
+                                         visual=visual, paint=paint)
+                # ⚠ Fall back to the plain model render while the trim-and-
+                # livery one has not been made yet. Without this every list row
+                # went blank the moment presets were added to the key.
+                if not shot and (visual or paint):
+                    shot = thumbs.render_car(cid, make=False)
+                return self._send_png(shot)
+            if path == "/api/pack/preview":
+                # what a shareable package for this server would hold
+                from . import pack
+                sid = (q.get("id") or [""])[0]
+                prof = next((x for x in servers.load()
+                             if str(x.get("id")) == sid), None)
+                if not prof:
+                    return _json(self, {"ok": False, "error": "no such server"})
+                return _json(self, pack.preview(prof))
+            if path == "/api/car/specs":
+                # Headline numbers read from the game's own physics files.
+                from . import carspecs
+                pid = (q.get("preset") or [""])[0]
+                mid = (q.get("id") or [""])[0]
+                return _json(self, {"ok": True,
+                                    "specs": (carspecs.for_preset(pid)
+                                              if pid else
+                                              carspecs.for_model(mid))})
             if path == "/api/thumb/track":
                 return self._send_png(thumbs.track_cover(
                     (q.get("folder") or [""])[0]))
@@ -635,6 +688,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/viewer/open_track":
                 return _json(self, viewer.start_open_track(
                     body.get("folder") or body.get("id") or ""))
+            if path == "/api/assists":
+                from . import assists
+                return _json(self, assists.write(body or {}))
             if path == "/api/profiles/save":
                 return _json(self, servers.upsert(body))
             if path == "/api/profiles/delete":
@@ -799,6 +855,16 @@ class Handler(BaseHTTPRequestHandler):
                     return _json(self, livery.depopulate())
                 return _json(self, livery.populate(
                     dry_run=bool(body.get("dry_run"))))
+            if path == "/api/app/quit":
+                # The self-updater (a freshly downloaded exe) asks the running
+                # install to exit so its .exe unlocks and can be replaced. No
+                # relaunch here - the updater starts the new copy itself.
+                # ⚠ Loopback only: a remote peer must never be able to kill
+                # this app.
+                if not self._peer_local():
+                    return self._deny_remote()
+                from . import installer
+                return _json(self, installer.quit_now())
             if path == "/api/app/show":
                 # A second launch asks the instance that owns the window to
                 # raise it, rather than opening a rival webview on the same
@@ -896,6 +962,12 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("id"), bool(body.get("baseline_ai"))))
             if path == "/api/telemetry/stop":
                 return _json(self, telemetry.stop(body.get("id")))
+            if path == "/api/share/track":
+                from . import autoshare
+                return _json(self, autoshare.set_track(
+                    body.get("folder") or body.get("name") or "",
+                    body.get("share"),
+                    body.get("label") or ""))
             if path == "/api/registry/save":
                 return _json(self, registry.upsert(body))
             if path == "/api/registry/delete":
@@ -971,18 +1043,21 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/join":
                 return _json(self, backend.join(body.get("id"),
                                                 body.get("shape", "bare")))
+            if path == "/api/pack/build":
+                # ⚠ Local only: it writes a multi-gigabyte file to a path on
+                # this machine, which is not something a remote caller gets
+                # to choose.
+                if not self._peer_local():
+                    return self._deny_remote()
+                from . import pack
+                sid = str(body.get("id") or "")
+                prof = next((x for x in servers.load()
+                             if str(x.get("id")) == sid), None)
+                if not prof:
+                    return _json(self, {"ok": False, "error": "no such server"})
+                return _json(self, pack.build(prof, body.get("dest") or None))
             if path == "/api/game/launch":
                 return _json(self, backend.launch_game())
-            if path == "/api/game/launch_ai":
-                return _json(self, realai.launch(
-                    int(body.get("opponents") or 16),
-                    int(body.get("min_strength") or 70),
-                    int(body.get("max_strength") or 95),
-                    bool(body.get("small_window"))))
-            if path == "/api/game/attach_worker":
-                return _json(self, realai.attach_worker(
-                    body.get("id") or "",
-                    body.get("ai_player", True)))
             if path == "/api/drive":
                 return _json(self, drive.start(body))
             if path == "/api/drive/direct":
@@ -1226,10 +1301,28 @@ class Handler(BaseHTTPRequestHandler):
         # persistent profile otherwise keeps serving yesterday's app.js.
         if rel == "index.html":
             tag = version.VERSION.encode("ascii", "replace")
+            # From source the version string does not move, so WebView2 would
+            # keep yesterday's JS. Stamp the files' mtime instead.
+            if not config.FROZEN:
+                try:
+                    stamp = max(
+                        os.path.getmtime(os.path.join(config.WEB, "app.js")),
+                        os.path.getmtime(os.path.join(config.WEB, "style.css")),
+                    )
+                    tag = str(int(stamp)).encode("ascii")
+                except OSError:
+                    pass
             data = data.replace(b'href="/style.css"',
                                 b'href="/style.css?v=' + tag + b'"')
             data = data.replace(b'src="/app.js"',
                                 b'src="/app.js?v=' + tag + b'"')
+            # ⚠ The theme is ALSO kept in config, not only in localStorage:
+            # an update wipes the webview profile (see ui._storage_path) and
+            # took the user's accent with it. Injected here so it applies
+            # before first paint, with no flash of the default.
+            theme = str(config.CFG.get("ui_theme") or "").strip()
+            safe = "".join(c for c in theme if c.isalnum() or c in "-_")[:24]
+            data = data.replace(b"__ACECM_THEME__", safe.encode("ascii", "ignore"))
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -1260,7 +1353,7 @@ def _allow_share_port(port):
                       port, port, port)
         return
     try:
-        subprocess.run(
+        winproc.hidden_run(
             ["netsh", "advfirewall", "firewall", "delete", "rule",
              f"name={old}"],
             capture_output=True, text=True, timeout=8)
@@ -1269,7 +1362,7 @@ def _allow_share_port(port):
         # over from an earlier build - scoped to a profile this machine is
         # no longer on - could never be repaired, and sharing stayed broken
         # with nothing in the log to say why.
-        subprocess.run(
+        winproc.hidden_run(
             ["netsh", "advfirewall", "firewall", "delete", "rule",
              f"name={name}"],
             capture_output=True, text=True, timeout=8)
@@ -1281,7 +1374,7 @@ def _allow_share_port(port):
         # the port is closed", on a machine whose firewall looks configured.
         # The exposure is the share GETs only: admin routes refuse any peer
         # that is not loopback.
-        r = subprocess.run(
+        r = winproc.hidden_run(
             ["netsh", "advfirewall", "firewall", "add", "rule",
              f"name={name}", "dir=in", "action=allow", "protocol=TCP",
              f"localport={int(port)}", "profile=any"],
@@ -1452,6 +1545,20 @@ class AlreadyRunning(Exception):
     """An ACECM is already serving; its URL is the argument."""
 
 
+def _raise_window(url):
+    """Ask the instance on `url` to show its native window. False if it has none."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url + "/api/app/show", data=b"{}",
+                                     headers={"Content-Type":
+                                              "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return bool((json.loads(r.read()) or {}).get("ok"))
+    except Exception as exc:
+        logs.LOG.info("could not raise the running window: %s", exc)
+        return False
+
+
 def _acecm_answering(port):
     """Is the thing on this port one of ours?"""
     import urllib.request
@@ -1504,12 +1611,32 @@ def serve():
     # meant a joiner's 4s probe timed out and the host looked like it was not
     # running ACECM until they had retried enough times.
     threading.Thread(target=registry.warm_public_list, daemon=True).start()
+    # Reclaim leaked onefile extraction folders (see installer.sweep_bundles).
+    # Background: it walks %TEMP% and can delete gigabytes, and nothing on the
+    # first page depends on it.
+    def _sweep():
+        try:
+            from . import installer as _inst
+            _inst.sweep_bundles()
+        except Exception as ex:
+            logs.LOG.warning("bundle sweep: %s", ex)
+    threading.Thread(target=_sweep, daemon=True).start()
     # entries written before autofill existed carry no address and a default
     # port; one pass at startup settles them
     try:
         registry.backfill()
     except Exception as ex:
         logs.LOG.warning("registry backfill: %s", ex)
+    # Drop leftover "(hosted here)" rows from old track deploys, then publish
+    # only what the saved profiles actually need.
+    try:
+        from . import autoshare
+        profs = servers.load()
+        autoshare.prune(profs)
+        for p in profs:
+            autoshare.publish(p)
+    except Exception as ex:
+        logs.LOG.warning("autoshare at start: %s", ex)
     _watch_lobby()
     _watch_hud()
     hotkey.watch()
@@ -1605,9 +1732,10 @@ def main(mode="window", okflag=None, relaunch=False):
         srv, url = serve()
     except AlreadyRunning as ex:
         # Second launch: ask the instance that is already there to show itself.
-        # ⚠ Do NOT open our own window here. Two webviews cannot share one
-        # WebView2 user-data folder: the newcomer takes the profile and the
-        # running instance dies, so "launch twice" became "close the app".
+        # ⚠ Do NOT open our own window while that one still has one. Two
+        # webviews cannot share one WebView2 user-data folder: the newcomer
+        # takes the profile and the running instance dies, so "launch twice"
+        # became "close the app".
         url = str(ex)
         # ⚠ CONFIRM THE UPDATE ANYWAY. This binary started fine - another
         # instance simply owns the port. The swap script restores the previous
@@ -1617,24 +1745,35 @@ def main(mode="window", okflag=None, relaunch=False):
         # why. Deferring to a running instance is not a failed start.
         from . import version as _v
         _v.confirm_update(okflag)
-        import urllib.request
-        shown = False
+        shown = _raise_window(url)
+        if shown:
+            logs.LOG.info("ACECM already running; raised its window")
+            return
+        # Occupant has no native window: --headless, a leftover preview, or
+        # an old copy that opened the default browser and never created one.
+        # Opening a browser tab here is what made the Start Menu shortcut look
+        # like ACECM "is a website". Take over and host the window ourselves.
+        if mode != "window":
+            logs.LOG.info("ACECM already serving at %s (mode=%s, no window)",
+                          url, mode)
+            if mode == "browser":
+                # ⚠ shell.open_url, not os.startfile: startfile does not
+                # exist off Windows, so this line was an AttributeError on
+                # Linux at exactly the moment the user asked for a browser.
+                shell.open_url(url)
+            return
+        logs.LOG.info("ACECM already running without a window; taking over")
+        # any ACECM will do here: we only want the port back
+        installer._ask_installed_to_quit(any_acecm=True)
+        # Handover wait in serve() only runs for a swap relaunch. Pretend
+        # that so we sit on the port until the occupant actually exits.
+        _JUST_UPDATED = True
         try:
-            req = urllib.request.Request(url + "/api/app/show", data=b"{}",
-                                         headers={"Content-Type":
-                                                  "application/json"})
-            with urllib.request.urlopen(req, timeout=5) as r:
-                shown = bool((json.loads(r.read()) or {}).get("ok"))
-        except Exception as exc:
-            logs.LOG.info("could not raise the running window: %s", exc)
-        logs.LOG.info("ACECM already running; %s",
-                      "raised its window" if shown
-                      else "opening it in the browser instead")
-        if not shown:
-            # Headless instance (no window to raise), so give the user
-            # something rather than nothing.
-            shell.open_url(url)
-        return
+            srv, url = serve()
+        except AlreadyRunning:
+            _fatal("ACECM is already running without a window and did not "
+                   "exit when asked.\n\nClose the leftover process, then "
+                   "start ACECM again.")
     # HTTP is up — this binary is good enough to keep. Write the flag
     # the swap script is waiting on BEFORE opening the window, so a
     # later window close is not mistaken for a failed update.

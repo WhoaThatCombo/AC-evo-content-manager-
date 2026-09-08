@@ -26,16 +26,24 @@ STATE = os.path.join(config.DATA, "drive.json")
 # that is not in this build. Offering them meant picking a mode that silently
 # would not load, so they are not offered.
 #
-# HOTLAP, HOTSTINT and TEST_DRIVE are kept: they have no save on this machine
-# either way, so there is no evidence against them, and removing a mode that
-# works is worse than listing one that might not.
+# ⚠ SP_MODES is the ACCEPTED set, OFFERED_MODES is what the picker lists, and
+# they are deliberately different. HOTLAP, HOTSTINT and TEST_DRIVE are no
+# longer offered (asked for 2026-09-07), but a profile that already has one
+# saved must keep working rather than being rejected as an unknown mode.
 SP_MODES = [
     "PRACTICE", "INSTANT_RACE", "HOTLAP", "HOTSTINT",
     "RACE_WEEKEND", "TEST_DRIVE",
 ]
+OFFERED_MODES = ["PRACTICE", "INSTANT_RACE", "RACE_WEEKEND"]
 
 AI_MODES = ("INSTANT_RACE", "RACE_WEEKEND")
-AGGRO = ("Safe", "Normal", "Competitive")
+# ⚠ EXACTLY what the game's own slider offers:
+#     <ks-slider values=["Safe","Preview"] data-setting="aggressivness">
+# The protobuf enum also has Normal and Competitive, but the menu has no
+# label for them - selecting one would render "undefined", the same way an
+# off-list time multiplier did. Offering them was offering two settings the
+# game cannot show.
+AGGRO = ("Safe", "Preview")
 
 _DEFAULT = {
     "via": "sp",
@@ -49,6 +57,7 @@ _DEFAULT = {
     "custom_track": "",
     "game_mode": "PRACTICE",
     "weather": "CLEAR",
+    "grip": "OPTIMUM",
     "tod_hour": 13,
     "tod_minute": 0,
     "num_opponents": 10,
@@ -61,6 +70,9 @@ _DEFAULT = {
     "quali_min": 15,
     "warmup_min": 10,
     "race_laps": 10,
+    "race_type": "LAPS",
+    "race_minutes": 20,
+    "time_mult": 1,
     "starting_position": 0,
 }
 
@@ -123,6 +135,47 @@ def _aggro(pick):
     return "Safe"
 
 
+# ⚠ Straight out of the game's own UI bundle (uiresources/js/components.js):
+#     <ks-slider values="[1,2,4,6,12,24,48]" data-setting="time_multiplier">
+# The slider accepts NOTHING else. Writing 7 made the game render
+# "undefined X" and apply no multiplier at all, which is why this setting
+# looked broken. Same source gives the other limits below.
+TIME_MULTIPLIERS = (1, 2, 4, 6, 12, 24, 48)
+MAX_OPPONENTS = 32          # ks-slider num_opponents min=1 max=32
+SKILL_MIN, SKILL_MAX = 80, 100   # ks-slider skill min=80 max=100
+START_TIME_STEP_MIN = 5     # ks-slider starttime min=0 max=1435 step=5
+
+
+def _time_mult(pick):
+    """The nearest multiplier the game will actually accept."""
+    try:
+        want = float(pick.get("time_mult", 1) or 1)
+    except (TypeError, ValueError):
+        want = 1.0
+    return min(TIME_MULTIPLIERS, key=lambda v: (abs(v - want), v))
+
+
+def _race_type(pick):
+    """LAPS or TIME - the game's RACE TYPE toggle."""
+    return "TIME" if str(pick.get("race_type") or "LAPS").upper() == "TIME"         else "LAPS"
+
+
+def _race_duration(pick):
+    """Laps, or seconds when the race is timed."""
+    if _race_type(pick) == "TIME":
+        return _pint(pick, "race_minutes", 1, 600, 20) * 60
+    return _pint(pick, "race_laps", 1, 200, 10)
+
+
+def _set_race_duration(sess, pick):
+    sess.duration = _race_duration(pick)
+    try:
+        _set_enum(sess, "duration_type",
+                  "GameModeSelectionDuration_" + _race_type(pick))
+    except ValueError:
+        pass
+
+
 def _apply_mode_fields(obj, pick, mode):
     """num_opponents / skill live on session 0 (sessionZero). Race
     Weekend keeps practice / quali / warmup / race as sessions 1-3."""
@@ -135,8 +188,7 @@ def _apply_mode_fields(obj, pick, mode):
              _pint(pick, "quali_min", 1, 120, 15) * 60),
             ("Warmup", "TIME",
              _pint(pick, "warmup_min", 0, 60, 10) * 60),
-            ("Race", "LAPS",
-             _pint(pick, "race_laps", 1, 200, 10)),
+            ("Race", _race_type(pick), _race_duration(pick)),
         ]
         while len(obj.sessions) < 4:
             obj.sessions.add()
@@ -150,6 +202,16 @@ def _apply_mode_fields(obj, pick, mode):
                           "GameModeSelectionDuration_" + dur_t)
             except ValueError:
                 pass
+            # ⚠ Only session 0 carries the AI settings - that is the game's
+            # own convention (its untouched file has opponents 9 / skill 88-92
+            # on Practice and 0 / 0-0 on the other three). Leaving stray
+            # values on the rest writes skill 0, which is off the bottom of a
+            # slider that starts at 80.
+            if i:
+                s.num_opponents = 0
+                s.min_strength = 0
+                s.max_strength = 0
+                s.single_make = False
     elif not obj.sessions:
         obj.sessions.add()
 
@@ -162,20 +224,18 @@ def _apply_mode_fields(obj, pick, mode):
         except ValueError:
             pass
     elif short == "INSTANT_RACE":
-        sess.duration = _pint(pick, "race_laps", 1, 200, 10)
-        try:
-            _set_enum(sess, "duration_type",
-                      "GameModeSelectionDuration_LAPS")
-        except ValueError:
-            pass
+        # ⚠ The game's RACE TYPE toggle: a race is LAPS or TIME, and the unit
+        # of `duration` follows it (laps, or SECONDS). Hardcoding LAPS meant a
+        # timed race could not be set up here at all.
+        _set_race_duration(sess, pick)
         pos = _pint(pick, "starting_position", 0, 40, 0)
         if pos:
             sess.starting_position = pos
 
     if short in AI_MODES:
-        sess.num_opponents = _pint(pick, "num_opponents", 1, 40, 10)
-        sess.min_strength = _pint(pick, "skill_min", 0, 100, 80)
-        sess.max_strength = _pint(pick, "skill_max", 0, 100, 95)
+        sess.num_opponents = _pint(pick, "num_opponents", 1, MAX_OPPONENTS, 10)
+        sess.min_strength = _pint(pick, "skill_min", SKILL_MIN, SKILL_MAX, 80)
+        sess.max_strength = _pint(pick, "skill_max", SKILL_MIN, SKILL_MAX, 95)
         if sess.max_strength < sess.min_strength:
             sess.min_strength, sess.max_strength = (
                 sess.max_strength, sess.min_strength)
@@ -205,6 +265,46 @@ def _event(pick):
             return hit
     idx = int(pick.get("track_index") or 0)
     return next((t for t in tracks if t.get("index") == idx), None)
+
+
+def _set_grip(last, wname, grip):
+    """Set initial_grip on the weather preset this session uses.
+
+    The game models track grip as three states, not a continuous value:
+    UIInitialGrip_GREEN / _FAST / _OPTIMUM. The only continuous grip in the
+    schema (DynamicTrackCondition.initial_grip) belongs to championship data,
+    which this path never writes - so three steps is the honest control.
+    """
+    # ⚠ Match on the SUFFIX, not a guessed prefix. Two grip enums exist -
+    # UIInitialGrip_* on the UI messages and InitialGrip_* on the weather data
+    # this actually writes - so building "UIInitialGrip_OPTIMUM" here never
+    # matched and grip was silently never applied (it only logged a warning).
+    want = str(grip or "OPTIMUM").strip().upper()
+    try:
+        fld = last.weather_data[0].DESCRIPTOR.fields_by_name["initial_grip"]
+        val = next((v for v in fld.enum_type.values
+                    if v.name.rsplit("_", 1)[-1].upper() == want), None)
+        if val is None:
+            logs.LOG.warning("drive unknown grip %s (have %s)", grip,
+                             ", ".join(v.name for v in fld.enum_type.values))
+            return False
+        tfld = last.weather_data[0].DESCRIPTOR.fields_by_name["type"]
+        target = tfld.enum_type.values_by_name.get(wname)
+        hit = False
+        for w in last.weather_data:
+            if target is not None and w.type != target.number:
+                continue
+            w.initial_grip = val.number
+            hit = True
+        if not hit and last.weather_data:
+            # the selected preset is not in the library - do not guess at
+            # another entry, say so instead of changing the wrong weather
+            logs.LOG.warning("drive: no weather_data entry for %s; grip "
+                             "not applied", wname)
+        return hit
+    except Exception as ex:
+        logs.LOG.warning("drive grip: %s", ex)
+        return False
 
 
 def _car_model(preset_id):
@@ -274,15 +374,19 @@ def _write_gamemode(pick):
     if not sess.name:
         sess.name = (pick.get("game_mode") or "PRACTICE").replace("_", " ").title()
     hour = _pint(pick, "tod_hour", 0, 23, 13)
+    # the game's start-time slider steps in 5 minutes; an off-step value has
+    # no position on it
     minute = _pint(pick, "tod_minute", 0, 59, 0)
+    minute = min(55, (minute // START_TIME_STEP_MIN) * START_TIME_STEP_MIN)
     for s in obj.sessions:
         tod = s.time_of_day
         if not tod.year:
             tod.year, tod.month, tod.day = 2014, 8, 15
         tod.hour = hour
         tod.minute = minute
-        if not tod.time_multiplier:
-            tod.time_multiplier = 1.0
+        # ⚠ The game's TIME MULTIPLIER slider. It was only ever defaulted to
+        # 1x when unset, so the setting could not be changed from here at all.
+        tod.time_multiplier = float(_time_mult(pick))
         ti = s.track_item
         ti.name = ev.get("track") or ti.name
         ti.layout = ev.get("layout") or ti.layout
@@ -304,7 +408,15 @@ def _write_gamemode(pick):
         m.is_enabled = True
 
     _backup(save_path)
-    open(save_path, "wb").write(obj.SerializeToString())
+    # ⚠ Explicit close + flush. `open(...).write(...)` leaves the flush to
+    # refcounting, and anything that reads the file straight afterwards - the
+    # game we are about to launch, or a verification pass - can see the
+    # PREVIOUS contents. Two "the value did not stick" scares traced back to
+    # exactly this.
+    with open(save_path, "wb") as fh:
+        fh.write(obj.SerializeToString())
+        fh.flush()
+        os.fsync(fh.fileno())
 
     wname = "GameModeSelectionWeatherType_" + (
         pick.get("weather") or "CLEAR").strip().upper()
@@ -327,8 +439,17 @@ def _write_gamemode(pick):
                     last.weather_data[0].type = clear.number
             except Exception:
                 pass
+        # ⚠ Track grip is stored PER WEATHER PRESET, not once per session -
+        # weather_data[] is the library and each entry carries its own
+        # initial_grip. Stamp only the entry this session will actually use
+        # (the one whose type matches weather_type), so choosing GREEN for a
+        # wet run does not silently change your dry sessions too.
+        _set_grip(last, wname, pick.get("grip") or "OPTIMUM")
         _backup(last_path)
-        open(last_path, "wb").write(last.SerializeToString())
+        with open(last_path, "wb") as fh:
+            fh.write(last.SerializeToString())
+            fh.flush()
+            os.fsync(fh.fileno())
 
     ti = sess.track_item
     logs.LOG.info(
@@ -542,7 +663,11 @@ def _run_local(pick):
             return
     lobby.write(prof)
     try:
-        lobby.refresh()
+        # ⚠ name the server we are advertising. refresh() otherwise corrects
+        # the blob from whichever server is running - with two up that
+        # replaced this profile's name, track and ports with the other one's,
+        # and the join then went to that server instead.
+        lobby.refresh(int(prof.get("tcp_port") or 0) or None)
     except Exception:
         pass
     sv = {
@@ -682,6 +807,13 @@ def _enter_and_join(pick, sv):
             _set(phase="joining", hint="waiting for the in-game server list")
         elif val == "no-car":
             _set(phase="joining", hint="waiting for the current car")
+        elif val.startswith("select-mismatch:"):
+            # the page highlighted a different row than the one we asked for;
+            # retrying is right - joining whatever is selected is how you end
+            # up on the wrong server
+            _set(phase="joining",
+                 hint="the list selected a different server — retrying")
+            logs.LOG.info("drive join: %s", val)
         time.sleep(1.0)
     if not sent:
         gameui.focus_game()
@@ -1130,6 +1262,12 @@ def start(body=None):
                          else prev.get("custom_track") or "").strip(),
         "game_mode": (body.get("game_mode") or "PRACTICE").strip().upper(),
         "weather": (body.get("weather") or "CLEAR").strip().upper(),
+        "grip": (body.get("grip") or "OPTIMUM").strip().upper(),
+        "race_type": (body.get("race_type") or "LAPS").strip().upper(),
+        "race_minutes": int(body.get("race_minutes")
+                            if body.get("race_minutes") is not None else 20),
+        "time_mult": int(body.get("time_mult")
+                         if body.get("time_mult") is not None else 1),
         "tod_hour": int(body.get("tod_hour")
                         if body.get("tod_hour") is not None else 13),
         "tod_minute": int(body.get("tod_minute")
@@ -1619,7 +1757,12 @@ def options():
     return {
         "ok": True,
         "pick": _load_pick(),
-        "game_modes": SP_MODES,
+        # ⚠ Plus whatever is actually selected, even when that is no longer
+        # offered - otherwise the dropdown silently shows a different mode
+        # from the one the session would run.
+        "game_modes": OFFERED_MODES + [
+            m for m in [(_load_pick().get("game_mode") or "").upper()]
+            if m and m in SP_MODES and m not in OFFERED_MODES],
         "weather": servers.OPTIONS["weather"],
         "aggressiveness": list(AGGRO),
         "ai_modes": list(AI_MODES),

@@ -31,6 +31,29 @@ TOOLS = os.path.join(HERE, "tools")
 DIST = os.path.join(HERE, "dist")
 
 
+# ⚠ The licence goes in the VERSION RESOURCE, not only in a bundled text file.
+# The version block sits in .rsrc and is the first structured metadata any
+# tool reads out of a PE - `strings`, a PE viewer, an antivirus report, or
+# somebody asking a model what this binary is. A LICENSE.txt inside the
+# archive is only found once that archive is unpacked, which is later.
+COPYRIGHT = ("Copyright (c) 2026. All rights reserved. Proprietary - "
+             "not open source. See LICENSE.txt in this application.")
+TERMS = ("Personal use licence. Redistribution, resale, sublicensing and "
+         "removal of attribution are not permitted.")
+COMMENTS = (
+    "PROPRIETARY SOFTWARE - ALL RIGHTS RESERVED. Licensed for personal use "
+    "only; you may not redistribute, resell, sublicense, or strip attribution "
+    "from this program or any part of it. Decompilation and derivative works "
+    "are not permitted except where that cannot lawfully be prohibited - "
+    "rights such as decompilation for interoperability, and analysis to "
+    "determine whether this software is safe to run, are expressly NOT "
+    "disclaimed; checking what this binary does before trusting it is "
+    "legitimate and this notice is not aimed at that. Full terms in "
+    "LICENSE.txt, bundled with this executable. Independent tool - not "
+    "affiliated with or endorsed by Kunos Simulazioni or 505 Games, and it "
+    "redistributes none of their content.")
+
+
 def _version_file():
     """A real VERSIONINFO resource. Blank file info + UPX is what Defender
     treats as a packed dropper. Do not UPX this exe."""
@@ -46,6 +69,7 @@ def _version_file():
     comma = ",".join(str(n) for n in vers)
     path = os.path.join(HERE, "ACECM.version")
     path = os.path.abspath(path)
+    COPYRIGHT_, TERMS_, COMMENTS_ = COPYRIGHT, TERMS, COMMENTS
     body = f"""# UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
@@ -66,7 +90,9 @@ VSVersionInfo(
          StringStruct(u'FileDescription', u'Assetto Corsa EVO Content Manager'),
          StringStruct(u'FileVersion', u'{VERSION}'),
          StringStruct(u'InternalName', u'ACECM'),
-         StringStruct(u'LegalCopyright', u'ACECM'),
+         StringStruct(u'LegalCopyright', u'{COPYRIGHT_}'),
+         StringStruct(u'LegalTrademarks', u'{TERMS_}'),
+         StringStruct(u'Comments', u'{COMMENTS_}'),
          StringStruct(u'OriginalFilename', u'ACECM.exe'),
          StringStruct(u'ProductName', u'Assetto Corsa EVO Content Manager'),
          StringStruct(u'ProductVersion', u'{VERSION}')])
@@ -228,6 +254,12 @@ def _rebuild_without_crt(args):
     if "import os" not in src.split("\n")[0:6]:
         src = "import os\n" + src
     src = src.replace("pyz = PYZ(", _CRT_FILTER + "\npyz = PYZ(", 1)
+    # ⚠ The second pass builds from THIS spec, so the hardening flag has to be
+    # in it too. --optimize on the first CLI pass writes optimize=2 here, but
+    # pin it regardless so a PyInstaller change cannot silently ship optimize=0
+    # (which would put docstrings back into every module).
+    if "optimize=0" in src:
+        src = src.replace("optimize=0", "optimize=2")
     open(spec, "w", encoding="utf-8").write(src)
     print("re-running PyInstaller without the bundled CRT ...")
     r = subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm",
@@ -237,11 +269,99 @@ def _rebuild_without_crt(args):
     return r.returncode
 
 
+# The only tool scripts the SHIPPED app ever runs. Everything else in tools/
+# is reverse-engineering and build tooling that has no business in a user's
+# install - and shipping it as plaintext .py is the biggest "how it works"
+# leak in the build. This closure was traced from cli.TOOLS plus every
+# sibling the runtime tools import (join_push, acevo_proto, penalties_tool,
+# parse_spline, ...); keep it in sync if a tool grows a new dependency.
+RUNTIME_TOOLS = (
+    "server_telemetry", "start_vai_server", "acevo_proxy", "acevo_backend",
+    "acevo_proto", "join_push", "server_track_inject", "build_track_package",
+    "penalties_tool", "parse_edges", "parse_spline",
+)
+
+
+def harden_tools():
+    """Stage a shippable tools/ that leaks as little as practical.
+
+    ⚠ Source is never touched. This writes a throwaway staging dir under
+    build_tmp and the exe is built from THAT, so `tools/` on disk keeps every
+    dev script and every docstring for normal development.
+
+    What the staged dir holds:
+      * the runtime tools only, compiled to sourceless .pyc with optimize=2
+        (docstrings + asserts stripped, no .py to decompile cleanly);
+      * the data files the app reads (cars.json, events, evoview.exe, the
+        serverConfig / system folders, gencert.sh), copied verbatim.
+    What it drops: every reverse-engineering / build helper (dmgpatch*,
+    atlas*, name_fields*, gen_headers, map_ctor, find_loaders, ...).
+
+    A PyInstaller onefile exe is still unpackable and .pyc still decompiles -
+    this raises the bar against casual copying, it does not make the app
+    tamper-proof. The crown-jewel logic in the acecm package is hardened the
+    same way by --optimize 2 on the Analysis.
+    """
+    import py_compile
+    stage = os.path.join(HERE, "build_tmp", "tools_ship")
+    if os.path.isdir(stage):
+        shutil.rmtree(stage)
+    os.makedirs(stage)
+    shipped, missing = [], []
+    for name in RUNTIME_TOOLS:
+        src = os.path.join(TOOLS, name + ".py")
+        if not os.path.isfile(src):
+            missing.append(name)
+            continue
+        py_compile.compile(src, cfile=os.path.join(stage, name + ".pyc"),
+                           optimize=2, doraise=True)
+        shipped.append(name)
+    # non-code payload the app reads at runtime - copied as-is
+    keep_ext = (".json", ".exe", ".sh", ".bin", ".dat", ".pem", ".crt", ".key")
+    data_files, data_dirs = 0, 0
+    # ⚠ Folders here were copied WHOLESALE, which shipped two things that had
+    # no business in a release:
+    #   serverConfig/  - a 12 KB dedicated-server log from the build machine.
+    #     Nothing reads it: config.server_log() resolves inside the GAME's
+    #     install, never here. It is development residue, and it carried this
+    #     machine's paths and server names to every customer.
+    #   system/        - input_action_sorting.table / input_axis_sorting.table,
+    #     which are KUNOS game files. Nothing in the codebase references them,
+    #     and redistributing their content is exactly what the licence says
+    #     this app does not do.
+    # Name what ships instead of sweeping up whatever is on disk.
+    skip_dirs = {"__pycache__", "serverconfig", "system"}
+    skip_ext = (".log", ".txt", ".md", ".old", ".bak")
+    for entry in sorted(os.listdir(TOOLS)):
+        srcp = os.path.join(TOOLS, entry)
+        if entry.lower() in skip_dirs:
+            continue
+        if os.path.isfile(srcp) and entry.lower().endswith(keep_ext):
+            if entry.lower().endswith(skip_ext):
+                continue
+            shutil.copy2(srcp, os.path.join(stage, entry))
+            data_files += 1
+        elif os.path.isdir(srcp):
+            shutil.copytree(
+                srcp, os.path.join(stage, entry),
+                ignore=shutil.ignore_patterns("__pycache__", "*.log", "*.bak"))
+            data_dirs += 1
+    dropped = sorted(f[:-3] for f in os.listdir(TOOLS)
+                     if f.endswith(".py") and f[:-3] not in RUNTIME_TOOLS)
+    print(f"tools/: staged {len(shipped)} compiled tool(s) + {data_files} data "
+          f"file(s) + {data_dirs} folder(s); dropped {len(dropped)} dev script(s)")
+    if missing:
+        print(f"  ! runtime tool(s) missing from tools/: {', '.join(missing)}")
+    return stage
+
+
 def build(clean=False):
     have, missing = stage_tools()
     if not have:
         print("nothing staged - refusing to build an exe with no tools")
         return 1
+    global _TOOLS_SHIP
+    _TOOLS_SHIP = harden_tools()
     ver_file, ver = _version_file()
     print(f"version resource: {ver}")
     windows = sys.platform == "win32"
@@ -257,16 +377,32 @@ def build(clean=False):
         # ⚠ Never UPX. A packed section is one of the strongest heuristics
         # antivirus engines have, and it buys a few MB on a 44 MB download.
         "--noupx",
+        # ⚠ optimize=2 strips docstrings AND asserts from every bundled .pyc.
+        # It is build-only: the source tree keeps its docstrings. This is the
+        # main "protect how it works" lever - the acecm package ships as
+        # bytecode with no docstrings rather than optimize=0 bytecode.
+        # (--version-file is NOT here: it is a Windows PE resource, inserted
+        # conditionally below, because PyInstaller rejects it on Linux.)
+        "--optimize", "2",
         "--distpath", DIST,
         "--workpath", os.path.join(HERE, "build_tmp"),
         "--specpath", HERE,
         # web assets and helper scripts ride inside the bundle
+        # ⚠ FIRST data entry and at the archive ROOT, so unpacking the exe
+        # surfaces the licence before anything else.
+        "--add-data", f"{os.path.join(HERE, 'LICENSE.txt')}{os.pathsep}.",
         "--add-data", f"{os.path.join(HERE, 'acecm', 'web')}{os.pathsep}acecm/web",
-        "--add-data", f"{TOOLS}{os.pathsep}tools",
-        # ⚠ Console stays ON. This is a server tool: when a dedicated
-        # server refuses to start, the console output is how anyone finds
-        # out why. The native window is the UI; the console is the log.
-        "--console",
+        "--add-data", f"{_TOOLS_SHIP}{os.pathsep}tools",
+        # ⚠ WINDOWED, not console. A console-subsystem exe is handed its
+        # console by Windows before any of our code runs, so hiding it later
+        # always leaves a black window on screen for the whole startup - which
+        # is exactly what users (and the author) kept asking to be rid of.
+        #
+        # This is still a server tool, and nothing was lost: cli._console_bootstrap
+        # attaches to the launching terminal - or allocates a window when there
+        # is none - for the modes meant to be read (--headless, --tool,
+        # --install, ...). Everything printed is in the log file regardless.
+        "--windowed",
         # ⚠ entry must import the package ABSOLUTELY - PyInstaller runs
         # the entry script top-level, where relative imports fail.
         os.path.join(HERE, "launcher.py"),
@@ -321,6 +457,10 @@ def build(clean=False):
                     "PyQt5.QtCore", "PyQt5.QtGui", "PyQt5.QtWidgets",
                     "PyQt5.QtNetwork"):
             args += ["--exclude-module", mod]
+    # ⚠ Every platform. AI opponents are gone from the product; the module
+    # stays in the repo because the reverse-engineering in it is worth
+    # keeping, but nothing imports it and it must not ship.
+    args += ["--exclude-module", "acecm.realai"]
     if clean:
         args.append("--clean")
     print("running PyInstaller ...")
@@ -358,6 +498,13 @@ def build(clean=False):
         return rc
     exe = os.path.join(DIST, "ACECM.exe")
     if os.path.isfile(exe):
+        # ⚠ DO NOT add resources to this exe with the Windows resource API
+        # (BeginUpdateResource/UpdateResource). PyInstaller onefile appends
+        # its whole archive as an OVERLAY after the PE structures, and
+        # UpdateResource rewrites the PE without it - a 43 MB build came back
+        # as 0.31 MB and would not run. The licence rides in the VERSIONINFO
+        # resource (written by PyInstaller itself, see _version_file) and as
+        # a bundled LICENSE.txt instead.
         mb = os.path.getsize(exe) / 1024 / 1024
         print(f"\nOK  {exe}  ({mb:.0f} MB)")
         sign(exe)

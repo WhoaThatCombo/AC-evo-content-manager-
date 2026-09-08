@@ -531,13 +531,23 @@ _JOIN_PUBLIC = """
   if (page.classList && page.classList.contains('loading')) return 'loading';
   var list = page.ServerList || [];
   if (!list.length) return 'waiting-list';
+  /* ⚠ TWO PASSES, address first. This used to test address-then-id on each
+     row in turn, so an EARLIER row whose server_id happened to match won over
+     the LATER row that was the exact address. Hosting several servers puts
+     them all on one ip differing only by port, which is precisely when ids
+     collide or go stale - and you joined the wrong one. The address is the
+     only thing that actually identifies a server; the id is a fallback for
+     when we have no address at all. */
   var hit = null;
   for (var i = 0; i < list.length; i++) {
     var s = list[i];
-    if (s.server_ip == want.ip && String(s.server_tcp_port) == String(want.tcp)) {
-      hit = s; break;
+    if (String(s.server_ip) === String(want.ip)
+        && String(s.server_tcp_port) === String(want.tcp)) { hit = s; break; }
+  }
+  if (!hit && want.id) {
+    for (var j = 0; j < list.length; j++) {
+      if (String(list[j].server_id) === String(want.id)) { hit = list[j]; break; }
     }
-    if (want.id && String(s.server_id) == String(want.id)) { hit = s; break; }
   }
   if (!hit) return 'not-in-list:' + list.length;
   if (!window.CurrentCar || !CurrentCar.model) return 'no-car';
@@ -546,10 +556,20 @@ _JOIN_PUBLIC = """
   page.selectedCar = CurrentCar.model;
   page.selectedCarPguid = CurrentCar.model.car_pguid;
   if (!page.selectedServerId) return 'select-fail:' + hit.server_id;
+  /* ⚠ Verify the page selected what we ASKED for before pressing Join.
+     setSelectedServer can leave the page on a different row (the UI shows a
+     highlighted server and "No server selected" at the same time), and
+     connecting then joins whatever it happens to be sitting on. Refusing is
+     right: the caller retries, and joining the wrong server is worse than
+     not joining. */
+  if (String(page.selectedServerId) !== String(hit.server_id)) {
+    return 'select-mismatch:' + page.selectedServerId + ':' + hit.server_id;
+  }
   window.__acecmJoin = key;
   try {
     page.connectToServer(false);
-    return 'connect:' + hit.server_id + ':' + (hit.server_name || '');
+    return 'connect:' + hit.server_id + ':' + (hit.server_tcp_port || '')
+           + ':' + (hit.server_name || '');
   } catch (e) {
     window.__acecmJoin = '';
     return 'connect-fail:' + String(e && e.message || e);

@@ -19,6 +19,11 @@ config.json
 # Game/server binaries and content. This project manages an install; it does
 # not ship one.
 *.kspkg
+# ⚠ Kunos .table files. Two of these (input_action_sorting,
+# input_axis_sorting) were tracked here and shipped inside the exe until
+# 1.0.0, referenced by nothing. This repo manages an install; it does not
+# hold one.
+tools/system/
 AssettoCorsaEVOServer*.exe
 AssettoCorsaEVO.exe
 
@@ -33,6 +38,10 @@ __pycache__/
 # --- scratch ------------------------------------------------------------------
 *.tmp
 *.bak
+# ⚠ `*.bak` does NOT catch these: a suffixed backup like
+# app.js.bak_carpolicy is a different name, and three of them very
+# nearly went into a release commit.
+*.bak_*
 *.log
 # ⚠ tools/evoview.exe is COMMITTED, like every other tool. It is built
 # separately with cargo from a checkout that is not in this repo, so a CI
