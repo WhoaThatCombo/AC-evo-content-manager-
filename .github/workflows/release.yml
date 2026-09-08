@@ -159,16 +159,55 @@ jobs:
 
       - name: Report the glibc floor
         # The number this prints IS the compatibility answer: the oldest glibc
-        # that can run the binary. If it ever rises above 2.28 the container
-        # changed under us and the build quietly stopped working on older
-        # distros - which nobody would notice until a user reported it.
+        # that can run the build.
+        #
+        # ⚠ objdump on dist/ACECM alone is NOT that number. A onefile is a
+        # small bootloader with everything else packed in its overlay, so the
+        # bootloader's own imports (2.14) say nothing about libpython and the
+        # extension modules unpacked beside it at runtime - which are what
+        # actually refuse to load on an older distro. Read the archive.
         run: |
-          FLOOR=$(objdump -T dist/ACECM | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
-          echo "highest glibc symbol required: $FLOOR"
-          echo "Linux build requires glibc >= $FLOOR" >> "$GITHUB_STEP_SUMMARY"
-          MIN=$( { echo "$FLOOR"; echo 2.28; } | sort -V | head -1 )
-          if [ "$MIN" != "2.28" ]; then
-            echo "::warning::glibc floor rose to $FLOOR (was 2.28); older distros lose support"
+          python - <<'EOF' | tee floor.txt
+          import os, re, subprocess, tempfile
+          from PyInstaller.archive.readers import CArchiveReader
+          vers, worst = set(), {}
+          def scan(path, label):
+              try:
+                  out = subprocess.run(["objdump", "-T", path], text=True,
+                                       capture_output=True).stdout
+              except OSError:
+                  return
+              for v in re.findall(r"GLIBC_([0-9.]+)", out):
+                  vers.add(v)
+                  worst.setdefault(v, label)
+          scan("dist/ACECM", "bootloader")
+          arch = CArchiveReader("dist/ACECM")
+          with tempfile.TemporaryDirectory() as tmp:
+              for name in arch.toc:
+                  if not name.endswith(".so") and ".so." not in name:
+                      continue
+                  blob = arch.extract(name)
+                  if isinstance(blob, tuple):
+                      blob = blob[1]
+                  out = os.path.join(tmp, os.path.basename(name))
+                  with open(out, "wb") as fh:
+                      fh.write(blob)
+                  scan(out, name)
+          key = lambda v: tuple(int(x) for x in v.split("."))
+          top = max(vers, key=key)
+          print(f"FLOOR={top}")
+          print(f"REASON={worst[top]}")
+          EOF
+          FLOOR=$(grep '^FLOOR=' floor.txt | cut -d= -f2)
+          REASON=$(grep '^REASON=' floor.txt | cut -d= -f2)
+          echo "Linux build requires glibc >= $FLOOR (set by $REASON)" | tee -a "$GITHUB_STEP_SUMMARY"
+          # ⚠ Warn when the floor RISES. Sorting and taking the top: if 2.28 is
+          # still the highest, nothing got worse. (The first version of this
+          # compared the wrong way round and warned that 2.14 - a LOWER, more
+          # compatible floor - had "risen".)
+          TOP=$( { echo "$FLOOR"; echo 2.28; } | sort -V | tail -1 )
+          if [ "$TOP" != "2.28" ]; then
+            echo "::warning::glibc floor rose to $FLOOR (was 2.28); distros older than that lose support"
           fi
 
       - name: Checksum
