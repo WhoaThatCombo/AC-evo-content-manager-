@@ -119,11 +119,15 @@ jobs:
         # build made against a newer glibc and undo the whole point.
         run: |
           dnf -y install --setopt=install_weak_deps=False             git gcc gcc-c++ make binutils findutils
-          if dnf -y install python3.12 python3.12-devel; then PY=python3.12
-          elif dnf -y install python3.11 python3.11-devel; then PY=python3.11
-          else dnf -y install python39 python39-devel && PY=python3.9; fi
+          # ⚠ -pip as well: the base python3.12 package does not carry it,
+          # and the next step died on "No module named pip".
+          if dnf -y install python3.12 python3.12-devel python3.12-pip; then PY=python3.12
+          elif dnf -y install python3.11 python3.11-devel python3.11-pip; then PY=python3.11
+          else dnf -y install python39 python39-devel python39-pip && PY=python3.9; fi
           ln -sf "$(command -v $PY)" /usr/local/bin/python
           python --version
+          python -m pip --version || python -m ensurepip --upgrade
+          # PyInstaller needs a shared libpython; this must print 1.
           python -c "import sysconfig;print('shared libpython:', sysconfig.get_config_var('Py_ENABLE_SHARED'))"
 
       - uses: actions/checkout@v4
