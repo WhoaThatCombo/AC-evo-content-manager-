@@ -653,7 +653,13 @@ def start(mode="proxy"):
     env["PYTHONUNBUFFERED"] = "1"
     cmd = config.tool_cmd(tool, [])
     from . import winproc
-    p = winproc.hidden_popen(cmd, cwd=os.path.dirname(script), env=env,
+    # ⚠ NOT a directory inside the bundle. When frozen, BUNDLED_TOOLS
+    # is <sys._MEIPASS>/tools, and a child's CWD holds an open handle on
+    # it - so the parent could not delete its own extraction folder on
+    # exit and the bootloader popped "Failed to remove temporary
+    # directory". These tools locate everything by __file__ and env
+    # vars, never by cwd, so any stable directory does.
+    p = winproc.hidden_popen(cmd, cwd=config.DATA, env=env,
                              stdout=log, stderr=subprocess.STDOUT)
     logs.launched(f"backend ({mode})", cmd, p.pid, log=log.name)
     _procs[mode] = p

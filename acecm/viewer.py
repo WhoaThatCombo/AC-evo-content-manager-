@@ -396,6 +396,10 @@ def extract(car_id):
     return car_dir
 
 
+# ⚠ Every evoview child runs with cwd=config.DATA, never the directory
+# holding evoview.exe: when frozen that is <sys._MEIPASS>/tools, and a
+# child's cwd locks it so the app cannot clean up on exit. Windows finds
+# an exe's DLLs from the EXE's folder, not the cwd, so nothing breaks.
 def open_car(car_id, paint=""):
     """Launch the viewer on a car, reading it straight out of the package.
 
@@ -428,7 +432,7 @@ def open_car(car_id, paint=""):
     # GIVES it a console (CREATE_NO_WINDOW breaks console CRT startup - see the
     # dedicated-server note) but hides the window.
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-    _wp.hidden_console_popen(cmd, env=env, cwd=os.path.dirname(exe),
+    _wp.hidden_console_popen(cmd, env=env, cwd=config.DATA,
                              creationflags=flags)
     _set(car_id, "open", "")
     return {"ok": True, "package": pkg}
@@ -470,7 +474,7 @@ def open_track(folder):
     # same as open_car: give it a console, hide the window
     from . import winproc as _wp
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-    _wp.hidden_console_popen(cmd, cwd=os.path.dirname(exe),
+    _wp.hidden_console_popen(cmd, cwd=config.DATA,
                              creationflags=flags)
     _set("track:" + folder, "open", "")
     logs.LOG.info("viewer track %s from %s", folder, src)
