@@ -432,6 +432,12 @@ def open_car(car_id, paint=""):
     # GIVES it a console (CREATE_NO_WINDOW breaks console CRT startup - see the
     # dedicated-server note) but hides the window.
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    # ⚠ winproc is imported HERE, not at module scope. Without this line
+    # open_car raised NameError: name '_wp' is not defined the moment anyone
+    # pressed View 3D - and because the failure happened on the worker thread
+    # the endpoint had already answered {"ok": true}, so the UI showed success
+    # and simply nothing opened. open_track has always had the import.
+    from . import winproc as _wp
     _wp.hidden_console_popen(cmd, env=env, cwd=config.DATA,
                              creationflags=flags)
     _set(car_id, "open", "")
