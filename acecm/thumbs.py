@@ -168,15 +168,19 @@ def render_car(car_id, force=False, timeout=180, make=True, big=False,
     # the first visual preset it finds, so every trim of a car came out the
     # same; EVOVIEW_PAINT overrides the showroom default with the colour the
     # player actually has on the car.
-    env = winproc.child_env()
-    if visual:
-        env["EVOVIEW_VISUAL"] = visual
-    if paint:
-        env["EVOVIEW_PAINT"] = paint
     try:
+        # ⚠ viewer_cmd RETURNS a fresh child_env, so these must be set AFTER
+        # it, not before. Setting them first and then doing
+        # `cmd, env = viewer_cmd(cmd)` silently threw both away, and every trim
+        # of a car rendered as the first visual preset again - the exact bug
+        # EVOVIEW_VISUAL exists to prevent. viewer.open_car has the order right.
         cmd, env = viewer.viewer_cmd(cmd)
+        if visual:
+            env["EVOVIEW_VISUAL"] = visual
+        if paint:
+            env["EVOVIEW_PAINT"] = paint
         r = winproc.hidden_run(cmd, capture_output=True, text=True,
-                               timeout=timeout, cwd=os.path.dirname(exe),
+                               timeout=timeout, cwd=config.DATA,
                                env=env)
     except subprocess.TimeoutExpired:
         logs.LOG.warning("thumb %s: timed out", car_id)
