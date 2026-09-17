@@ -36,19 +36,17 @@ DIST = os.path.join(HERE, "dist")
 # tool reads out of a PE - `strings`, a PE viewer, an antivirus report, or
 # somebody asking a model what this binary is. A LICENSE.txt inside the
 # archive is only found once that archive is unpacked, which is later.
-COPYRIGHT = ("Copyright (c) 2026. All rights reserved. Proprietary - "
-             "not open source. See LICENSE.txt in this application.")
-TERMS = ("Personal use licence. Redistribution, resale, sublicensing and "
-         "removal of attribution are not permitted.")
+COPYRIGHT = ("Copyright (C) 2026 ACECM contributors. Free software, "
+             "licensed under the GNU GPL v3 or later. "
+             "See LICENSE.txt in this application.")
+TERMS = ("GNU General Public License v3 or later. You may use, study, share "
+         "and modify this program; derived works must stay under the GPL.")
 COMMENTS = (
-    "PROPRIETARY SOFTWARE - ALL RIGHTS RESERVED. Licensed for personal use "
-    "only; you may not redistribute, resell, sublicense, or strip attribution "
-    "from this program or any part of it. Decompilation and derivative works "
-    "are not permitted except where that cannot lawfully be prohibited - "
-    "rights such as decompilation for interoperability, and analysis to "
-    "determine whether this software is safe to run, are expressly NOT "
-    "disclaimed; checking what this binary does before trusting it is "
-    "legitimate and this notice is not aimed at that. Full terms in "
+    "FREE SOFTWARE - GNU GPL v3 OR LATER. You may run, copy, study, modify "
+    "and redistribute this program and its source, provided derived works "
+    "carry the same licence and keep the copyright and licence notices. "
+    "Source: https://github.com/WhoaThatCombo/AC-evo-content-manager- . "
+    "There is NO WARRANTY, to the extent permitted by law. Full terms in "
     "LICENSE.txt, bundled with this executable. Independent tool - not "
     "affiliated with or endorsed by Kunos Simulazioni or 505 Games, and it "
     "redistributes none of their content.")
