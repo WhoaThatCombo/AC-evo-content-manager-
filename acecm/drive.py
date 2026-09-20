@@ -12,7 +12,7 @@ import shutil
 import threading
 import time
 
-from . import backend, config, content, contentsync, gameui, logs, servers
+from . import backend, config, content, contentsync, evoreg, gameui, logs, servers
 from . import settings as gamesettings
 
 DRIVE_ID = "acecm-drive"
@@ -1543,8 +1543,40 @@ def capture_list():
 
 def _public_briefs():
     lst = backend.server_list()
+    raw = list(lst.get("servers") or [])
+    # ⚠ Merge the EvoForge directory in as a SECOND source, keyed on address.
+    # The proxy can only report what a game client asked it for, so with the
+    # game closed its list is a snapshot; the directory is a plain HTTP fetch
+    # that works anyway. Address wins over id here for the same reason it does
+    # in the join path - it is the only thing that really identifies a server.
+    # Failure is not fatal: a third-party service being down must not empty
+    # the list we already have.
+    # ⚠ ENRICH, don't just dedupe. A directory server is usually ALSO in the
+    # lobby list, so simply skipping it threw away the only thing the lobby
+    # cannot tell us: share_url - where to fetch the modded track this server
+    # runs. Match on address, copy the extras onto the row we already have,
+    # and only append the ones the lobby never saw.
+    try:
+        by_addr = {}
+        for s in raw:
+            try:
+                by_addr[(str(s.get("server_ip") or ""),
+                         int(s.get("server_tcp_port") or 0))] = s
+            except (TypeError, ValueError):
+                pass
+        for s in evoreg.fetch().get("servers") or []:
+            key = (s["server_ip"], int(s["server_tcp_port"]))
+            known = by_addr.get(key)
+            if known is None:
+                raw.append(s)
+                continue
+            for f in ("source", "share_url", "track_origin"):
+                if s.get(f):
+                    known[f] = s[f]
+    except Exception as ex:                       # noqa: BLE001 - never fatal
+        logs.LOG.info("evoforge directory skipped: %s", ex)
     out = []
-    for s in lst.get("servers") or []:
+    for s in raw:
         cars = _car_ids_of(s)
         out.append({
             "id": s.get("server_id") or "",
@@ -1560,6 +1592,10 @@ def _public_briefs():
             "ping": s.get("ping") or 0,
             "cars": cars,
             "locked": bool(s.get("driver_password")),
+            # directory-only extras; empty for servers seen via the proxy
+            "source": s.get("source") or "lobby",
+            "share_url": s.get("share_url") or "",
+            "track_origin": s.get("track_origin") or "",
         })
     # ⚠ Car ids are sent INTERNED: a pool of the distinct ids, and each
     # server's list as indices into it. A full public list is ~35k car
