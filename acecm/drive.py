@@ -771,8 +771,24 @@ def _enter_and_join(pick, sv):
               + (sv.get("server_name") or host))
     gameui.focus_game()
     try:
-        went = gameui.enter_multiplayer(host, tcp, pw)
-        logs.LOG.info("drive ui multiplayer: %s", went)
+        # ⚠ Only deep-link when the address is in the list the GAME sees.
+        # The deep link is the game's "join server from clipboard" feature: it
+        # searches the loaded list and, on a miss, throws up a modal the player
+        # has to dismiss. Our proxy snapshot is that same list, so use it to
+        # decide; anything it has not seen (a server that only just came up,
+        # or one known solely from the EvoForge directory) opens the plain
+        # list and lets join_public find the row as it always did.
+        deep = False
+        try:
+            for s_ in backend.server_list().get("servers") or []:
+                if (str(s_.get("server_ip") or "") == host
+                        and int(s_.get("server_tcp_port") or 0) == int(tcp)):
+                    deep = True
+                    break
+        except Exception:                          # noqa: BLE001
+            deep = False
+        went = gameui.enter_multiplayer(host, tcp, pw, deep=deep)
+        logs.LOG.info("drive ui multiplayer: %s (deep=%s)", went, deep)
     except OSError as ex:
         logs.LOG.warning("drive multiplayer goto lost: %s", ex)
     on = _wait_page("mp", 20)

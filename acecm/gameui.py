@@ -513,7 +513,7 @@ _GOTO_MP = """
 """
 
 
-def enter_multiplayer(ip="", tcp=0, password=""):
+def enter_multiplayer(ip="", tcp=0, password="", deep=True):
     """Open the in-game public list, pointed at one server when we know it.
 
     ⚠ The namespace matters, and we had this wrong. An address appended to
@@ -532,9 +532,16 @@ def enter_multiplayer(ip="", tcp=0, password=""):
     pointed at a server is not the same as being on the right one (see
     acecm-multi-server-wrong-join). If we have no address, fall back to the
     plain list.
+
+    ⚠ The deep link is the game's own "join the server copied to the
+    clipboard" feature, so it SEARCHES THE LOADED LIST. Point it at an address
+    the list does not contain and the game puts a modal on screen - "Could not
+    find the server copied to the clipboard" - which the player then has to
+    dismiss. That is worse than the old silent retry, so callers pass
+    deep=False whenever they are not sure the row is there.
     """
     target = ""
-    if ip and tcp:
+    if deep and ip and tcp:
         target = "%s:%s|%s" % (ip, int(tcp), password or "")
     page = menu_page()
     expr = "(" + _GOTO_MP + ")(" + json.dumps(target) + ")"
