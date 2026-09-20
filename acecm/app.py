@@ -18,7 +18,8 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-from . import (auth, backend, config, content, contentsync, detect, drive,
+from . import (auth, backend, compress, config, content, contentsync,
+               detect, drive,
                evoshare,
                push as pushmod,
                gameui, hooking, hotkey, install,
@@ -445,6 +446,12 @@ class Handler(BaseHTTPRequestHandler):
                     (q.get("base") or [""])[0], (q.get("file") or [""])[0]))
             if path == "/api/evoshare/status":
                 return _json(self, evoshare.status())
+            # --- mods-folder disk compression -----------------------------
+            if path == "/api/compress":
+                return _json(self, compress.measure(
+                    force=(q.get("refresh") or [""])[0] == "1"))
+            if path == "/api/compress/status":
+                return _json(self, compress.status())
             # --- pictures for the car and track lists --------------------
             if path == "/api/thumb/car":
                 # Cached PNG only for list rows: rendering here blocked the UI
@@ -1043,6 +1050,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/gamesettings/restore_backup":
                 return _json(self, gamesettings.restore_backup(
                     body.get("file"), body.get("name")))
+            if path == "/api/compress/start":
+                return _json(self, compress.start(bool(body.get("undo"))))
             if path == "/api/evoshare/start":
                 return _json(self, evoshare.start(
                     body.get("base") or "", body.get("file") or "",

@@ -3697,6 +3697,105 @@ async function settingsPage() {
   const p = $('#page');
   p.innerHTML = '';
 
+  /* ---- disk space ------------------------------------------------------
+     EVO content is enormous - about 600 MB a car, several GB a track - so a
+     modest collection runs to tens of gigabytes. Windows can store it
+     compressed and decompress on read, which the game never notices.
+     Measured on a real folder: 46.3 GB held in 11.6 GB, 4.0 to 1.
+
+     ⚠ The readout has to be LOGICAL vs ON-DISK. A file's size does not
+     change when it is compressed, so printing file sizes would show the same
+     number before and after and look broken - the whole point is the gap
+     between what the content weighs and what it occupies. */
+  const diskCard = el('div', 'card');
+  diskCard.innerHTML = '<h2>Disk space</h2>';
+  const diskLine = el('div', 'tiny dim', 'Measuring the mods folder…');
+  diskCard.append(diskLine);
+  const diskRow = el('div', 'row');
+  diskCard.append(diskRow);
+  p.append(diskCard);
+
+  const fmtDiskGB = b => (Number(b || 0) / 1e9).toFixed(2) + ' GB';
+  const paintDisk = (m) => {
+    diskRow.innerHTML = '';
+    if (!m || !m.ok) {
+      diskLine.textContent = (m && m.supported === false)
+        ? 'Disk compression is a Windows feature — not available here.'
+        : ((m && m.error) || 'could not measure the mods folder');
+      return;
+    }
+    const pct = m.logical ? Math.round((1 - m.on_disk / m.logical) * 100) : 0;
+    diskLine.innerHTML =
+      '<b>' + fmtDiskGB(m.logical) + '</b> of mods stored in <b>'
+      + fmtDiskGB(m.on_disk) + '</b> on disk'
+      + (m.ratio >= 1.05
+          ? ' — ' + m.ratio.toFixed(1) + ' to 1, saving '
+            + fmtDiskGB(m.saved) + ' (' + pct + '%)'
+          : ' — not compressed yet')
+      + '<br><span class="dim">' + esc(m.path) + ' · '
+      + Number(m.files).toLocaleString() + ' files</span>';
+    const go = el('button', 'primary',
+                  m.ratio >= 1.05 ? 'Compress again' : 'Compress mods folder');
+    go.title = 'Windows stores the files compressed and decompresses them on '
+             + 'read. The game sees ordinary files.';
+    go.onclick = async () => {
+      if (!await ask('Compress the mods folder?\n\n'
+          + fmtDiskGB(m.logical) + ' across '
+          + Number(m.files).toLocaleString()
+          + ' files. This takes a while, and the game should be closed.\n\n'
+          + 'Nothing about the content changes - only how much disk it uses, '
+          + 'and it can be undone.')) return;
+      const r = await api('compress/start', {});
+      if (!r.ok) { toast(r.error || 'could not start', true); return; }
+      watchCompress();
+    };
+    diskRow.append(go);
+    if (m.ratio >= 1.05) {
+      const un = el('button', 'sm', 'Undo');
+      un.title = 'Store the files uncompressed again';
+      un.onclick = async () => {
+        if (!await ask('Store the mods folder uncompressed again?\n\n'
+            + 'That needs about ' + fmtDiskGB(m.logical)
+            + ' of free space.')) return;
+        const r = await api('compress/start', { undo: true });
+        if (!r.ok) { toast(r.error || 'could not start', true); return; }
+        watchCompress();
+      };
+      diskRow.append(un);
+    }
+  };
+  const watchCompress = () => {
+    diskRow.innerHTML = '';
+    diskLine.textContent = 'Working… this can take a while on a large folder. '
+                         + 'You can leave this page.';
+    const tick = async () => {
+      const st = await api('compress/status');
+      if (!st || !st.ok) { setTimeout(tick, 3000); return; }
+      if (st.phase === 'error') {
+        toast(st.error || 'compression failed', true);
+        api('compress?refresh=1').then(paintDisk);
+        return;
+      }
+      if (st.phase === 'done') {
+        const b = st.before || {}, a = st.after || {};
+        toast('Mods folder: ' + fmtDiskGB(b.on_disk) + ' → '
+              + fmtDiskGB(a.on_disk) + ' ('
+              + fmtDiskGB(Math.max(0, (b.on_disk || 0) - (a.on_disk || 0)))
+              + ' freed)');
+        paintDisk(a);
+        return;
+      }
+      setTimeout(tick, 3000);
+    };
+    setTimeout(tick, 1500);
+  };
+  /* measured lazily: walking ~90k files costs seconds and must not hold up
+     the rest of Settings */
+  api('compress').then(paintDisk).catch(() => {});
+  api('compress/status').then(st => {
+    if (st && st.ok && st.active) watchCompress();
+  }).catch(() => {});
+
   /* ---- launch the game, on its own -------------------------------------
      ⚠ Deliberately NOT on Drive. Drive writes a session and then launches;
      this just starts the game with nothing set up, which is only useful for
