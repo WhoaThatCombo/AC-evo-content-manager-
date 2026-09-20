@@ -1448,13 +1448,17 @@ async function drivePage() {
         + (s.ping ? ` · ${s.ping}ms` : ''));
       t.append(name, sub);
       const get = el('button', 'sm', 'Get content');
-      get.title = 'Ask this host\'s ACECM for anything you are missing';
+      get.title = s.share_url
+        ? ('Download this track from ' + s.share_url)
+        : 'Ask this host\'s ACECM for anything you are missing';
       get.onclick = ev => {
         ev.stopPropagation();
         contentFrom({
           server_ip: s.server_ip,
           server_tcp_port: s.server_tcp_port,
           track: s.track || '',
+          share_url: s.share_url || '',
+          name: s.name || '',
         });
       };
       r.append(trackThumb(s.track), t, get);
@@ -5335,7 +5339,86 @@ let brRenderT;
    LOGIC - seven scene files - while a playable track is the ~1 GB of art in
    the player's own folder. Those bytes exist only on the host's game install,
    so a stock Kunos server has nothing to give and we say so. */
+/* Download a track from an EvoForge server's share.
+
+   Those hosts do not run ACECM, so browser/discover can only ever answer
+   "not sharing" for them; they publish over their own protocol instead and
+   the directory already gave us the URL. The share's index carries absolute
+   byte spans into the pack, so we plan first and state the real size before
+   fetching anything - these are multi-GB tracks and starting one by accident
+   is expensive. The host publishes a slot count (max, observed 3); we take
+   one at a time and back off politely when it is busy. */
+async function evoshareFrom(s) {
+  const base = s.share_url;
+  toast('Asking ' + (s.name || s.server_ip) + ' what it shares…');
+  const m = await api('evoshare/manifest?base=' + encodeURIComponent(base));
+  if (!m.ok) { toast(m.error || 'that share did not answer', true); return; }
+  const item = (m.content || [])[0];
+  if (!item) { toast('that share publishes nothing', true); return; }
+  if (m.max && m.active >= m.max) {
+    toast('That host is busy (' + m.active + '/' + m.max
+          + ' downloads) — try again shortly', true);
+    return;
+  }
+  toast('Checking what you already have…');
+  const p = await api('evoshare/plan?base=' + encodeURIComponent(base)
+                      + '&file=' + encodeURIComponent(item.file));
+  if (!p.ok) { toast(p.error || 'could not read the share index', true); return; }
+  if (!(p.need || []).length) {
+    toast('You already have ' + (item.name || item.id)); return;
+  }
+  const gb = ((p.bytes || 0) / 1e9).toFixed(2);
+  if (!await ask('Download ' + (item.name || item.id) + ' from '
+      + (s.name || s.server_ip) + '?\n\n'
+      + p.need.length + ' of ' + p.total + ' files — ' + gb + ' GB\n\n'
+      + 'This comes from that server\'s own machine, not from ACECM.')) return;
+  const r = await api('evoshare/start',
+                      { base, file: item.file, folder: item.id || '' });
+  if (!r.ok) { toast(r.error || 'could not start', true); return; }
+  toast('Downloading ' + (item.name || item.id) + ' — ' + gb + ' GB');
+  evoshareWatch(item);
+}
+
+/* Poll while it runs. Progress goes out as milestone toasts rather than one
+   every tick - there is no status bar to write to, and a toast every two
+   seconds for an hour is not progress, it is noise. */
+function evoshareWatch(item) {
+  let misses = 0;
+  let mark = 0;
+  const tick = async () => {
+    const st = await api('evoshare/status');
+    if (!st || !st.ok) {
+      if (++misses > 5) return;
+      setTimeout(tick, 2000); return;
+    }
+    misses = 0;
+    if (st.phase === 'done') {
+      toast('Installed ' + (item.name || item.id)
+            + (st.folder ? ' — added to the game track list' : ''));
+      return;
+    }
+    if (st.phase === 'error') {
+      toast(st.error || 'download failed', true); return;
+    }
+    if (st.phase === 'cancelled') { toast('Download cancelled'); return; }
+    if (st.active) {
+      const pct = st.want ? Math.floor((st.bytes || 0) / st.want * 100) : 0;
+      if (pct >= mark + 10) {
+        mark = pct - (pct % 10);
+        toast((item.name || item.id) + ' — ' + pct + '% ('
+              + (st.done || 0) + '/' + (st.total || 0) + ' files)');
+      }
+      setTimeout(tick, 2000);
+    }
+  };
+  setTimeout(tick, 1200);
+}
+
 async function contentFrom(s) {
+  /* ⚠ An EvoForge host does NOT run ACECM, so asking browser/discover about
+     it can only ever answer "not sharing". Take its own share when the
+     directory gave us one, and keep the ACECM protocol for everything else. */
+  if (s.share_url) return evoshareFrom(s);
   toast('Looking for ACECM on ' + s.server_ip + '…');
   const d = await api(`browser/discover?host=${encodeURIComponent(s.server_ip)}`);
   if (!d.ok) { toast(d.error || 'host is not sharing content', true); return; }

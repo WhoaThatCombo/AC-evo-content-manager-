@@ -19,6 +19,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
 from . import (auth, backend, config, content, contentsync, detect, drive,
+               evoshare,
                push as pushmod,
                gameui, hooking, hotkey, install,
                installer,
@@ -433,6 +434,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/browser/plan":
                 return _json(self, contentsync.plan(
                     (q.get("base") or [""])[0], (q.get("id") or [""])[0]))
+            # --- the same three questions, for an EvoForge share ----------
+            # Those hosts do not run ACECM, so browser/discover can never
+            # find them; they publish over their own protocol instead.
+            if path == "/api/evoshare/manifest":
+                return _json(self, evoshare.manifest(
+                    (q.get("base") or [""])[0]))
+            if path == "/api/evoshare/plan":
+                return _json(self, evoshare.plan(
+                    (q.get("base") or [""])[0], (q.get("file") or [""])[0]))
+            if path == "/api/evoshare/status":
+                return _json(self, evoshare.status())
             # --- pictures for the car and track lists --------------------
             if path == "/api/thumb/car":
                 # Cached PNG only for list rows: rendering here blocked the UI
@@ -1031,6 +1043,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/gamesettings/restore_backup":
                 return _json(self, gamesettings.restore_backup(
                     body.get("file"), body.get("name")))
+            if path == "/api/evoshare/start":
+                return _json(self, evoshare.start(
+                    body.get("base") or "", body.get("file") or "",
+                    body.get("folder") or ""))
+            if path == "/api/evoshare/cancel":
+                return _json(self, evoshare.cancel())
             if path == "/api/backend/start":
                 return _json(self, backend.start(body.get("mode", "proxy")))
             if path == "/api/backend/stop":
