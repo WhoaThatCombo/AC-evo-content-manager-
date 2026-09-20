@@ -956,6 +956,71 @@ def register_client_track(folder, meta=None):
             "layout": layout, "modes": modes, "written": written}
 
 
+def unregister_client_track(folder, display_name=""):
+    """Take a track back out of the CLIENT's tracks.table + containers table.
+
+    ⚠ The mirror of register_client_track, and it matters: deleting a mod
+    folder on its own leaves a row pointing at files that are gone, and the
+    game commits to loading before it discovers the path is empty - the same
+    failure redeclare_client_tracks warns about, from the other direction.
+    Remove the rows FIRST, then the folder.
+
+    redeclare_client_tracks cannot do this: it only adds folders missing from
+    the table, never prunes rows whose folder has gone.
+    """
+    from . import winproc
+    folder = (folder or "").strip()
+    if not folder:
+        return {"ok": False, "error": "no folder"}
+    display = (display_name or "").strip() or _client_name(folder)         or _display_name_for(folder)
+
+    pkg = client_kspkg()
+    if not pkg:
+        return {"ok": False, "error": "client content.kspkg not found"}
+    if winproc.pids_named("AssettoCorsaEVO"):
+        return {"ok": False, "needs_close": True,
+                "error": "close the game first - content.kspkg is locked "
+                         "while it is running"}
+
+    tk = kspkg_write.read_entry(pkg, "system\\tracks.table")
+    tc = kspkg_write.read_entry(pkg, "system\\track_containers.table")
+    if tk is None or tc is None:
+        return {"ok": False, "error": "client archive has no system tables"}
+    if display not in tracktables.registered_names(tk):
+        return {"ok": True, "folder": folder, "display_name": display,
+                "already_absent": True}
+    try:
+        new_tk = tracktables.remove_track_row(tk, display)
+        new_tc = tracktables.remove_container_rows(tc, display)
+    except Exception as ex:
+        return {"ok": False, "error": f"table edit failed: {ex}"}
+
+    try:
+        written = kspkg_write.write_inplace(
+            pkg, {"system\\tracks.table": new_tk,
+                  "system\\track_containers.table": new_tc})
+        check = kspkg_write.verify(pkg)
+        # Same reasoning as register_client_track: only the records WE wrote
+        # are grounds to call our write bad.
+        ours = {"system\\tracks.table", "system\\track_containers.table"}
+        our_bad = [x for x in check.get("bad_headers", []) if x in ours]
+        if not check.get("sorted") or not check.get("unique") or our_bad:
+            return {"ok": False, "error": "client archive failed verification "
+                    "after the table write", "detail": check}
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)}
+
+    cache = os.path.join(config.DATA, "track_map.json")
+    try:
+        if os.path.isfile(cache):
+            os.remove(cache)
+    except OSError:
+        pass
+    logs.LOG.info("unregistered client track %r (%r)", folder, display)
+    return {"ok": True, "folder": folder, "display_name": display,
+            "written": written}
+
+
 def restore():
     """Put the pre-deploy archive back."""
     kspkg = server_kspkg()
