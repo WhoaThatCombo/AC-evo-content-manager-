@@ -1934,6 +1934,46 @@ async function serversPage() {
   const trk = (trkWrap && trkWrap.tracks) || [];
   const p = $('#page');
   p.innerHTML = '';
+
+  /* ⚠ The lobby backend is a hard dependency, not a nicety. Once ACECM has
+     pointed the client at 127.0.0.1:448 it talks to nothing else, so with the
+     proxy stopped the in-game Multiplayer list is EMPTY - not "missing your
+     server", empty, including every public one. That reads as a broken game
+     rather than a stopped helper, and it is the single most confusing state
+     this app can leave the player in. Say so here, where servers are managed,
+     and offer the one-click fix. Only when the client is actually patched:
+     an unpatched install has no such dependency and needs no warning. */
+  try {
+    const be = await api('backend');
+    if (be && be.client_patched && !be.listening) {
+      const warn = el('div', 'card');
+      warn.style.borderColor = '#b4632a';
+      warn.innerHTML = '<h2>Lobby backend is stopped</h2>'
+        + '<div class="tiny">The game is pointed at this app for its server '
+        + 'list, so until the backend is running <b>the in-game Multiplayer '
+        + 'list will be empty</b> - your own servers and every public one. '
+        + 'That is not a problem with the game.</div>';
+      const go = el('button', 'primary', 'Start backend');
+      go.onclick = async () => {
+        go.disabled = true;
+        const r = await api('backend/start', { mode: 'proxy' });
+        toast(r && r.ok ? 'Backend started' : ((r && r.error) || 'Failed'),
+              !(r && r.ok));
+        serversPage();
+      };
+      warn.append(go);
+      p.append(warn);
+    } else if (be && be.listening) {
+      /* quiet confirmation - the failure above is invisible otherwise, so
+         its absence should be visible too */
+      const okline = el('div', 'tiny dim',
+        'Lobby backend running on port ' + (be.port || 448)
+        + ' - the in-game server list is being served.');
+      okline.style.margin = '0 0 8px 2px';
+      p.append(okline);
+    }
+  } catch (e) { /* never block the page on a status probe */ }
+
   // Penalties: install-wide, not per-profile - the trigger list lives inside
   // content.kspkg itself, so every profile hosted from this server shares
   // one on/off state. Shown here rather than in the per-profile editor
