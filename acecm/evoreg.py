@@ -62,6 +62,13 @@ def _get(base, action="list"):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _norm(rec):
     """Their record -> the field names the rest of ACECM already speaks.
 
@@ -72,6 +79,8 @@ def _norm(rec):
     port = int(rec.get("tcpPort") or 0)
     track = rec.get("track") or {}
     share = rec.get("share") or {}
+    live = rec.get("live") if isinstance(rec.get("live"), dict) else {}
+    info = rec.get("info") if isinstance(rec.get("info"), dict) else {}
     return {
         # identity: the directory has no server_id, and ip:port is what
         # actually identifies a server anyway (see acecm-multi-server-wrong-join)
@@ -82,10 +91,12 @@ def _norm(rec):
         "server_udp_port": port,
         "track": track.get("id") or track.get("name") or "",
         "layout": track.get("layout") or "",
-        "players": (rec.get("live") or {}).get("players")
-                   if isinstance(rec.get("live"), dict) else 0,
-        "max_players": (rec.get("live") or {}).get("maxPlayers")
-                       if isinstance(rec.get("live"), dict) else 0,
+        # ⚠ live.players is the LIST of drivers, not a count - rendering it
+        # straight put "[object Object]" in the player column. The number is
+        # live.count, and the slot count is info.pits; there is no maxPlayers.
+        "players": _int(live.get("count")),
+        "max_players": _int(info.get("pits")),
+        "game_mode": (info.get("mode") or "").upper(),
         # extras the game's own list never carries
         "source": "evoforge",
         "track_origin": track.get("origin") or "",

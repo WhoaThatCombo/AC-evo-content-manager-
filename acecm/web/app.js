@@ -85,6 +85,7 @@ let driveFilter = {
   haveTrack: false,
   haveCar: false,
   acecmOnly: false,
+  evoforgeOnly: false,
 };
 let driveLocal = null;
 // the server a typed address or a favourite resolved to - it is deliberately
@@ -1268,6 +1269,13 @@ async function drivePage() {
     if (brTags[ip] && brTags[ip].hosted) return true;
     return /\[ACECM\]/i.test(String(s.name || ''));
   }
+  /* A server the EvoForge directory told us about. Unlike isAcecm this is
+     not guesswork from the name: drive sets source='evoforge' on the row when
+     the directory matched it by address, and only those rows carry share_url
+     - the operator's own http share for the modded track they run. */
+  function isEvoforge(s) {
+    return String(s.source || '') === 'evoforge';
+  }
   function tagDriveIps(rows) {
     const ips = [...new Set(rows.map(s => s.server_ip).filter(Boolean))];
     const need = ips.filter(ip => !brTags[ip]);
@@ -1318,7 +1326,8 @@ async function drivePage() {
       chk('hasPlayers', 'Has players'),
       chk('haveTrack', 'Track I have'),
       chk('haveCar', 'Car I have'),
-      chk('acecmOnly', 'ACECM only'));
+      chk('acecmOnly', 'ACECM only'),
+      chk('evoforgeOnly', 'EvoForge only'));
     if (!driveLocal) {
       api('browser/local').then(l => { driveLocal = l || {}; paintServers(); });
     }
@@ -1387,6 +1396,7 @@ async function drivePage() {
       if (driveFilter.haveTrack && !ownTrack(s)) return false;
       if (driveFilter.haveCar && !ownCarOn(s)) return false;
       if (driveFilter.acecmOnly && !isAcecm(s)) return false;
+      if (driveFilter.evoforgeOnly && !isEvoforge(s)) return false;
       if (!q) return true;
       const blob = [s.name, s.track, s.layout, s.game_mode, s.server_ip]
         .concat(s.cars || []).join(' ').toLowerCase();
@@ -1423,6 +1433,13 @@ async function drivePage() {
         (s.name || '(unnamed)') + (s.locked ? ' 🔒' : '')));
       if (isAcecm(s)) {
         name.append(el('span', 'pill acecm', '<i class="dot"></i>ACECM'));
+      }
+      if (isEvoforge(s)) {
+        const pill = el('span', 'pill evo', 'EvoForge');
+        pill.title = s.share_url
+          ? ('shares its content at ' + s.share_url)
+          : 'listed in the EvoForge directory';
+        name.append(pill);
       }
       const sub = el('div', 'tiny dim',
         `${esc(s.track || '—')} · ${esc(s.layout || '')}`
