@@ -1314,14 +1314,42 @@ def ingest_staging(did, overwrite=False):
 
 
 def remove_track(folder):
-    """Delete an imported track's files. Stock content.kspkg is untouched."""
+    """Delete an imported track: its table rows first, then its files.
+
+    ⚠ Deleting only the files leaves a row in the client's tracks.table
+    pointing at content that is gone, and that is not a tidy "not found" -
+    the game commits to loading before it discovers the path is empty, which
+    is the crash redeclare_client_tracks warns about. Installing writes those
+    rows, so removing has to take them out again.
+
+    ⚠ Rows BEFORE files, and give up if the rows cannot go: the table edit
+    needs content.kspkg unlocked, so with the game open we would otherwise
+    delete the content and leave the row behind - the exact broken state this
+    is meant to prevent.
+    """
     from . import contentsync
+    from . import logs
+    from . import tracks as trackmod
     folder = _safe_folder(folder)
     if not folder:
         return {"ok": False, "error": "bad track folder"}
     dest = contentsync._under(contentsync.tracks_dir(), folder)
     if not os.path.isdir(dest):
         return {"ok": False, "error": "that track is not installed"}
+    unreg = {}
+    try:
+        unreg = trackmod.unregister_client_track(folder) or {}
+    except Exception as ex:                        # noqa: BLE001
+        unreg = {"ok": False, "error": str(ex)}
+    if not unreg.get("ok"):
+        if unreg.get("needs_close"):
+            return {"ok": False, "needs_close": True,
+                    "error": "close the game first - removing a track edits "
+                             "the client tables, and deleting the files "
+                             "without that leaves the game listing a track "
+                             "it cannot load"}
+        logs.LOG.warning("could not unregister %s before deleting: %s",
+                         folder, unreg.get("error"))
     shutil.rmtree(dest)
     _unshare_name(track=folder)
     cache = os.path.join(config.DATA, "track_map.json")
@@ -1330,7 +1358,8 @@ def remove_track(folder):
             os.remove(cache)
     except OSError:
         pass
-    return {"ok": True, "removed": dest, "folder": folder}
+    return {"ok": True, "removed": dest, "folder": folder,
+            "unregistered": bool(unreg.get("ok"))}
 
 
 def export_car(name, dest_dir=None):
