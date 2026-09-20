@@ -5393,8 +5393,22 @@ function evoshareWatch(item) {
     }
     misses = 0;
     if (st.phase === 'done') {
-      toast('Installed ' + (item.name || item.id)
-            + (st.folder ? ' — added to the game track list' : ''));
+      /* ⚠ Downloaded is not installed. Registering a track edits the client
+         tables and cannot happen while the game holds content.kspkg open, so
+         say which of the two actually happened - "added to the track list"
+         when it was refused is how someone ends up staring at a 2 GB download
+         the game will not show them. */
+      if (st.needs_close) {
+        toast('Downloaded ' + (item.name || item.id)
+              + ' — close the game, then press Get content again to add it '
+              + 'to the track list', true);
+      } else if (st.registered === false) {
+        toast('Downloaded ' + (item.name || item.id) + ' — but '
+              + (st.note || 'it is not in the track list yet'), true);
+      } else {
+        toast('Installed ' + (item.name || item.id)
+              + (st.folder ? ' — added to the game track list' : ''));
+      }
       return;
     }
     if (st.phase === 'error') {

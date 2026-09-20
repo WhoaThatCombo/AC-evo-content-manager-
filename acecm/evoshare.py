@@ -233,11 +233,21 @@ def _run(base, fname, folder):
                     _write(it, bytes(buf[at:at + it["s"]]))
                     got += it["s"]
                     _set(done=_state.get("done", 0) + 1, bytes=got)
-        # ⚠ A track on disk is not yet a track the game can load.
+        # ⚠ A track on disk is not yet a track the game can load - it has to
+        # be in the client's tables, and that edit CANNOT happen while the
+        # game is running because content.kspkg is locked. Report what
+        # actually happened: claiming "added to the track list" when the
+        # registration was refused is how someone ends up staring at a 2 GB
+        # download the game will not show them.
         folder = folder or _folder_of(need)
+        reg = {"ok": True, "skipped": True}
         if folder:
-            contentsync._register_downloaded_track(folder)
-        _set(active=False, phase="done", folder=folder)
+            reg = contentsync._register_downloaded_track(folder) or {}
+        _set(active=False, phase="done", folder=folder,
+             registered=bool(reg.get("ok")),
+             needs_close=bool(reg.get("needs_close")),
+             note=("" if reg.get("ok") else
+                   (reg.get("error") or "could not add it to the track list")))
     except Exception as ex:                      # noqa: BLE001
         logs.LOG.warning("evoshare download failed: %s", ex)
         _set(active=False, phase="error", error=str(ex))
