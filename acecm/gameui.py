@@ -500,25 +500,45 @@ def enter_singleplayer():
 
 
 _GOTO_MP = """
-(function(){
+(function(target){
   if (!window.ksUI) return 'no-ksUI';
   if ((location.href||'').indexOf('multiplayer') >= 0) return 'already-mp';
+  if (target) {
+    ksUI.goTo('multiplayer.html', 'multiplayer/serverlist/' + target);
+    return 'goto-mp-target';
+  }
   ksUI.goTo('multiplayer.html', 'main/serverlist');
   return 'goto-mp';
-})()
+})
 """
 
 
 def enter_multiplayer(ip="", tcp=0, password=""):
-    """Open the in-game public list once.
+    """Open the in-game public list, pointed at one server when we know it.
 
-    Do not stuff ip:port into the path. That is not a real submenu, so
-    the router rejects it and snaps back to main/main — which is the
-    bounce both machines were seeing. Join picks the row after the
-    list is up.
+    ⚠ The namespace matters, and we had this wrong. An address appended to
+    `main/serverlist` IS rejected - the router snaps back to main/main, which
+    is the bounce this function used to warn about. The real deep link lives
+    under `multiplayer/`:
+
+        multiplayer/serverlist/<ip>:<port>|<password>
+
+    Verified live 2026-09-20: the path settles on multiplayer/serverlist and
+    stays there. The password rides along, which the old route had no way to
+    carry.
+
+    This only PRE-TARGETS the page. It does not join - join_public still
+    matches the row, verifies the selection and presses Join, because being
+    pointed at a server is not the same as being on the right one (see
+    acecm-multi-server-wrong-join). If we have no address, fall back to the
+    plain list.
     """
+    target = ""
+    if ip and tcp:
+        target = "%s:%s|%s" % (ip, int(tcp), password or "")
     page = menu_page()
-    return js_value(evaluate(_GOTO_MP, page=page, timeout=10,
+    expr = "(" + _GOTO_MP + ")(" + json.dumps(target) + ")"
+    return js_value(evaluate(expr, page=page, timeout=10,
                              user_gesture=False))
 
 
@@ -564,6 +584,20 @@ _JOIN_PUBLIC = """
      not joining. */
   if (String(page.selectedServerId) !== String(hit.server_id)) {
     return 'select-mismatch:' + page.selectedServerId + ':' + hit.server_id;
+  }
+  /* ⚠ The game disables #btnJoin when the CURRENT CAR is not allowed on the
+     selected server - that is the real meaning of "join did nothing" when a
+     server restricts its car list. We connect through connectToServer rather
+     than the button, so the button is not the mechanism here, only the
+     signal: read it and say so plainly instead of retrying for 50s. Checked
+     after the selection is verified, because an unselected row disables it
+     too. #btnSpectate is the spectate equivalent. */
+  var jb = document.querySelector('#btnJoin');
+  if (jb && jb.hasAttribute('disabled')) {
+    var cn = (window.CurrentCar && CurrentCar.model &&
+              (CurrentCar.model.name || CurrentCar.model.display_name)) || '?';
+    window.__acecmJoin = '';
+    return 'car-not-eligible:' + cn;
   }
   window.__acecmJoin = key;
   try {
@@ -813,51 +847,68 @@ def focus_game():
 _SELECT = """
 (async function(want){
   if (!window.VEHICLES) return 'no-VEHICLES';
-  var model = String(want.model || '');
-  var preset = String(want.preset || '');
-  function blob(m){
-    if (!m) return '';
-    var s = [m.name, m.display_name, m.car_guid].join(' ');
-    var ps = (m.__uimetadata && m.__uimetadata.presets) || [];
-    for (var i = 0; i < ps.length; i++) {
-      s += ' ' + [ps[i].name, ps[i].car_guid, ps[i].display_name].join(' ');
+  /* A game "model" is a TRIPLE: the car, its mechanical configuration (trim)
+     and its visual preset (livery) - each pair carrying its own car_guid, and
+     SetCurrentCar wants that exact pair. Matching on a flattened string of
+     names picks whichever trim sorts first, which is how you ask for a Cup
+     car and get the base one. Narrow in that order and only then widen:
+        name + mech + visual  ->  name + mech  ->  name
+     checking the top-level list and each model's __uimetadata.presets at
+     every step, exactly as the game's own menu resolves it. */
+  var norm = function(x){ return String(x == null ? '' : x).trim().toLowerCase(); };
+  var model  = norm(want.model);
+  var mech   = norm(want.mech);
+  var visual = norm(want.visual || want.preset);
+  function names(m){
+    if (!m) return null;
+    return {
+      n: norm(m.name) || norm(m.display_name),
+      c: norm(m.configuration && m.configuration.name),
+      p: norm(m.preset && m.preset.name)
+    };
+  }
+  function byName(m){
+    var x = names(m);
+    if (!x) return false;
+    if (!model) return false;
+    return x.n === model || (x.n && x.n.indexOf(model) >= 0);
+  }
+  function byMech(m){ var x = names(m); return byName(m) && (!mech || x.c === mech); }
+  function byPair(m){ var x = names(m); return byMech(m) && (!visual || x.p === visual); }
+  function presets(m){
+    return (m && m.__uimetadata && Array.isArray(m.__uimetadata.presets))
+      ? m.__uimetadata.presets : [];
+  }
+  var list = [];
+  try { list = (await VEHICLES.getAllModels()) || []; } catch (e) { list = []; }
+  function search(pred){
+    var hit = list.find(pred);
+    if (hit) return hit;
+    for (var i = 0; i < list.length; i++) {
+      var p = presets(list[i]).find(pred);
+      if (p) return p;
     }
-    return s.toLowerCase();
+    return null;
   }
-  function match(m){
-    var b = blob(m);
-    if (!b) return false;
-    if (model && b.indexOf(model.toLowerCase()) >= 0) return true;
-    if (preset && b.indexOf(preset.toLowerCase()) >= 0) return true;
-    return false;
+  var found = search(byPair) || search(byMech) || search(byName);
+  /* last resort: the old loose match, so a guid or display-name still works */
+  if (!found && (model || visual)) {
+    var loose = function(m){
+      var x = [m && m.name, m && m.display_name, m && m.car_guid].join(' ').toLowerCase();
+      return (model && x.indexOf(model) >= 0) || (visual && x.indexOf(visual) >= 0);
+    };
+    found = search(loose);
   }
-  var found = null;
-  try {
-    var list = await VEHICLES.getAllModels();
-    found = (list || []).find(match);
-    if (!found) {
-      for (var i = 0; i < (list || []).length; i++) {
-        var ps = (list[i].__uimetadata && list[i].__uimetadata.presets) || [];
-        var p = ps.find(match);
-        if (p) { found = p; break; }
-      }
-    }
-    if (!found && list && list.length)
-      return 'not-found:' + list.length + ':' + blob(list[0]).slice(0, 80);
-  } catch (e) {
-    found = null;
-  }
-  if (!found && model)
-    found = { name: model, display_name: model };
+  if (!found && list.length)
+    return 'not-found:' + list.length + ':' + norm(list[0] && list[0].name).slice(0, 60);
+  if (!found && model) found = { name: want.model, display_name: want.model };
   if (!found) return 'not-found';
-  try {
-    await VEHICLES.setCurrent(found);
-  } catch (e) {
-    return 'set-fail:' + String(e && e.message || e);
-  }
+  try { await VEHICLES.setCurrent(found); }
+  catch (e) { return 'set-fail:' + String(e && e.message || e); }
+  var x = names(found) || {};
   var now = (window.CurrentCar && CurrentCar.model &&
              (CurrentCar.model.name || CurrentCar.model.display_name)) || '';
-  return 'set:' + (found.name || found.car_guid || model) + ' now:' + now;
+  return 'set:' + [x.n, x.c || '-', x.p || '-'].join('/') + ' now:' + now;
 })
 """
 
@@ -875,10 +926,20 @@ def current_car_name():
     return ""
 
 
-def select_car(model, preset=""):
-    """Ask the garage to make this the current car. Same as picking it in UI."""
+def select_car(model, preset="", mech="", visual=""):
+    """Ask the garage to make this the current car. Same as picking it in UI.
+
+    `mech` is the mechanical configuration (trim) and `visual` the preset
+    (livery). Given all three the exact pair is selected; given fewer, the
+    search widens one step at a time rather than guessing.
+    """
     page = menu_page()
-    want = json.dumps({"model": model or "", "preset": preset or ""})
+    want = json.dumps({
+        "model": model or "",
+        "preset": preset or "",
+        "mech": mech or "",
+        "visual": visual or preset or "",
+    })
     expr = "(" + _SELECT + ")(" + want + ")"
     return js_value(evaluate(expr, page=page, timeout=30, attempts=2))
 

@@ -771,7 +771,7 @@ def _enter_and_join(pick, sv):
               + (sv.get("server_name") or host))
     gameui.focus_game()
     try:
-        went = gameui.enter_multiplayer()
+        went = gameui.enter_multiplayer(host, tcp, pw)
         logs.LOG.info("drive ui multiplayer: %s", went)
     except OSError as ex:
         logs.LOG.warning("drive multiplayer goto lost: %s", ex)
@@ -807,6 +807,15 @@ def _enter_and_join(pick, sv):
             _set(phase="joining", hint="waiting for the in-game server list")
         elif val == "no-car":
             _set(phase="joining", hint="waiting for the current car")
+        elif val.startswith("car-not-eligible:"):
+            # ⚠ Not a timing problem, so retrying for 50s only wastes the
+            # user's time: the server's car policy excludes the current car
+            # and the game has already disabled Join. Say which car it is.
+            car = val.split(":", 1)[1] or "your current car"
+            gameui.focus_game()
+            return {"ok": False,
+                    "error": "this server does not allow " + car
+                             + " - pick a car it permits and try again"}
         elif val.startswith("select-mismatch:"):
             # the page highlighted a different row than the one we asked for;
             # retrying is right - joining whatever is selected is how you end
