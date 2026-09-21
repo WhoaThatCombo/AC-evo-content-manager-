@@ -5529,7 +5529,18 @@ async function evoshareFrom(s) {
 async function evoshareQueue(base, queue) {
   const next = async () => {
     const job = queue.shift();
-    if (!job) { toast('All downloads finished'); contentPage && null; return; }
+    if (!job) {
+      toast('All downloads finished');
+      /* ⚠ Rebuild the page that is showing. The car picker filters what the
+         server allows against what you HAVE, and both lists were read before
+         the download - so a car that just arrived was still absent and the
+         server read as "no cars available". `contentPage && null` was a
+         no-op left here by mistake, so nothing refreshed at all.
+         Safe to rebuild Drive now: the live selection survives it. */
+      if (_page === 'drive') drivePage();
+      else if (_page === 'content') contentPage();
+      return;
+    }
     const r = await api('evoshare/start',
                         { base, file: job.it.file, kind: job.kind,
                           folder: job.it.id || '' });
