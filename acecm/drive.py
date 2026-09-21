@@ -791,11 +791,34 @@ def _enter_and_join(pick, sv):
         logs.LOG.info("drive ui multiplayer: %s (deep=%s)", went, deep)
     except OSError as ex:
         logs.LOG.warning("drive multiplayer goto lost: %s", ex)
+    # ⚠ Ask again until the page is actually open. Same fault 1.0.11 fixed in
+    # capture and this path did not get: while the game is working through the
+    # public list it stops answering the inspector, the goto is dropped with
+    # nothing to show for it, and Join sat on the home menu until the wait
+    # below gave up. One attempt is not enough on a busy UI.
     on = _wait_page("mp", 20)
     if gameui.boot_page(on) != "mp" and not gameui.session_loading(on):
-        return {"ok": False,
-                "error": "Multiplayer never stayed open (last "
-                         + (on or "-") + ")"}
+        retry_until = time.time() + 40
+        while time.time() < retry_until:
+            if not backend._game_running():
+                return {"ok": False, "error": "the game closed before joining"}
+            if gameui.server_list_page():
+                break
+            _set(phase="joining", hint="waiting for Multiplayer to open")
+            try:
+                logs.LOG.info("drive ui multiplayer retry: %s",
+                              gameui.enter_multiplayer(host, tcp, pw, deep=deep))
+            except OSError as ex:
+                logs.LOG.warning("drive multiplayer retry lost: %s", ex)
+            time.sleep(2.0)
+        else:
+            on = _wait_page("mp", 5)
+            if (gameui.boot_page(on) != "mp"
+                    and not gameui.session_loading(on)):
+                return {"ok": False,
+                        "error": "Multiplayer never opened - the game stopped "
+                                 "responding to ACECM (last " + (on or "-")
+                                 + ")"}
     # Let the page fetch the list once. Do not refresh it — overlapping
     # ServerList replies while connecting crash the physics thread.
     time.sleep(2.5)
