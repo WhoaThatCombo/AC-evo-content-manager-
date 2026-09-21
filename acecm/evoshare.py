@@ -116,13 +116,63 @@ def _rel(n):
     return p
 
 
-def plan(base, fname):
+def car_presets(idx):
+    """The mechanical preset names inside a car pack.
+
+    The mods-root .json descriptor needs these: a car whose .kspkg is present
+    but whose .json is missing does not appear in the car list at all, which
+    ACECM already calls out as "the failure mode that looks like a server
+    bug". The names are readable straight off the index - one
+    presets/<name>.mechanicalcarpreset per mechanical trim.
+    """
+    out = []
+    for e in idx.get("entries") or []:
+        n = (e.get("n") or "").replace("\\", "/")
+        if n.lower().endswith(".mechanicalcarpreset"):
+            out.append(n.rsplit("/", 1)[-1].rsplit(".", 1)[0])
+    return sorted(set(out))
+
+
+def plan_car(base, fname, name=""):
+    """A car mod installs as a WHOLE pack, not as extracted files.
+
+    ⚠ Do not run a car through the track path. Its entries are
+    `content/cars/...` (backslashes in the real payload), which contentsync.destination() has no branch for -
+    they would fall through and land flattened in the tracks folder - and a
+    car carries .curve/.animation/.tyre/.wing/.design/.otf, none of which are
+    in CONTENT_EXTS, so most of it would be silently skipped. Every car mod
+    already on this machine is a `<name>.kspkg` + `<name>.json` pair in the
+    mods root; match that.
+    """
+    from . import install
+    d = install.client_mods_dir()
+    if not d:
+        return {"ok": False, "error": "no client mods folder"}
+    dest = os.path.join(d, fname)
+    base_name = fname[:-6] if fname.lower().endswith(".kspkg") else fname
+    side = os.path.join(d, base_name + ".json")
+    man = manifest(base)
+    want = 0
+    for c in (man.get("content") or []):
+        if c.get("file") == fname:
+            want = int(c.get("bytes") or 0)
+    have = os.path.isfile(dest) and (not want or os.path.getsize(dest) == want)
+    return {"ok": True, "kind": "car", "dest": dest, "side": side,
+            "bytes": 0 if have else want, "have": bool(have),
+            "have_side": os.path.isfile(side),
+            "need": [] if (have and os.path.isfile(side))
+                    else [{"rel": fname, "s": want}]}
+
+
+def plan(base, fname, kind="track"):
     """What of this pack is missing here.
 
     "Missing" is judged by size, because the index's per-entry hash `h` is
     empty on every entry observed - so there is nothing better to compare
     against, and calling a size check a checksum would be a lie.
     """
+    if (kind or "").lower() == "car":
+        return plan_car(base, fname)
     idx = index(base, fname)
     if not idx.get("ok"):
         return idx
@@ -173,15 +223,16 @@ def _set(**kw):
         _state.update(kw)
 
 
-def start(base, fname, folder=""):
-    """Download the missing entries in a background thread."""
+def start(base, fname, folder="", kind="track"):
+    """Download what is missing, in a background thread."""
     with _lock:
         if _state.get("active"):
             return {"ok": False, "error": "a download is already running"}
         _state.clear()
         _state.update(active=True, phase="planning", done=0, total=0,
-                      bytes=0, want=0, error="", server=base, file=fname)
-    threading.Thread(target=_run, args=(base, fname, folder),
+                      bytes=0, want=0, error="", server=base, file=fname,
+                      kind=kind)
+    threading.Thread(target=_run, args=(base, fname, folder, kind),
                      daemon=True).start()
     return {"ok": True, "started": True}
 
@@ -191,8 +242,10 @@ def cancel():
     return {"ok": True}
 
 
-def _run(base, fname, folder):
+def _run(base, fname, folder, kind="track"):
     try:
+        if (kind or "").lower() == "car":
+            return _run_car(base, fname)
         p = plan(base, fname)
         if not p.get("ok"):
             _set(active=False, phase="error",
@@ -272,3 +325,75 @@ def _write(it, raw):
     with open(tmp, "wb") as f:
         f.write(data)
     os.replace(tmp, dest)
+
+
+def _run_car(base, fname):
+    """Fetch a whole car pack and write the descriptor beside it."""
+    from . import install
+    p = plan_car(base, fname)
+    if not p.get("ok"):
+        _set(active=False, phase="error", error=p.get("error") or "no plan")
+        return
+    dest, side = p["dest"], p["side"]
+    want = int(p.get("bytes") or 0)
+    if p.get("have") and p.get("have_side"):
+        _set(active=False, phase="done", total=0, done=0,
+             note="you already have this car")
+        return
+    _set(phase="downloading", total=1, want=want)
+    if not p.get("have"):
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = dest + ".part"
+        # resume a part-finished file rather than starting the GB again
+        at = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+        url = _url(base, "content", fname)
+        rng = (at, want - 1) if (at and want and at < want) else None
+        with _get(url, rng=rng, timeout=60) as r,                 open(tmp, "ab" if at else "wb") as f:
+            got = at
+            while True:
+                if _state.get("cancel"):
+                    _set(active=False, phase="cancelled")
+                    return
+                chunk = r.read(CHUNK)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                _set(bytes=got)
+        os.replace(tmp, dest)
+        _set(done=1)
+    # ⚠ The .json is what makes the car APPEAR. A pack without it installs
+    # silently and then simply is not in the car list, which reads as a
+    # broken download. Build it from the pack's own mechanical presets.
+    wrote_side = False
+    if not os.path.isfile(side):
+        idx = index(base, fname)
+        presets = car_presets(idx) if idx.get("ok") else []
+        label = ""
+        for c in (manifest(base).get("content") or []):
+            if c.get("file") == fname:
+                label = c.get("name") or c.get("id") or ""
+        if presets:
+            # ⚠ Match the shape the game's own descriptors use, fields and
+            # all - install.py only reads three of them, but a descriptor
+            # that is a subset of the real thing is a gamble taken for no
+            # reason. performance_indicator is honestly 0: it is not in the
+            # pack anywhere, and inventing a rating would be worse than
+            # admitting we do not know it.
+            json.dump({"cars": [{"name": n,
+                                 "display_name": label or n,
+                                 "performance_indicator": 0,
+                                 "property_1": 0,
+                                 "property_2": 0,
+                                 "property_3": 0}
+                                for n in presets]},
+                      open(side, "w", encoding="utf-8"), indent=2)
+            wrote_side = True
+        else:
+            logs.LOG.warning("no mechanicalcarpreset in %s - cannot write the "
+                             "descriptor, the car will not be listed", fname)
+    _set(active=False, phase="done", kind="car", dest=dest,
+         wrote_descriptor=wrote_side,
+         note="" if (wrote_side or os.path.isfile(side))
+              else "downloaded, but no descriptor could be built - the car "
+                   "will not appear in the car list")

@@ -5452,36 +5452,62 @@ async function evoshareFrom(s) {
   toast('Asking ' + (s.name || s.server_ip) + ' what it shares…');
   const m = await api('evoshare/manifest?base=' + encodeURIComponent(base));
   if (!m.ok) { toast(m.error || 'that share did not answer', true); return; }
-  const item = (m.content || [])[0];
-  if (!item) { toast('that share publishes nothing', true); return; }
+  const items = m.content || [];
+  if (!items.length) { toast('that share publishes nothing', true); return; }
   if (m.max && m.active >= m.max) {
     toast('That host is busy (' + m.active + '/' + m.max
           + ' downloads) — try again shortly', true);
     return;
   }
+  /* ⚠ Plan EVERY item, not just the first. A host lists one entry per thing,
+     and a drift server publishes its track plus five car mods - taking
+     content[0] meant the cars were invisible and "Get content" looked like it
+     had nothing to offer. contentFrom's ACECM path already learned this; this
+     path repeated the mistake. */
   toast('Checking what you already have…');
-  const p = await api('evoshare/plan?base=' + encodeURIComponent(base)
-                      + '&file=' + encodeURIComponent(item.file));
-  if (!p.ok) { toast(p.error || 'could not read the share index', true); return; }
-  if (!(p.need || []).length) {
-    toast('You already have ' + (item.name || item.id)); return;
+  const plans = [];
+  for (const it of items) {
+    const kind = it.kind === 'car' ? 'car' : 'track';
+    const p = await api('evoshare/plan?base=' + encodeURIComponent(base)
+                        + '&file=' + encodeURIComponent(it.file)
+                        + '&kind=' + kind);
+    if (p && p.ok && (p.need || []).length) plans.push({ it, kind, p });
   }
-  const gb = ((p.bytes || 0) / 1e9).toFixed(2);
-  if (!await ask('Download ' + (item.name || item.id) + ' from '
-      + (s.name || s.server_ip) + '?\n\n'
-      + p.need.length + ' of ' + p.total + ' files — ' + gb + ' GB\n\n'
-      + 'This comes from that server\'s own machine, not from ACECM.')) return;
-  const r = await api('evoshare/start',
-                      { base, file: item.file, folder: item.id || '' });
-  if (!r.ok) { toast(r.error || 'could not start', true); return; }
-  toast('Downloading ' + (item.name || item.id) + ' — ' + gb + ' GB');
-  evoshareWatch(item);
+  if (!plans.length) {
+    toast('You already have everything ' + (s.name || s.server_ip)
+          + ' publishes');
+    return;
+  }
+  const bytes = plans.reduce((a, x) => a + (x.p.bytes || 0), 0);
+  const lines = plans.map(x => '  • ' + (x.it.name || x.it.id)
+    + ' (' + x.kind + ', ' + ((x.it.bytes || 0) / 1e9).toFixed(2) + ' GB)');
+  if (!await ask('Download ' + plans.length + ' item'
+      + (plans.length === 1 ? '' : 's') + ' from '
+      + (s.name || s.server_ip) + '?\n\n' + lines.join('\n')
+      + '\n\nTotal ' + (bytes / 1e9).toFixed(2) + ' GB, from that server\'s '
+      + 'own machine rather than from ACECM.')) return;
+  evoshareQueue(base, plans.slice());
 }
 
-/* Poll while it runs. Progress goes out as milestone toasts rather than one
-   every tick - there is no status bar to write to, and a toast every two
-   seconds for an hour is not progress, it is noise. */
-function evoshareWatch(item) {
+/* One at a time: the share advertises a slot limit (max, observed 3) and the
+   backend runs a single download, so the queue lives here. */
+async function evoshareQueue(base, queue) {
+  const next = async () => {
+    const job = queue.shift();
+    if (!job) { toast('All downloads finished'); contentPage && null; return; }
+    const r = await api('evoshare/start',
+                        { base, file: job.it.file, kind: job.kind,
+                          folder: job.it.id || '' });
+    if (!r.ok) { toast(r.error || 'could not start', true); return; }
+    toast('Downloading ' + (job.it.name || job.it.id) + ' — '
+          + ((job.it.bytes || 0) / 1e9).toFixed(2) + ' GB'
+          + (queue.length ? ' (' + queue.length + ' more after this)' : ''));
+    evoshareWatch(job.it, next);
+  };
+  next();
+}
+
+function evoshareWatch(item, onDone) {
   let misses = 0;
   let mark = 0;
   const tick = async () => {
@@ -5492,11 +5518,10 @@ function evoshareWatch(item) {
     }
     misses = 0;
     if (st.phase === 'done') {
-      /* ⚠ Downloaded is not installed. Registering a track edits the client
-         tables and cannot happen while the game holds content.kspkg open, so
-         say which of the two actually happened - "added to the track list"
-         when it was refused is how someone ends up staring at a 2 GB download
-         the game will not show them. */
+      /* ⚠ Downloaded is not installed. A track needs its table rows, which
+         cannot be written while the game holds content.kspkg; a car needs its
+         .json descriptor or it simply never appears in the car list. Say
+         which of those actually happened. */
       if (st.needs_close) {
         toast('Downloaded ' + (item.name || item.id)
               + ' — close the game, then press Get content again to add it '
@@ -5504,10 +5529,12 @@ function evoshareWatch(item) {
       } else if (st.registered === false) {
         toast('Downloaded ' + (item.name || item.id) + ' — but '
               + (st.note || 'it is not in the track list yet'), true);
+      } else if (st.kind === 'car' && st.note) {
+        toast('Downloaded ' + (item.name || item.id) + ' — ' + st.note, true);
       } else {
-        toast('Installed ' + (item.name || item.id)
-              + (st.folder ? ' — added to the game track list' : ''));
+        toast('Installed ' + (item.name || item.id));
       }
+      if (onDone) onDone();
       return;
     }
     if (st.phase === 'error') {
@@ -5518,8 +5545,9 @@ function evoshareWatch(item) {
       const pct = st.want ? Math.floor((st.bytes || 0) / st.want * 100) : 0;
       if (pct >= mark + 10) {
         mark = pct - (pct % 10);
-        toast((item.name || item.id) + ' — ' + pct + '% ('
-              + (st.done || 0) + '/' + (st.total || 0) + ' files)');
+        toast((item.name || item.id) + ' — ' + pct + '%'
+              + (st.total > 1 ? ' (' + (st.done || 0) + '/' + st.total
+                                + ' files)' : ''));
       }
       setTimeout(tick, 2000);
     }

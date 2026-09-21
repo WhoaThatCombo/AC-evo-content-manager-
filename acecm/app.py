@@ -443,7 +443,8 @@ class Handler(BaseHTTPRequestHandler):
                     (q.get("base") or [""])[0]))
             if path == "/api/evoshare/plan":
                 return _json(self, evoshare.plan(
-                    (q.get("base") or [""])[0], (q.get("file") or [""])[0]))
+                    (q.get("base") or [""])[0], (q.get("file") or [""])[0],
+                    (q.get("kind") or ["track"])[0]))
             if path == "/api/evoshare/status":
                 return _json(self, evoshare.status())
             # --- mods-folder disk compression -----------------------------
@@ -1055,7 +1056,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/evoshare/start":
                 return _json(self, evoshare.start(
                     body.get("base") or "", body.get("file") or "",
-                    body.get("folder") or ""))
+                    body.get("folder") or "",
+                    body.get("kind") or "track"))
             if path == "/api/evoshare/cancel":
                 return _json(self, evoshare.cancel())
             if path == "/api/backend/start":
