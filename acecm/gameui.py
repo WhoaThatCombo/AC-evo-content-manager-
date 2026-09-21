@@ -619,6 +619,24 @@ _JOIN_PUBLIC = """
 """
 
 
+def server_list_page():
+    """Is the in-game server list actually open?
+
+    ⚠ The check that matters is the PAGE, not the route. A goto can be
+    accepted and still not have taken effect while cohtml is busy, and the
+    capture used to assume one fire landed - which is how Refresh list ended
+    up sitting on the home menu with nothing saying why. Returns False rather
+    than raising when the inspector will not answer, because "cannot tell"
+    and "not there" lead to the same decision: ask again.
+    """
+    try:
+        r = js_value(evaluate("!!document.querySelector('ks-page-serverlist')",
+                              page=menu_page(), timeout=6, attempts=1))
+    except OSError:
+        return False
+    return bool(isinstance(r, dict) and r.get("value"))
+
+
 def join_public(ip, tcp, password="", server_id=""):
     """Select the row in the in-game list and press Join once."""
     page = menu_page()

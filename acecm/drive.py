@@ -1481,11 +1481,36 @@ def _run_capture():
             return
         _set(phase="capturing_list", hint="opening the in-game server list")
         gameui.focus_game()
-        try:
-            logs.LOG.info("drive capture goto: %s", gameui.enter_multiplayer())
-        except Exception as ex:
-            logs.LOG.warning("drive capture goto: %s", ex)
-        time.sleep(1.2)
+        # ⚠ Fire-and-forget did not survive contact with a busy UI. The game
+        # pulls the whole public list the moment it connects to the lobby, and
+        # while cohtml is chewing on ~900 servers an inspector evaluate simply
+        # times out - so the goto never ran, nothing said so, and Refresh list
+        # sat on the home menu until it gave up. Ask repeatedly and CHECK that
+        # the page actually changed, rather than assuming one shot landed.
+        goto_deadline = time.time() + 45
+        landed = False
+        while time.time() < goto_deadline:
+            if not backend._game_running():
+                _set(phase="failed",
+                     fault="the game closed before the list arrived")
+                return
+            try:
+                r = gameui.enter_multiplayer()
+                logs.LOG.info("drive capture goto: %s", r)
+            except Exception as ex:
+                logs.LOG.warning("drive capture goto: %s", ex)
+            time.sleep(1.5)
+            try:
+                on = gameui.boot_page(gameui.menu_page())
+            except Exception:                      # noqa: BLE001
+                on = ""
+            if gameui.server_list_page():
+                landed = True
+                break
+            _set(phase="capturing_list",
+                 hint="waiting for the in-game server list to open")
+        if not landed:
+            logs.LOG.warning("drive capture: multiplayer never opened")
         try:
             logs.LOG.info("drive capture refresh: %s",
                           gameui.refresh_server_list())
@@ -1580,7 +1605,10 @@ def _public_briefs():
                          int(s.get("server_tcp_port") or 0))] = s
             except (TypeError, ValueError):
                 pass
-        for s in evoreg.fetch().get("servers") or []:
+        # ⚠ block=False: this is on the Drive server list, and the browser
+        # abandons that request at 12 s. A third-party host being slow must
+        # cost us a stale row, never the whole list.
+        for s in evoreg.fetch(block=False).get("servers") or []:
             key = (s["server_ip"], int(s["server_tcp_port"]))
             known = by_addr.get(key)
             if known is None:
