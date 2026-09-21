@@ -462,8 +462,10 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, evoshare.status())
             # --- mods-folder disk compression -----------------------------
             if path == "/api/compress":
+                # never block the page on a 90k-file walk; see compress.measure
                 return _json(self, compress.measure(
-                    force=(q.get("refresh") or [""])[0] == "1"))
+                    force=(q.get("refresh") or [""])[0] == "1",
+                    block=False))
             if path == "/api/compress/status":
                 return _json(self, compress.status())
             # --- pictures for the car and track lists --------------------

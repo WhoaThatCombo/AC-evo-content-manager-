@@ -67,7 +67,27 @@ _cache = {"at": 0.0, "root": "", "val": None}
 TTL = 90.0
 
 
-def measure(path="", force=False):
+_measuring = threading.Lock()
+
+
+def _kick_measure(root):
+    """Measure in the background; callers get whatever is cached."""
+    if not _measuring.acquire(blocking=False):
+        return
+    def go():
+        try:
+            measure(root, force=True)
+        except Exception:                          # noqa: BLE001
+            pass
+        finally:
+            try:
+                _measuring.release()
+            except RuntimeError:
+                pass
+    threading.Thread(target=go, daemon=True).start()
+
+
+def measure(path="", force=False, block=True):
     """Logical vs on-disk for the mods folder.
 
     ⚠ Cached. Walking ~90k files costs seconds, and this is drawn at the top
@@ -85,6 +105,16 @@ def measure(path="", force=False):
     if (not force and _cache["val"] and _cache["root"] == root
             and now - _cache["at"] < TTL):
         return {**_cache["val"], "cached": True}
+    # ⚠ Walking ~90k files takes over 12 seconds, which is exactly when the
+    # browser's api() helper gives up - so a blocking measure made the Disk
+    # space card intermittently never appear. Hand back what we have (or a
+    # "measuring" placeholder) and fill it in on the next poll.
+    if not block:
+        _kick_measure(root)
+        if _cache["val"] and _cache["root"] == root:
+            return {**_cache["val"], "cached": True, "stale": True}
+        return {"ok": False, "supported": True, "measuring": True,
+                "path": root, "error": "measuring the mods folder…"}
     logical = disk = files = 0
     # scandir hands back the logical size from the directory entry, so only
     # the on-disk figure needs a syscall per file - half the work os.walk +

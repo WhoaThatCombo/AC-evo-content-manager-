@@ -27,6 +27,7 @@ honestly rather than sending their `EvoForge registry` user-agent.
 """
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -42,10 +43,17 @@ BASES = (
 # They cache `list` for 20 s in their own client; match it rather than
 # hammering a small third-party service on every page draw.
 TTL = 20.0
-TIMEOUT = 8.0
+# ⚠ Short, and it matters. This runs behind the Drive server list, and the
+# browser's api() helper aborts at 12 s - so two bases at 8 s each could burn
+# 16 s and the list simply never rendered. Nothing here is worth a UI stall.
+TIMEOUT = 3.0
+# A host that is down stays down for a bit; retrying it every 20 s just pays
+# the timeout over and over.
+FAIL_BACKOFF = 300.0
 UA = "ACECM/%s (+https://github.com/WhoaThatCombo/AC-evo-content-manager-)" % VERSION
 
-_mem = {"at": 0.0, "servers": [], "base": ""}
+_mem = {"at": 0.0, "servers": [], "base": "", "failed_at": 0.0}
+_refreshing = threading.Lock()
 
 
 def _cache_path():
@@ -107,12 +115,26 @@ def _norm(rec):
     }
 
 
-def fetch(force=False):
-    """The directory, memory-cached for TTL and disk-cached across runs."""
+def fetch(force=False, block=True):
+    """The directory, memory-cached for TTL and disk-cached across runs.
+
+    ⚠ `block=False` is what any UI path must use. This talks to a third-party
+    host, and a request the browser gives up on at 12 s cannot be allowed to
+    depend on someone else's uptime: with the host unreachable the two bases
+    took 16 s between them and the Drive server list never rendered at all.
+    Non-blocking hands back whatever we already have - possibly nothing - and
+    refreshes in the background, so the list is at worst one poll out of date
+    instead of missing.
+    """
     now = time.time()
     if not force and (now - _mem["at"]) < TTL and _mem["servers"]:
         return {"ok": True, "servers": list(_mem["servers"]),
                 "cached": True, "base": _mem["base"]}
+    if not block:
+        if now - _mem.get("failed_at", 0.0) > FAIL_BACKOFF:
+            _kick()
+        return {"ok": True, "servers": list(_mem["servers"]),
+                "cached": True, "stale": True, "base": _mem["base"]}
     last = ""
     for base in BASES:
         try:
@@ -140,6 +162,7 @@ def fetch(force=False):
                 "stale": True, "error": last}
     except (OSError, ValueError):
         pass
+    _mem["failed_at"] = time.time()
     logs.LOG.info("evoforge registry unavailable: %s", last)
     return {"ok": False, "servers": [], "error": last or "unavailable"}
 
@@ -151,3 +174,23 @@ def content_for(ip, tcp):
             return {"ok": True, "share_url": s["share_url"],
                     "content": s["content"], "name": s["server_name"]}
     return {"ok": False, "error": "not in the EvoForge directory"}
+
+
+def _kick():
+    """Refresh in the background. One at a time, never blocking a caller."""
+    if not _refreshing.acquire(blocking=False):
+        return
+    def go():
+        try:
+            fetch(force=True, block=True)
+        except Exception:                          # noqa: BLE001
+            pass
+        finally:
+            # defensive: a module reload can swap the lock out from under a
+            # thread that is still running, and a refresh must never take the
+            # process down over its own bookkeeping
+            try:
+                _refreshing.release()
+            except RuntimeError:
+                pass
+    threading.Thread(target=go, daemon=True).start()

@@ -47,7 +47,10 @@ from . import logs
 from .version import VERSION
 
 UA = "ACECM/%s (+https://github.com/WhoaThatCombo/AC-evo-content-manager-)" % VERSION
-TIMEOUT = 20
+# ⚠ Under the browser's 12 s api() abort. manifest/index are small requests
+# on a UI path: a slow host must not stall Get content past the point the page
+# gives up. The content STREAM passes its own, much longer timeout.
+TIMEOUT = 8
 # One ranged GET per contiguous run. Entries sit back to back, so a fresh
 # install coalesces into a handful of streams rather than thousands of
 # requests; a small gap is cheaper to download than to ask for separately.

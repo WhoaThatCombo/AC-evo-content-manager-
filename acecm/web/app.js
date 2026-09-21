@@ -3719,6 +3719,14 @@ async function settingsPage() {
   const paintDisk = (m) => {
     diskRow.innerHTML = '';
     if (!m || !m.ok) {
+      /* ⚠ "measuring" is not a failure: the walk takes longer than the
+         browser waits, so it runs in the background and we poll. Saying
+         "could not measure" here made a working feature look broken. */
+      if (m && m.measuring) {
+        diskLine.textContent = 'Measuring the mods folder…';
+        setTimeout(() => api('compress').then(paintDisk).catch(() => {}), 3000);
+        return;
+      }
       diskLine.textContent = (m && m.supported === false)
         ? 'Disk compression is a Windows feature — not available here.'
         : ((m && m.error) || 'could not measure the mods folder');
