@@ -50,6 +50,8 @@ TIMEOUT = 3.0
 # A host that is down stays down for a bit; retrying it every 20 s just pays
 # the timeout over and over.
 FAIL_BACKOFF = 300.0
+# How long a caller with an EMPTY cache will wait for the in-flight refresh.
+COLD_WAIT = 2.5
 UA = "ACECM/%s (+https://github.com/WhoaThatCombo/AC-evo-content-manager-)" % VERSION
 
 _mem = {"at": 0.0, "servers": [], "base": "", "failed_at": 0.0}
@@ -133,6 +135,15 @@ def fetch(force=False, block=True):
     if not block:
         if now - _mem.get("failed_at", 0.0) > FAIL_BACKOFF:
             _kick()
+        # ⚠ If we have NOTHING yet, wait briefly for the refresh already in
+        # flight rather than confidently answering "no directory servers".
+        # Bounded well under the 12 s the browser allows, so a slow host still
+        # cannot stall the list - but a cold start no longer shows an empty
+        # directory until the user happens to come back to the page.
+        if not _mem["servers"]:
+            until = time.time() + COLD_WAIT
+            while time.time() < until and not _mem["servers"]:
+                time.sleep(0.1)
         return {"ok": True, "servers": list(_mem["servers"]),
                 "cached": True, "stale": True, "base": _mem["base"]}
     last = ""

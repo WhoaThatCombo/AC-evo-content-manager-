@@ -1640,6 +1640,14 @@ def _fatal(msg):
     # ever the bottleneck.
 
 
+def _quietly(fn):
+    """Run a warm-up for its side effect; never let it reach the console."""
+    try:
+        fn()
+    except Exception as ex:                        # noqa: BLE001
+        logs.LOG.info("warm-up skipped: %s", ex)
+
+
 def serve():
     """Bind and start the HTTP server on a background thread; return its URL.
 
@@ -1655,6 +1663,15 @@ def serve():
     # meant a joiner's 4s probe timed out and the host looked like it was not
     # running ACECM until they had retried enough times.
     threading.Thread(target=registry.warm_public_list, daemon=True).start()
+    # ⚠ Warm the EvoForge directory the same way, for the same reason. Since
+    # it became non-blocking (so a slow host cannot stall the Drive list past
+    # the point the browser gives up), the FIRST call returns whatever is
+    # cached - nothing, on a fresh start - and fills in afterwards. Without
+    # this, opening Drive straight after launching showed no directory
+    # servers at all, and only a second visit had them.
+    threading.Thread(
+        target=lambda: _quietly(lambda: evoreg.fetch(force=True)),
+        daemon=True).start()
     # Reclaim leaked onefile extraction folders (see installer.sweep_bundles).
     # Background: it walks %TEMP% and can delete gigabytes, and nothing on the
     # first page depends on it.
