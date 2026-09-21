@@ -219,6 +219,19 @@ def _progress():
                 "what": _INSTALL.get("detail") or "Downloading",
                 "done": _INSTALL.get("done") or 0,
                 "total": _INSTALL.get("total") or 0}
+    # ⚠ A fetch from an EvoForge share is the same job to anyone watching, so
+    # it belongs on the same bar. It used to report only through toasts, which
+    # is the exact complaint this bar was built for: "a download that was
+    # working looked like nothing was happening".
+    # Measured in BYTES, not files: a car mod is a single 680 MB file, and a
+    # 0/1 file counter would sit at zero for the whole download.
+    ev = evoshare.status()
+    if ev.get("active") and (ev.get("want") or 0) > 0:
+        return {"ok": True, "active": True, "phase": "download",
+                "what": "Downloading " + (ev.get("file") or "content")
+                        + " from " + (ev.get("server") or "the host"),
+                "done": ev.get("bytes") or 0,
+                "total": ev.get("want") or 0}
     return {"ok": True, "active": False,
             "state": _INSTALL.get("state") or "idle",
             "what": _INSTALL.get("detail") or ""}

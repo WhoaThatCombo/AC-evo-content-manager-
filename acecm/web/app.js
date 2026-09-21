@@ -5502,6 +5502,11 @@ async function evoshareQueue(base, queue) {
     toast('Downloading ' + (job.it.name || job.it.id) + ' — '
           + ((job.it.bytes || 0) / 1e9).toFixed(2) + ' GB'
           + (queue.length ? ' (' + queue.length + ' more after this)' : ''));
+    /* ⚠ Show the shared bar NOW rather than on the next poll tick. Without
+       this there is a gap at the start of every item where nothing on screen
+       says a multi-GB download has begun - which is the whole reason this
+       path stopped relying on toasts. */
+    progKick();
     evoshareWatch(job.it, next);
   };
   next();
@@ -5509,7 +5514,6 @@ async function evoshareQueue(base, queue) {
 
 function evoshareWatch(item, onDone) {
   let misses = 0;
-  let mark = 0;
   const tick = async () => {
     const st = await api('evoshare/status');
     if (!st || !st.ok) {
@@ -5542,13 +5546,9 @@ function evoshareWatch(item, onDone) {
     }
     if (st.phase === 'cancelled') { toast('Download cancelled'); return; }
     if (st.active) {
-      const pct = st.want ? Math.floor((st.bytes || 0) / st.want * 100) : 0;
-      if (pct >= mark + 10) {
-        mark = pct - (pct % 10);
-        toast((item.name || item.id) + ' — ' + pct + '%'
-              + (st.total > 1 ? ' (' + (st.done || 0) + '/' + st.total
-                                + ' files)' : ''));
-      }
+      /* No progress toasts: /api/progress now carries this job, so the shared
+         bar shows percentage, rate and time left. Toasting the same numbers
+         on top of it was just noise. */
       setTimeout(tick, 2000);
     }
   };
