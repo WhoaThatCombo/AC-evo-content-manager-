@@ -71,6 +71,13 @@ function toast(msg, bad) {
 let driveTimer = null;
 let driveRate = 0;
 let driveReloadT = null;
+/* ⚠ The live Drive selection, kept across rebuilds of the page.
+   drivePage() reconstructs `sel` from the SAVED pick, and the pick is only
+   written when you press Drive/Join - so anything chosen and not yet started
+   (sub-mode, server, car) was discarded whenever the page rebuilt itself,
+   which it does after a capture finishes. That read as the app "jumping back
+   to singleplayer and forgetting the car". */
+let _driveSel = null;
 // ⚠ poll() is defined INSIDE drivePage(), so this top-level helper
 // cannot name it directly - drivePage hands it over here. Calling
 // setInterval(poll, ...) from out here threw ReferenceError on every
@@ -162,7 +169,10 @@ async function drivePage() {
   p.append(viaBar, wrap);
 
   const sel = {
-    via: pick.via === 'server' ? 'server' : 'sp',
+    /* ⚠ 'local' is a real sub-mode (Online > My servers). The old ternary
+       collapsed anything that was not 'server' to 'sp', so a rebuild while
+       you were on My servers dumped you into Single player. */
+    via: (pick.via === 'server' || pick.via === 'local') ? pick.via : 'sp',
     server_id: pick.server_id || '',
     local_id: pick.local_id || '',
     server_ip: pick.server_ip || '',
@@ -191,6 +201,23 @@ async function drivePage() {
     time_mult: pick.time_mult ?? 1,
     starting_position: pick.starting_position ?? 0,
   };
+  /* ⚠ Carry the LIVE selection over a rebuild. The saved pick is only
+     written on Drive/Join, so without this everything chosen since then was
+     silently reverted whenever the page rebuilt - which it does on its own
+     after a capture finishes. Only the fields the user actually picks are
+     carried; everything else comes fresh from the server, so a rebuild still
+     picks up new content and new servers.
+     ⚠ Same object identity afterwards (Object.assign into `sel`, and `sel`
+     stays the holder), because every paint closure below captures `sel`. */
+  if (_driveSel) {
+    for (const k of ['via', 'onlineVia', 'server_id', 'local_id', 'server_ip',
+                     'server_tcp_port', 'server_udp_port', 'password', 'car',
+                     'livery', 'track_index', 'custom_track', 'game_mode']) {
+      if (_driveSel[k] !== undefined && _driveSel[k] !== '' &&
+          _driveSel[k] !== null) sel[k] = _driveSel[k];
+    }
+  }
+  _driveSel = sel;
   // ⚠ Must run again when the public list lands, not only here: the list is
   // fetched after this point now, so at page-build time there is nothing to
   // default to and "Join" would have had no server picked.
