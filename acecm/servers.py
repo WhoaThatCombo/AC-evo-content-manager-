@@ -459,8 +459,13 @@ def status(profile):
         # every dashboard / overview load wait a full second when the server
         # was stopped.
         from . import winproc
-        if winproc.tcp_listen_pids(http_port):
-            st["running"] = True
+        # ⚠ only when the listener IS a dedicated server. NVIDIA Broadcast
+        # (and others) sit on 8080, which made a stopped server look running
+        # so Join skipped Start and failed on a closed 9700.
+        owners = set(winproc.tcp_listen_pids(http_port) or [])
+        hit = owners & set(live)
+        if hit:
+            st["running"], st["pid"] = True, next(iter(hit))
     else:
         st["ambiguous"] = True
     if st["running"]:
@@ -700,6 +705,23 @@ def start(profile):
                    f"(pid {pid}) - stop it first")
             logs.LOG.error("refusing to start %r: %s", profile.get("name"), msg)
             return {"ok": False, "error": msg}
+
+    # ⚠ The HTTP port is only the server's status page. When a NON-server
+    # owns it (NVIDIA Broadcast sits on 8080) move to a free one instead of
+    # refusing - that made Start & Join fail whenever Broadcast was up.
+    if port_busy(http):
+        from . import winproc
+        owners = set(winproc.tcp_listen_pids(http) or [])
+        if owners and not (owners & set(live)):
+            taken = {int(o.get("http_port") or 0) for o in load()}
+            for cand in range(http + 1, http + 60):
+                if cand not in taken and cand != tcp and not port_busy(cand):
+                    logs.LOG.info("HTTP port %s held by pid %s (not a server);"
+                                  " %r moves to %s", http, sorted(owners),
+                                  profile.get("name"), cand)
+                    profile["http_port"] = http = cand
+                    upsert(profile)
+                    break
 
     for label, port in (("game", tcp), ("HTTP", http)):
         if port_busy(port):

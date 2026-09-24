@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler
 
 from . import (auth, backend, compress, config, content, contentsync,
                detect, drive,
-               evoshare,
+               evoreg, evoshare,
                push as pushmod,
                gameui, hooking, hotkey, install,
                installer,

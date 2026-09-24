@@ -286,6 +286,17 @@ def home_ready(hint=None):
     return page in ("home", "sp")
 
 
+def go_home():
+    """Send the menu back to the home page (from Multiplayer etc.)."""
+    js = ("(function(){if(!window.ksUI)return 'no-ksUI';"
+          "try{ksUI.goTo('menu.html','main/main');return 'home';}"
+          "catch(e){return 'fail:'+String(e&&e.message||e);}})()")
+    try:
+        return js_value(evaluate(js, page=menu_page(), timeout=3, attempts=1))
+    except Exception as ex:                        # noqa: BLE001
+        return {"ok": False, "error": str(ex)}
+
+
 def session_loading(hint=None):
     s = (hint if hint is not None else boot_state()).lower()
     return "ingame" in s or "|session" in s

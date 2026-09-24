@@ -634,6 +634,17 @@ def _run_local(pick):
     _ensure_backend()
     lobby.write(prof)
     st = servers.status(prof)
+    if st.get("running") and not _wait_server(prof, seconds=6).get("tcp_open"):
+        # ⚠ stale "running": the process (or its record) outlived the socket.
+        # Failing here made every join after a server crash look random -
+        # restart it instead.
+        logs.LOG.info("drive: server marked running but TCP closed; restarting")
+        try:
+            servers.stop(prof.get("id"))
+        except Exception:                          # noqa: BLE001
+            pass
+        time.sleep(1.5)
+        st = servers.status(prof)
     if not st.get("running"):
         _set(phase="starting_server",
              hint="starting " + (prof.get("name") or "the server"))
@@ -689,7 +700,10 @@ def _run_local(pick):
             _set(phase="failed",
                  fault=launched.get("error") or "could not launch")
             return
-    poked = _enter_and_join(pick, sv)
+    # ⚠ never join a local server with the public pick's password/id.
+    local_pick = {**pick, "password": prof.get("driver_password") or "",
+                  "server_id": sv["server_id"]}
+    poked = _enter_and_join(local_pick, sv)
     _JOB["join"] = {k: poked.get(k) for k in
                     ("ok", "error", "note", "connected") if k in poked}
     if not poked.get("ok"):
@@ -760,6 +774,15 @@ def _enter_and_join(pick, sv):
             return {"ok": False, "error": f"could not set car: {ex}"}
     host = (sv.get("server_ip") or "").strip()
     tcp = int(sv.get("server_tcp_port") or 0)
+    # The proxy trims the game's list to keep its UI responsive; pin the
+    # server we are joining so it is never trimmed away.
+    try:
+        from . import config
+        with open(os.path.join(config.DATA, "join_pin.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"ip": host, "tcp": tcp, "at": time.time()}, f)
+    except Exception:                              # noqa: BLE001
+        pass
     udp = int(sv.get("server_udp_port") or tcp)
     pw = pick.get("password") or ""
     sid = str(sv.get("server_id") or pick.get("server_id") or "")
@@ -778,15 +801,20 @@ def _enter_and_join(pick, sv):
         # decide; anything it has not seen (a server that only just came up,
         # or one known solely from the EvoForge directory) opens the plain
         # list and lets join_public find the row as it always did.
-        deep = False
+        # Our own server is injected by the proxy into every list the game
+        # gets, but the snapshot is taken BEFORE the injection - so a local
+        # join never looked "listed" and fell back to setSelectedServer, which
+        # highlights the row yet leaves "No server selected" and Join disabled.
+        deep = host in ("127.0.0.1", "localhost") or bool(sv.get("local"))
         try:
-            for s_ in backend.server_list().get("servers") or []:
+            for s_ in ([] if deep else
+                       backend.server_list().get("servers") or []):
                 if (str(s_.get("server_ip") or "") == host
                         and int(s_.get("server_tcp_port") or 0) == int(tcp)):
                     deep = True
                     break
         except Exception:                          # noqa: BLE001
-            deep = False
+            pass
         went = gameui.enter_multiplayer(host, tcp, pw, deep=deep)
         logs.LOG.info("drive ui multiplayer: %s (deep=%s)", went, deep)
     except OSError as ex:
@@ -824,6 +852,7 @@ def _enter_and_join(pick, sv):
     time.sleep(2.5)
     picked = None
     sent = False
+    first_ineligible = 0.0
     until = time.time() + 50
     while time.time() < until:
         if not backend._game_running():
@@ -847,9 +876,14 @@ def _enter_and_join(pick, sv):
         elif val == "no-car":
             _set(phase="joining", hint="waiting for the current car")
         elif val.startswith("car-not-eligible:"):
-            # ⚠ Not a timing problem, so retrying for 50s only wastes the
-            # user's time: the server's car policy excludes the current car
-            # and the game has already disabled Join. Say which car it is.
+            # ⚠ Partly a timing problem: #btnJoin stays disabled until the
+            # selected server's details arrive, so a read ~1s after selecting
+            # failed allowed cars at random. Give it 10s, then believe it.
+            first_ineligible = first_ineligible or time.time()
+            if time.time() - first_ineligible < 10:
+                _set(phase="joining", hint="waiting for the server's car list")
+                time.sleep(1.0)
+                continue
             car = val.split(":", 1)[1] or "your current car"
             gameui.focus_game()
             return {"ok": False,
@@ -1080,6 +1114,7 @@ def _wait_ready(deadline):
     saw_game = False
     last_beat = 0
     last_boot = ""
+    last_home = 0.0
     while time.time() < deadline:
         running = backend._game_running()
         if running:
@@ -1098,6 +1133,13 @@ def _wait_ready(deadline):
         if gameui.home_ready(boot):
             return "ready"
         now = time.time()
+        # ⚠ Parked on Multiplayer (a previous join, or the user browsing):
+        # home never comes back on its own, so this waited out the full 90s.
+        page = gameui.boot_page(boot)
+        if page and page not in ("home", "sp", "intro", "menu-nocar")                 and "|car|" in boot and now - last_home >= 4:
+            logs.LOG.info("drive: on %r, sending the menu home: %s",
+                          page, gameui.go_home())
+            last_home = now
         if now - last_beat >= 5:
             logs.LOG.info("drive waiting for home (game=%s inspector=%s boot=%s)",
                           running, gameui.listening(), boot or "-")

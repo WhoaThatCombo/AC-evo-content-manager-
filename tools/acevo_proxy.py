@@ -190,6 +190,63 @@ def start_control():
     print(f"control: http://127.0.0.1:{CONTROL_PORT}/  (POST /join {{\"id\":...}})")
 
 
+
+# ⚠ The game's menu JS chews through the whole list on every poll. At ~930
+# servers (3 MB) that froze the UI for 20-40 s at a time, even idle on the
+# server list - and every ACECM action that landed in a freeze (select row,
+# press Join, read state) failed, which is what made joining look random.
+# The FULL list is still captured for ACECM's own browser; the game gets
+# ours + pinned/favourite servers + the busiest rest, capped.
+LIST_CAP = int(os.environ.get("ACECM_LIST_CAP", "150") or 0)
+
+
+def _data_dir():
+    import acevo_backend as _b
+    path = _b.LOBBY_JSON or _b._default_lobby_json() or ""
+    return os.path.dirname(path) if path else ""
+
+
+def _keep_addresses():
+    keep = set()
+    d = _data_dir()
+    for fn in ("join_pin.json", "favourites.json"):
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            if time.time() - float(data.get("at") or 0) > 600:
+                continue                       # stale pin
+            data = [data]
+        for x in data if isinstance(data, list) else []:
+            ip = str(x.get("ip") or "")
+            tcp = str(x.get("tcp") or "")
+            if ip and tcp:
+                keep.add(ip + ":" + tcp)
+    return keep
+
+
+def _trim(msg):
+    n = len(msg.entry)
+    if not LIST_CAP or n <= LIST_CAP:
+        return
+    keep = _keep_addresses()
+    rows = []
+    for i, e in enumerate(msg.entry):
+        addr = f"{e.server_ip}:{e.server_tcp_port}"
+        pinned = addr in keep
+        rows.append((0 if pinned else 1, -len(e.players), i,
+                     e.SerializeToString()))
+    rows.sort()
+    chosen = rows[:max(LIST_CAP, sum(1 for r in rows if r[0] == 0))]
+    chosen.sort(key=lambda r: r[2])            # keep Kunos' original order
+    del msg.entry[:]
+    for r in chosen:
+        msg.entry.add().ParseFromString(r[3])
+    print(f"  trimmed list {n} -> {len(msg.entry)} for the game UI")
+
+
 def add_local_entry(raw, peer=None):
     """Append our server to a ResponseServerList travelling downstream."""
     try:
@@ -202,6 +259,10 @@ def add_local_entry(raw, peer=None):
         _capture_list(msg)
     except Exception as ex:
         print(f"  (server-list capture failed: {ex})")
+    try:
+        _trim(msg)
+    except Exception as ex:
+        print(f"  (trim failed: {ex})")
     try:
         # Put ours FIRST. Appended it sat after ~800 public rows, so the
         # browser looked empty of "our" server (and of anything on page 1
