@@ -135,7 +135,14 @@ def _evaluate_once(expr, page="0", timeout=15, user_gesture=False):
                ).encode())
     resp = b""
     while b"\r\n\r\n" not in resp:
-        resp += s.recv(4096)
+        # ⚠ recv() returns b"" when the game closes the socket mid-handshake
+        # (it does while the inspector is still starting). That never raised,
+        # so this spun forever at 100% CPU and Start sat on the home screen.
+        chunk = s.recv(4096)
+        if not chunk:
+            s.close()
+            raise ConnectionError("inspector closed the handshake")
+        resp += chunk
     if b"101" not in resp.split(b"\r\n")[0]:
         raise ConnectionError("upgrade failed: "
                               + resp.split(b"\r\n")[0].decode())
