@@ -91,6 +91,8 @@ TEMPLATE = {
     # cosmetic fix can never change what the server actually runs.
     "custom_track": "",
     "penalties": False,
+    # car damage %, 100 = normal, 0 = none (install-wide, see damage.py)
+    "damage_pct": 100,
     "car_cut_tyres_out": 4,          # wheels off track before it counts (1-4)
     "warning_trigger_countdown": 3,  # warnings before the penalty lands
     "time_penalty_ms": 5000,         # the penalty itself
@@ -731,6 +733,23 @@ def start(profile):
             logs.LOG.error("refusing to start %r: %s",
                            profile.get("name"), msg)
             return {"ok": False, "error": msg}
+
+    # Car damage lives in the install's season templates (see damage.py).
+    # Apply this profile's value while nothing holds the archive open; with
+    # another server up the templates are shared and already in use.
+    try:
+        from . import damage
+        if not live:
+            d = damage.apply_for(profile)
+            if not d.get("ok"):
+                logs.LOG.warning("damage not applied for %r: %s",
+                                 profile.get("name"), d.get("error"))
+        elif damage.status().get("damage") != int(
+                profile.get("damage_pct", 100)):
+            logs.LOG.warning("damage for %r left as is: another server is "
+                             "running from this install", profile.get("name"))
+    except Exception as ex:                        # noqa: BLE001
+        logs.LOG.warning("damage step failed: %s", ex)
 
     resolved_exe = config.server_exe()
     if not resolved_exe:
