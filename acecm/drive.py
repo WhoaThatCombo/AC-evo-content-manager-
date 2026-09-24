@@ -469,7 +469,20 @@ def _ensure_backend():
     garage cannot list/set cars (BackendDisconnected)."""
     st = backend.state()
     if st.get("listening"):
-        return {"ok": True, "already": True}
+        from . import lobby, winproc
+        theirs = backend.join_state().get("lobby") or ""
+        mine = os.path.abspath(lobby.PATH)
+        if theirs and os.path.normcase(theirs) == os.path.normcase(mine):
+            return {"ok": True, "already": True}
+        # ⚠ A proxy from another data folder (or an older build that does not
+        # report one) advertises ITS server as "my server". Replace it.
+        logs.LOG.info("backend on the port serves %r, not %r; replacing it",
+                      theirs or "(unknown)", mine)
+        backend.stop()
+        for port in (int(config.CFG.get("backend_port") or 448), 8093):
+            for pid in winproc.tcp_listen_pids(port) or []:
+                winproc.kill(pid)
+        time.sleep(1.0)
     return backend.start("proxy")
 
 

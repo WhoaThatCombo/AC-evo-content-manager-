@@ -149,7 +149,14 @@ class _Control(BaseHTTPRequestHandler):
             return self._send({"count": len(SERVER_LIST["servers"]),
                                "captured_at": SERVER_LIST["at"],
                                "servers": SERVER_LIST["servers"]})
-        self._send({"client_connected": CLIENT["ws"] is not None,
+        # "lobby" says WHOSE server this proxy advertises. ACECM compares it
+        # with its own lobby.json and replaces a proxy started from another
+        # data folder (a dev run, another install) - otherwise "my server"
+        # in-game was somebody else's.
+        import acevo_backend as _b
+        self._send({"lobby": os.path.abspath(_b.LOBBY_JSON
+                                             or _b._default_lobby_json() or ""),
+                    "client_connected": CLIENT["ws"] is not None,
                     "stats": stats,
                     "servers_captured": len(SERVER_LIST["servers"]),
                     "servers_at": SERVER_LIST["at"]})

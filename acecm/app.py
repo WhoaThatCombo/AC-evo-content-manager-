@@ -1556,12 +1556,12 @@ def _autostart_proxy():
         return
     def go():
         try:
-            from . import backend
-            st = backend.state()
-            if st.get("listening"):
-                logs.LOG.info("auto proxy: already listening")
+            from . import drive
+            # replaces a proxy that serves another data folder's lobby
+            r = drive._ensure_backend()
+            if r.get("already"):
+                logs.LOG.info("auto proxy: already listening (ours)")
                 return
-            r = backend.start("proxy")
             if r.get("ok"):
                 logs.LOG.info("auto proxy started on :%s pid=%s",
                               r.get("port"), r.get("pid"))
