@@ -18,7 +18,6 @@ them on exit, so editing underneath a running client just loses your changes.
 ⚠ Every write backs up first. A corrupt settings file can stop the game booting,
 and the only cheap way back is the copy we made.
 """
-import glob
 import json
 import os
 import re
@@ -91,12 +90,20 @@ def discover():
     if not os.path.isdir(d):
         return {"dir": d, "files": [], "error": "settings folder not found"}
     found = {}
-    for p in glob.glob(os.path.join(d, "**", "*"), recursive=True):
+    # ⚠ PRUNE, do not filter. This used glob("**") over the whole folder and
+    # dropped Logs/, crashdumps/ and mods/ afterwards - but mods/ is the
+    # multi-GB mod library (~90k files), so the walk took 15-18 s, past the
+    # page's 12 s request limit, and Game settings came up blank.
+    skip = {"logs", "crashdumps", "mods"}
+    paths = []
+    for root, dirs, files in os.walk(d):
+        if root == d:
+            dirs[:] = [x for x in dirs if x.lower() not in skip]
+        paths += [os.path.join(root, f) for f in files]
+    for p in paths:
         if not os.path.isfile(p):
             continue
         rel = os.path.relpath(p, d).replace("\\", "/")
-        if rel.startswith(("Logs/", "crashdumps/", "mods/")):
-            continue
         msg = message_for(p)
         found[rel] = {
             "file": rel, "message": msg, "size": os.path.getsize(p),

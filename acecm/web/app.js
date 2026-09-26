@@ -2407,11 +2407,15 @@ async function serversPage() {
         return;
       }
       toast('Starting — this takes about 30 seconds');
+      // the live feed hands the button back the moment the server is up
+      // (paintServerPills); this is only the backstop if it never comes up
+      start._tick = tick;
+      start._was = was;
       setTimeout(() => {
-        clearInterval(tick);
+        if (!start._tick) return;
+        clearInterval(start._tick); start._tick = null;
         start.disabled = false; start.textContent = was;
-        serversRefresh();
-      }, 31000);
+      }, 90000);
     };
     // ⚠ Stops THIS server, by its own pid or its own HTTP port. "Stop all" is
     // still there, but it should be a choice rather than the only option -
@@ -2647,6 +2651,37 @@ async function serversPage() {
   // so it got slower with every server added - and the same numbers are
   // already in /api/overview, which the dashboard fetches anyway.
   serversRefresh();
+  // running / stopped / clients arrive from the live feed and are painted in
+  // place - no rebuild, no poll of its own
+  livePage('servers', s => paintServerPills(s.servers || []));
+}
+
+/* ⚠ Look things up in the CURRENT page, not the whole document. While a
+   page refreshes itself the old copy is still on screen (see bufferBegin),
+   and document.querySelector finds that one first - so an update meant for
+   the new page landed on the one about to be thrown away. */
+function pageQ(sel) { const p = $('#page'); return p ? p.querySelector(sel) : null; }
+
+function paintServerPills(list) {
+  for (const sv of list) {
+    const pill = pageQ('[data-st="' + sv.id + '"]');
+    if (pill) {
+      const cls = 'pill ' + (sv.running ? 'on' : 'off');
+      const html = '<i class="dot"></i>' + (sv.running
+        ? 'running' + (sv.clients != null ? ' · ' + sv.clients + ' clients' : '')
+        : 'stopped');
+      if (pill.className !== cls) pill.className = cls;
+      if (pill.innerHTML !== html) pill.innerHTML = html;
+    }
+    // A start that has finished must give the button back, otherwise it stays
+    // stuck on "starting… 0s" forever now that nothing rebuilds it.
+    const start = pageQ('[data-start="' + sv.id + '"]');
+    if (start && sv.running && start._tick) {
+      clearInterval(start._tick); start._tick = null;
+      start.disabled = false;
+      start.textContent = start._was || 'Start';
+    }
+  }
 }
 
 /* Update the live parts of the servers page WITHOUT rebuilding it.
@@ -2654,38 +2689,24 @@ async function serversPage() {
    reading and scrolled the editor away - all to change a pill from "starting"
    to "running". Actions now patch the few elements that changed. */
 async function serversRefresh() {
-  const anchor = document.querySelector('[data-st]');
+  const anchor = pageQ('[data-st]');
   if (!anchor) return;                    // not on this page any more
-  const [ov, pr] = await Promise.all([api('overview'), api('profiles')]);
+  // server pills come from the live feed now (paintServerPills); this only
+  // fills what the feed does not carry - each server's telemetry tracker
+  const pr = await api('profiles');
   const tel = (pr && pr.telemetry) || {};
-  ((ov && ov.servers) || []).forEach(sv => {
-    const pill = document.querySelector('[data-st="' + sv.id + '"]');
-    if (pill) {
-      pill.className = 'pill ' + (sv.running ? 'on' : 'off');
-      pill.innerHTML = '<i class="dot"></i>' + (sv.running
-        ? 'running' + (sv.clients != null ? ' · ' + sv.clients + ' clients' : '')
-        : 'stopped');
-    }
-    // A start that has finished must give the button back, otherwise it stays
-    // stuck on "starting… 0s" forever now that nothing rebuilds it.
-    const start = document.querySelector('[data-start="' + sv.id + '"]');
-    if (start && sv.running) {
-      start.disabled = false;
-      start.textContent = 'Start';
-    }
-  });
   Object.entries(tel).forEach(([id, ts]) => {
-    const tp = document.querySelector('[data-tp="' + id + '"]');
+    const tp = pageQ('[data-tp="' + id + '"]');
     if (tp) {
       tp.className = 'pill ' + (ts.running ? 'on' : 'off');
       tp.innerHTML = '<i class="dot"></i>telemetry '
         + (ts.running ? 'on :' + ts.port : 'off');
     }
-    const on = document.querySelector('[data-ton="' + id + '"]');
+    const on = pageQ('[data-ton="' + id + '"]');
     if (on) on.textContent = ts.running ? 'Restart telemetry' : 'Start telemetry';
-    const off = document.querySelector('[data-toff="' + id + '"]');
+    const off = pageQ('[data-toff="' + id + '"]');
     if (off) off.disabled = !ts.running;
-    const view = document.querySelector('[data-tview="' + id + '"]');
+    const view = pageQ('[data-tview="' + id + '"]');
     if (view) view.disabled = !ts.running;
   });
 }
@@ -5343,6 +5364,7 @@ async function contentPage() {
   const rowi = el('div', 'row');
   const inp = el('input');
   inp.placeholder = 'C:\\path\\to\\mod.zip   or   track.tar   or   folder';
+  inp.dataset.keep = '1';   // survives the page rebuilding under you
   const goPath = el('button', 'primary', 'Install');
   rowi.append(inp, goPath);
   inst.append(rowi);
@@ -5952,6 +5974,7 @@ function fetchHostCard() {
   const row = el('div', 'row wrap');
   const inp = el('input');
   inp.placeholder = 'http://host:8092  or  1.2.3.4';
+  inp.dataset.keep = '1';   // survives the page rebuilding under you
   inp.style.minWidth = '18em';
   const go = el('button', 'primary', 'Fetch content');
   go.onclick = async () => {
@@ -6679,12 +6702,17 @@ const PAGES = {
    only show the placeholder when actually NAVIGATING somewhere new. A page
    refreshing itself now keeps its old content on screen until the new content
    is ready.                                                                */
-const scroller = () => document.scrollingElement || document.documentElement;
+/* ⚠ #page is what scrolls (overflow:auto; body is overflow:hidden), NOT the
+   document. This used to track document.scrollingElement, whose scrollTop
+   is always 0 here - so "keep the scroll position" never did anything. */
+const scroller = () => $('#page') || document.scrollingElement;
 const _scrollPos = {};
 let _page = '';
-addEventListener('scroll', () => {
-  if (_page) _scrollPos[_page] = scroller().scrollTop;
-}, { passive: true });
+// scroll does not bubble, so listen in the capture phase for #page's own
+addEventListener('scroll', e => {
+  if (_page && e.target && e.target.id === 'page')
+    _scrollPos[_page] = e.target.scrollTop;
+}, { passive: true, capture: true });
 
 // ⚠ One render at a time, per page. Every page function clears #page and then
 // awaits its data, so two overlapping calls both clear an empty page and then
@@ -6693,6 +6721,153 @@ addEventListener('scroll', () => {
 const _rendering = {};
 // the page the user last asked for, so a late render cannot overwrite it
 let _wanted = '';
+
+/* ---- rebuild without losing your place ----------------------------------
+   Pages rebuild themselves wholesale after most actions (~65 call sites):
+   clear #page, await data, build it again. That flashed blank on every
+   refresh, and threw away whatever you were in the middle of - the filter
+   you had typed, the section you had opened, where a list was scrolled to,
+   the box you were typing in.
+
+   So a SELF-refresh is double-buffered, for every page at once: the rebuild
+   goes into a fresh #page laid out off-screen, the old one stays visible,
+   and when the new one is ready it inherits the old one's filters, open
+   sections, focus and inner scroll positions before being swapped in.
+
+   ⚠ Only FILTER boxes are carried over, never form fields. A rebuild after
+   Save shows what the server now holds; putting back what was typed would
+   hide a value the server rejected or normalised.                          */
+// filter/search boxes, plus anything a page opts in with data-keep="1"
+// (an address or path you are typing that is not a saved setting)
+const FILTER_INPUT = 'input[type=search], input[placeholder*="ilter" i], '
+  + 'input[placeholder*="earch" i], input[data-keep], textarea[data-keep]';
+function uiKey(n) {
+  // stable enough across a rebuild: which card it is in, what it is
+  const card = n.closest('.card, .pane, .drive-col');
+  const head = card && card.querySelector('h2, h3');
+  const sum = n.tagName === 'DETAILS' && n.querySelector('summary');
+  const what = n.id || n.getAttribute('name') || n.getAttribute('placeholder')
+    || n.getAttribute('aria-label') || (sum && sum.textContent)
+    || n.className || '';
+  return [(head && head.textContent || '').trim().slice(0, 40), n.tagName,
+          n.type || '', String(what).trim().slice(0, 60)].join('|');
+}
+function keyed(nodes) {
+  const seen = {};
+  return nodes.map(n => {
+    const k = uiKey(n);
+    seen[k] = (seen[k] || 0) + 1;
+    return [k + '#' + seen[k], n];
+  });
+}
+function captureUi(root) {
+  const st = { inputs: {}, details: {}, scroll: {}, focus: null };
+  for (const [k, n] of keyed([...root.querySelectorAll(FILTER_INPUT)]))
+    if (n.value) st.inputs[k] = n.value;
+  for (const [k, n] of keyed([...root.querySelectorAll('details')]))
+    st.details[k] = n.open;
+  const scrolled = [...root.querySelectorAll('*')].filter(n => n.scrollTop > 0);
+  for (const [k, n] of keyed(scrolled)) st.scroll[k] = n.scrollTop;
+  const a = document.activeElement;
+  if (a && root.contains(a) && a.matches('input, textarea, select')) {
+    const hit = keyed([...root.querySelectorAll(a.tagName)]).find(([, n]) => n === a);
+    let s = null, e = null;
+    try { s = a.selectionStart; e = a.selectionEnd; } catch (x) {}
+    if (hit) st.focus = { k: hit[0], tag: a.tagName, s, e };
+  }
+  return st;
+}
+function restoreUi(root, st) {
+  for (const [k, n] of keyed([...root.querySelectorAll(FILTER_INPUT)])) {
+    const v = st.inputs[k];
+    // only into a box the rebuild left empty - never over a real value
+    if (v && !n.value) {
+      n.value = v;
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+  for (const [k, n] of keyed([...root.querySelectorAll('details')]))
+    if (k in st.details && n.open !== st.details[k]) n.open = st.details[k];
+  // inner scroll after layout, or there is nothing to scroll yet
+  requestAnimationFrame(() => {
+    const cands = [...root.querySelectorAll('*')]
+      .filter(n => n.scrollHeight > n.clientHeight + 1);
+    for (const [k, n] of keyed(cands)) if (st.scroll[k]) n.scrollTop = st.scroll[k];
+  });
+  if (st.focus) {
+    const hit = keyed([...root.querySelectorAll(st.focus.tag)])
+      .find(([k]) => k === st.focus.k);
+    if (hit) {
+      const n = hit[1];
+      try {
+        n.focus({ preventScroll: true });
+        if (st.focus.s != null && n.setSelectionRange) n.setSelectionRange(st.focus.s, st.focus.e);
+      } catch (e) {}
+    }
+  }
+}
+let _buffer = null;
+function bufferBegin() {
+  const old = $('#page');
+  if (!old || !old.childNodes.length) return null;
+  const r = old.getBoundingClientRect();
+  const neu = old.cloneNode(false);
+  // laid out for real (so pages that measure themselves get real sizes),
+  // just not visible or clickable until it is ready
+  neu.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;`
+    + `width:${r.width}px;visibility:hidden;pointer-events:none;z-index:-1`;
+  old.id = 'page-old';
+  old.after(neu);
+  // ⚠ old.scrollTop, not scroller(): #page is already the NEW node here
+  _buffer = { old, neu, state: captureUi(old), y: old.scrollTop };
+  return _buffer;
+}
+function bufferEnd(buf, ok) {
+  if (!buf || buf.done) return;
+  buf.done = true;
+  if (_buffer === buf) _buffer = null;
+  // ⚠ a page that returned early without drawing anything must not blank
+  // the screen - keep what was there
+  if (!ok || !buf.neu.childNodes.length) {
+    buf.neu.remove();
+    buf.old.id = 'page';
+    return;
+  }
+  // ⚠ visible FIRST: focus() is refused inside visibility:hidden. All of
+  // this runs in one task, so nothing paints between the swap and restore.
+  buf.neu.style.cssText = '';
+  buf.old.remove();
+  restoreUi(buf.neu, buf.state);
+  // ⚠ Parts of a page land AFTER its function returns (Drive's server list,
+  // thumbnails), so at swap time it can be too short and the browser clamps
+  // the scroll. Keep re-applying for a moment as it grows - and stop the
+  // instant the user scrolls, since that is no longer our position to hold.
+  const neu = buf.neu, y = buf.y;
+  neu.scrollTop = y;
+  if (neu.scrollTop < y - 1 && typeof ResizeObserver === 'function') {
+    // re-apply whenever the page grows, for up to 5 s, unless the user acts
+    const ro = new ResizeObserver(() => {
+      if (!neu.isConnected) return stop();
+      neu.scrollTop = y;
+      if (neu.scrollTop >= y - 1) stop();
+    });
+    const mine = () => stop();
+    const stop = () => {
+      ro.disconnect();
+      clearTimeout(t);
+      ['wheel', 'keydown', 'pointerdown', 'touchstart'].forEach(
+        ev => neu.removeEventListener(ev, mine, true));
+    };
+    ['wheel', 'keydown', 'pointerdown', 'touchstart'].forEach(
+      ev => neu.addEventListener(ev, mine, true));
+    const t = setTimeout(stop, 5000);
+    for (const c of neu.children) ro.observe(c);
+  }
+}
+// navigating away mid-refresh: drop the half-built page, keep the real one
+function bufferAbandon() {
+  if (_buffer) bufferEnd(_buffer, false);
+}
 
 const _queued = {};
 function keepPlace(name, fn) {
@@ -6708,9 +6883,15 @@ function keepPlace(name, fn) {
     // a self-refresh should come back to where the user was, a fresh
     // navigation should start at the top
     const want = _page === name ? (_scrollPos[name] || 0) : 0;
+    // a page refreshing ITSELF builds off-screen and keeps your place
+    const buf = _page === name ? bufferBegin() : null;
+    let ok = false;
     try {
-      return await fn.apply(this, args);
+      const r = await fn.apply(this, args);
+      ok = true;
+      return r;
     } finally {
+      bufferEnd(buf, ok && _wanted === name);
       _rendering[name] = false;
       // ⚠ NO `return` anywhere in this finally block. A return here swallows
       // an exception thrown by the page function, and go() depends on
@@ -6751,6 +6932,7 @@ Object.entries(PAGES).forEach(([name, spec]) => {
 });
 
 function go(name) {
+  bufferAbandon();
   if (typeof telTimer !== 'undefined' && telTimer) { clearInterval(telTimer); telTimer = null; }
   if (typeof telRaf !== 'undefined' && telRaf) { cancelAnimationFrame(telRaf); telRaf = null; }
   // page-level live subscriptions belong to the page being left
