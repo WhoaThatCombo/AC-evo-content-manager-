@@ -608,3 +608,54 @@ pre.log{
   max-height:min(92vh,920px);
   height:min(92vh,920px);
 }
+
+/* ------------------------------------------------------------ live UI --
+   The activity strip (every page) and the Join/Start checklist (Drive).
+   Both are painted from the one live feed in app.js.                     */
+button.mini{padding:2px 8px;font-size:11.5px;border-radius:6px}
+button.ghost{background:transparent;border-color:transparent;color:var(--dim)}
+button.ghost:hover{color:var(--fg);border-color:var(--line)}
+
+#activity{display:flex;flex-wrap:wrap;gap:6px;padding:6px 26px 0}
+#activity[hidden]{display:none}
+.act{display:inline-flex;align-items:center;gap:7px;padding:3px 6px 3px 10px;
+  border:1px solid var(--line);border-radius:999px;background:var(--panel);
+  font-size:12px;color:var(--dim);max-width:100%}
+.act.link{cursor:pointer}
+.act.link:hover{border-color:var(--accent2);color:var(--fg)}
+.act .acttext{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act .actdot{width:7px;height:7px;border-radius:50%;background:var(--dim2);flex:none}
+.act.busy .actdot{background:var(--accent);animation:actpulse 1.2s ease-in-out infinite}
+.act.ok .actdot{background:var(--ok)}
+.act.warn{color:var(--gold);border-color:#3a3117}
+.act.warn .actdot{background:var(--gold)}
+.act.bad{color:var(--red);border-color:#3d1d26}
+.act.bad .actdot{background:var(--red)}
+@keyframes actpulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+.jobsteps{margin-top:12px;padding:10px 12px;border:1px solid var(--line);
+  border-radius:var(--r);background:var(--panel2)}
+.jobsteps[hidden]{display:none}
+.jobhead{display:flex;justify-content:space-between;align-items:baseline;
+  margin-bottom:6px}
+.jobstep{display:grid;grid-template-columns:18px 1fr auto;gap:8px;
+  align-items:baseline;padding:2px 0;font-size:12.5px}
+.jobstep .jobicon{text-align:center;font-weight:700}
+.jobstep .jobtime{color:var(--dim2);font-variant-numeric:tabular-nums}
+.jobstep.done .jobicon{color:var(--ok)}
+.jobstep.done .joblabel{color:var(--dim)}
+.jobstep.now .joblabel{color:var(--fg);font-weight:600}
+.jobstep.now .jobicon::before{content:"";display:inline-block;width:9px;
+  height:9px;border-radius:50%;border:2px solid var(--accent);
+  border-right-color:transparent;animation:jobspin .8s linear infinite}
+.jobstep.slow .jobtime{color:var(--gold)}
+.jobstep.bad .jobicon,.jobstep.bad .joblabel{color:var(--red)}
+.jobstep.stop .jobicon{color:var(--dim)}
+.jobstep.todo{color:var(--dim2)}
+.jobstep.todo .jobicon::before{content:"○"}
+@keyframes jobspin{to{transform:rotate(360deg)}}
+.jobnote{margin-top:8px;font-size:12.5px;color:var(--dim)}
+.jobnote.ok{color:var(--ok)}
+.jobnote.warn{color:var(--gold)}
+.jobnote.bad{color:var(--red)}
+.jobbtns{margin-top:8px;gap:6px}

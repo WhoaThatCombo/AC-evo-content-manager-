@@ -102,9 +102,70 @@ def _save_pick(pick):
     return blob
 
 
+TERMINAL = ("idle", "launched", "failed", "cancelled")
+
+
+class _Cancelled(BaseException):
+    """Raised by _sleep once Stop is pressed.
+
+    ⚠ BaseException, not Exception: the wait loops are full of
+    `except Exception` around UI calls, and every one of them would swallow a
+    cancel and carry on waiting.
+    """
+
+
+def _sleep(seconds):
+    """time.sleep for the job thread - the point where Stop takes effect.
+
+    Every wait loop in a Drive job sleeps between checks, so routing them all
+    through here makes Stop land within one loop tick. _close_game keeps the
+    plain time.sleep: it runs as cleanup and must finish even after a cancel.
+    """
+    mine = threading.get_ident() == _JOB.get("tid")
+    if mine and _JOB.get("cancel"):
+        raise _Cancelled()
+    time.sleep(seconds)
+    if mine and _JOB.get("cancel"):
+        raise _Cancelled()
+
+
 def _set(**kw):
+    """Update the job, and keep a step history for the UI's checklist.
+
+    A new job (one that sets `started`) starts a fresh history. Each phase
+    change becomes a step with its own start time; a new hint for the SAME
+    phase updates that step instead of adding one, so the list shows what
+    happened rather than every progress message.
+    """
+    if "started" in kw:
+        _JOB["steps"] = []
+        _JOB["cancel"] = False
+    ph = kw.get("phase")
+    steps = _JOB.setdefault("steps", [])
+    if ph:
+        if not steps or steps[-1]["phase"] != ph:
+            steps.append({"phase": ph, "hint": kw.get("hint") or "",
+                          "at": time.time()})
+            del steps[:-40]
+        elif kw.get("hint"):
+            steps[-1]["hint"] = kw["hint"]
+    elif kw.get("hint") and steps:
+        steps[-1]["hint"] = kw["hint"]
+    if ph in TERMINAL:
+        # ⚠ _sleep is also reached from helpers that run outside a job
+        # (_ensure_backend at app start). A stale flag would make them throw.
+        _JOB["cancel"] = False
     _JOB.update(kw)
     return dict(_JOB)
+
+
+def cancel():
+    """Ask the running job to stop at its next wait."""
+    if (_JOB.get("phase") or "idle") in TERMINAL:
+        return {"ok": False, "error": "nothing is running"}
+    _JOB["cancel"] = True
+    logs.LOG.info("drive: stop requested during %s", _JOB.get("phase"))
+    return {"ok": True}
 
 
 def _mode_name(pick):
@@ -482,7 +543,7 @@ def _ensure_backend():
         for port in (int(config.CFG.get("backend_port") or 448), 8093):
             for pid in winproc.tcp_listen_pids(port) or []:
                 winproc.kill(pid)
-        time.sleep(1.0)
+        _sleep(1.0)
     return backend.start("proxy")
 
 
@@ -624,7 +685,7 @@ def _wait_server(prof, seconds=50):
         last["tcp_open"] = _port_open(tcp)
         if last.get("tcp_open"):
             return last
-        time.sleep(0.8)
+        _sleep(0.8)
     last["tcp_open"] = _port_open(tcp)
     return last
 
@@ -656,7 +717,7 @@ def _run_local(pick):
             servers.stop(prof.get("id"))
         except Exception:                          # noqa: BLE001
             pass
-        time.sleep(1.5)
+        _sleep(1.5)
         st = servers.status(prof)
     if not st.get("running"):
         _set(phase="starting_server",
@@ -716,7 +777,11 @@ def _run_local(pick):
     # ⚠ never join a local server with the public pick's password/id.
     local_pick = {**pick, "password": prof.get("driver_password") or "",
                   "server_id": sv["server_id"]}
-    poked = _enter_and_join(local_pick, sv)
+    # connected = the server now counts one more client than before Join
+    before = servers.status(prof).get("clients") or 0
+    poked = _enter_and_join(
+        local_pick, sv,
+        joined=lambda: (servers.status(prof).get("clients") or 0) > before)
     _JOB["join"] = {k: poked.get(k) for k in
                     ("ok", "error", "note", "connected") if k in poked}
     if not poked.get("ok"):
@@ -724,7 +789,9 @@ def _run_local(pick):
              fault=poked.get("error") or "could not join the local server")
         return
     _set(phase="launched",
-         hint=poked.get("note") or "joining your server — pit menu next")
+         hint=("connected — the server sees you, pit menu next"
+               if poked.get("connected")
+               else poked.get("note") or "joining your server — pit menu next"))
 
 
 def _find_public(pick):
@@ -761,11 +828,11 @@ def _wait_page(want, seconds=20):
             return boot
         if gameui.session_loading(boot) or gameui.in_pits(boot):
             return boot
-        time.sleep(0.3)
+        _sleep(0.3)
     return last
 
 
-def _enter_and_join(pick, sv):
+def _enter_and_join(pick, sv, joined=None):
     """Home screen, set an allowed car, then Connect once on the list."""
     deadline = time.time() + 90
     _set(phase="waiting_for_menu", hint="waiting for the menu")
@@ -851,7 +918,7 @@ def _enter_and_join(pick, sv):
                               gameui.enter_multiplayer(host, tcp, pw, deep=deep))
             except OSError as ex:
                 logs.LOG.warning("drive multiplayer retry lost: %s", ex)
-            time.sleep(2.0)
+            _sleep(2.0)
         else:
             on = _wait_page("mp", 5)
             if (gameui.boot_page(on) != "mp"
@@ -862,7 +929,7 @@ def _enter_and_join(pick, sv):
                                  + ")"}
     # Let the page fetch the list once. Do not refresh it — overlapping
     # ServerList replies while connecting crash the physics thread.
-    time.sleep(2.5)
+    _sleep(2.5)
     picked = None
     sent = False
     first_ineligible = 0.0
@@ -874,7 +941,7 @@ def _enter_and_join(pick, sv):
             picked = gameui.join_public(host, tcp, pw, sid)
         except OSError as ex:
             logs.LOG.warning("drive join_public lost: %s", ex)
-            time.sleep(0.8)
+            _sleep(0.8)
             continue
         logs.LOG.info("drive ui pick: %s", picked)
         val = str((picked or {}).get("value") or "")
@@ -895,7 +962,7 @@ def _enter_and_join(pick, sv):
             first_ineligible = first_ineligible or time.time()
             if time.time() - first_ineligible < 10:
                 _set(phase="joining", hint="waiting for the server's car list")
-                time.sleep(1.0)
+                _sleep(1.0)
                 continue
             car = val.split(":", 1)[1] or "your current car"
             gameui.focus_game()
@@ -909,7 +976,7 @@ def _enter_and_join(pick, sv):
             _set(phase="joining",
                  hint="the list selected a different server — retrying")
             logs.LOG.info("drive join: %s", val)
-        time.sleep(1.0)
+        _sleep(1.0)
     if not sent:
         gameui.focus_game()
         return {"ok": False,
@@ -919,18 +986,28 @@ def _enter_and_join(pick, sv):
     gameui.focus_game()
     # No more inspector traffic: a second Connect while physics loads
     # access-violates the physics thread (seen 2026-08-14 19:22).
-    until = time.time() + 40
+    # ⚠ The game log is only written when the game QUITS, so the log checks
+    # below almost never fire and every join ended on the hedged note. For
+    # our own server `joined` asks the server itself (its client count), which
+    # is a real answer - and safe, since it sends the game nothing.
+    until = time.time() + (90 if joined else 40)
     while time.time() < until:
         if not backend._game_running():
             return {"ok": False,
                     "error": "the game closed while joining "
                              "(likely a crash — try Join again)"}
+        if joined:
+            try:
+                if joined():
+                    return {"ok": True, "join": picked, "connected": True}
+            except Exception:                      # noqa: BLE001
+                pass
         txt = _this_boot_log()
         if "Established connection to server" in txt and ":0" not in txt:
             return {"ok": True, "join": picked, "connected": True}
         if "Game Started!" in txt:
             return {"ok": True, "join": picked, "connected": True}
-        time.sleep(0.8)
+        _sleep(0.8)
     return {"ok": True, "join": picked,
             "note": "Join was pressed once — if you are still on the list, "
                     "the server refused (full, wrong car, password)"}
@@ -971,6 +1048,7 @@ def _run_server(pick):
 
 
 def _run(pick):
+    _JOB["tid"] = threading.get_ident()
     try:
         if (pick.get("via") or "sp") == "server":
             _run_server(pick)
@@ -1031,6 +1109,8 @@ def _run(pick):
             return
         _set(phase="launched",
              hint="in the pit menu — change setup, then Drive in-game")
+    except _Cancelled:
+        _set(phase="cancelled", hint="stopped", fault="")
     except Exception as ex:
         logs.exception("drive", ex)
         _set(phase="failed", fault=f"{type(ex).__name__}: {ex}")
@@ -1157,7 +1237,7 @@ def _wait_ready(deadline):
             logs.LOG.info("drive waiting for home (game=%s inspector=%s boot=%s)",
                           running, gameui.listening(), boot or "-")
             last_beat = now
-        time.sleep(0.3)
+        _sleep(0.3)
     return ""
 
 
@@ -1247,13 +1327,13 @@ def _enter_and_start(pick=None):
         logs.LOG.info("drive set car: %s", chosen)
     elif model:
         logs.LOG.info("drive car already %s", have)
-    _set(phase="starting_session", hint="setting weather, time and mode")
+    _set(phase="setting_conditions", hint="setting weather, time and mode")
     try:
         cond = gameui.apply_conditions(pick)
         logs.LOG.info("drive conditions: %s", cond)
     except OSError as ex:
         return {"ok": False, "error": "could not set conditions: " + str(ex)}
-    _set(phase="starting_session", hint="opening Single Player")
+    _set(phase="opening_sp", hint="opening Single Player")
     try:
         went = gameui.enter_singleplayer()
         logs.LOG.info("drive ui goto: %s", went)
@@ -1330,7 +1410,7 @@ def _enter_and_start(pick=None):
             logs.LOG.info("drive session loading (%s)", boot)
             gameui.focus_game()
             return {"ok": True, "start": started}
-        time.sleep(0.4)
+        _sleep(0.4)
     return {"ok": False,
             "error": "Start was pressed once but the session never "
                      "loaded (still " + (last_boot or "on the menu") + ")"}
@@ -1428,11 +1508,9 @@ def start(body=None):
         return {"ok": False, "error": f"{pick['game_mode']} is not a "
                                       "single-player mode"}
     phase = _JOB.get("phase")
-    if phase in ("writing", "launching_game", "starting_backend",
-                 "waiting_for_menu", "waiting_for_session",
-                 "entering", "selecting_car", "starting_session",
-                 "starting_server", "joining",
-                 "capturing_list", "quitting_game"):
+    # ⚠ "not finished", not a hand-kept list of busy phases: a phase added
+    # later and missing from that list let a second job start on top of one
+    if (phase or "idle") not in TERMINAL:
         if phase == "waiting_for_menu" and not backend._game_running():
             _set(phase="failed", fault="the game closed before Start")
         else:
@@ -1445,14 +1523,21 @@ def start(body=None):
     if running and not gameui.listening():
         return {"ok": False, "error": _menu_not_ready_error("Start")}
     if pick.get("via") in ("server", "local"):
-        _set(phase="entering" if running else "launching_game",
-             hint="joining…" if running else "launching the game…",
-             fault="", started=int(time.time()),
+        # ⚠ the FIRST real step, since the checklist shows it: a local join
+        # starts with the proxy and the server, not the game
+        first = ("entering" if running else
+                 "starting_backend" if pick.get("via") == "local"
+                 else "launching_game")
+        _set(phase=first,
+             hint="joining…" if running else
+                  ("starting the lobby" if first == "starting_backend"
+                   else "launching the game…"),
+             fault="", started=int(time.time()), kind=pick.get("via"),
              join=None, launch=None, wrote=None)
     else:
         _set(phase="writing" if not running else "entering",
              hint="writing session…" if not running else "pressing Start…",
-             fault="", started=int(time.time()),
+             fault="", started=int(time.time()), kind="sp",
              join=None, launch=None, wrote=None)
     threading.Thread(target=_run, args=(pick,), daemon=True).start()
     return {"ok": True, "phase": _JOB["phase"], "pick": pick,
@@ -1518,6 +1603,7 @@ def _fresh_list(since):
 
 
 def _run_capture():
+    _JOB["tid"] = threading.get_ident()
     launched_us = False
     since = int(_JOB.get("started") or time.time())
     try:
@@ -1577,7 +1663,7 @@ def _run_capture():
                 logs.LOG.info("drive capture goto: %s", r)
             except Exception as ex:
                 logs.LOG.warning("drive capture goto: %s", ex)
-            time.sleep(1.5)
+            _sleep(1.5)
             try:
                 on = gameui.boot_page(gameui.menu_page())
             except Exception:                      # noqa: BLE001
@@ -1612,7 +1698,7 @@ def _run_capture():
                     gameui.refresh_server_list()
                 except Exception:
                     pass
-            time.sleep(0.6)
+            _sleep(0.6)
         else:
             n, at, fresh = _fresh_list(since)
             last_n = n
@@ -1631,6 +1717,13 @@ def _run_capture():
         _set(phase="launched",
              hint="captured " + str(last_n)
                   + " public servers — game closed, Drive is ready")
+    except _Cancelled:
+        if launched_us:
+            try:
+                _close_game()
+            except Exception:
+                pass
+        _set(phase="cancelled", hint="stopped", fault="")
     except Exception as ex:
         logs.exception("drive capture", ex)
         if launched_us:
@@ -1644,16 +1737,15 @@ def _run_capture():
 def capture_list():
     """Launch, open Multiplayer, write server_list.json, quit the game."""
     phase = _JOB.get("phase")
-    if phase in ("writing", "launching_game", "starting_backend",
-                 "waiting_for_menu", "waiting_for_session",
-                 "entering", "selecting_car", "starting_session",
-                 "starting_server", "joining",
-                 "capturing_list", "quitting_game"):
+    # ⚠ "not finished", not a hand-kept list of busy phases: a phase added
+    # later and missing from that list let a second job start on top of one
+    if (phase or "idle") not in TERMINAL:
         return {"ok": False, "error": "Drive is already running — wait for it"}
     if backend._game_running() and not gameui.listening():
         return {"ok": False, "error": _menu_not_ready_error("capture")}
     _set(phase="capturing_list", hint="preparing to pull the public list",
-         fault="", started=int(time.time()), join=None, launch=None,
+         fault="", started=int(time.time()), kind="capture", join=None,
+         launch=None,
          wrote=None, captured=0)
     threading.Thread(target=_run_capture, daemon=True).start()
     return {"ok": True, "phase": _JOB["phase"],
@@ -1965,4 +2057,11 @@ def status():
         "game_running": bool(exe and backend._game_running(exe)),
         "single_player": True,
         "captured": _JOB.get("captured") or 0,
+        # step history + job kind for the UI checklist; `now` lets the page
+        # show elapsed time without trusting its own clock
+        "kind": _JOB.get("kind") or "",
+        "steps": list(_JOB.get("steps") or []),
+        "stopping": bool(_JOB.get("cancel")) and
+                    (_JOB.get("phase") or "idle") not in TERMINAL,
+        "now": time.time(),
     }

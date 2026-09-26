@@ -65,12 +65,329 @@ function toast(msg, bad) {
   toastT = setTimeout(() => t.classList.remove('show'), 3200);
 }
 
+/* ----------------------------------------------------------- live feed --
+   ONE source of live state for the whole app: the Join/Start job and its
+   steps, downloads/installs, compression, the lobby proxy and your servers.
+
+   Pages used to poll a dozen endpoints on timers they each armed and
+   disarmed themselves. A slow endpoint, or a timer that never re-armed, read
+   as random flakiness - the dead Drive poll and the 12 s aborts were both
+   that. Now the server pushes one snapshot over /api/events and every page
+   subscribes to it.
+
+   liveOn(fn)   - for app-wide listeners (activity strip, progress bar)
+   livePage(fn) - for the current page; dropped automatically by go()
+   liveKick()   - fetch a snapshot NOW (after starting something)
+
+   If the stream dies, or never delivers (a proxy buffering it), the watchdog
+   falls back to fetching snapshots, so nothing depends on SSE working. */
+const live = { snap: null, subs: new Set(), es: null, lastAt: 0, skew: 0,
+               started: false };
+// keyed, because pages rebuild themselves: a second drivePage() must REPLACE
+// its subscription, not add another one that also repaints the old nodes
+const _pageSubs = new Map();
+function liveOn(fn) {
+  live.subs.add(fn);
+  if (live.snap) { try { fn(live.snap); } catch (e) { console.warn('live', e); } }
+  return () => live.subs.delete(fn);
+}
+function livePage(key, fn) {
+  const old = _pageSubs.get(key);
+  if (old) old();
+  const off = liveOn(fn);
+  _pageSubs.set(key, off);
+  return off;
+}
+function livePageClear() {
+  for (const off of _pageSubs.values()) { try { off(); } catch (e) {} }
+  _pageSubs.clear();
+}
+// repaint from the last snapshot (elapsed times) without claiming the
+// stream is alive - liveEmit's lastAt is what the watchdog trusts
+function liveTick() {
+  if (!live.snap) return;
+  for (const f of [...live.subs]) {
+    try { f(live.snap); } catch (e) { console.warn('live subscriber', e); }
+  }
+}
+// the server's clock, so elapsed times do not depend on the PC agreeing
+function liveNow() { return Date.now() / 1000 + live.skew; }
+function liveEmit(s) {
+  if (!s || !s.ok) return;
+  live.snap = s;
+  live.lastAt = Date.now();
+  if (s.drive && s.drive.now) live.skew = s.drive.now - Date.now() / 1000;
+  for (const f of [...live.subs]) {
+    // ⚠ one broken subscriber must not starve the rest - and must be loud
+    try { f(s); } catch (e) { console.warn('live subscriber', e); }
+  }
+}
+async function liveKick() {
+  try {
+    const tok = adminToken();
+    const r = await fetch('/api/events/snapshot?fresh=1',
+                          { headers: tok ? { 'X-ACECM-Token': tok } : {} });
+    liveEmit(await r.json());
+  } catch (e) {}
+}
+/* Watch one background job to its end, from the live feed.
+   pick(snap) -> that job's state object; running(state) -> still going?
+   onDone(state) runs ONCE, only after the job was seen running, so a
+   snapshot left over from the previous run cannot end this one early. */
+function liveWatch(pick, running, onDone, onTick) {
+  let seen = false, ended = false, off = null, first = null;
+  off = liveOn(s => {
+    if (ended) return;
+    const st = pick(s) || {};
+    if (running(st)) { seen = true; if (onTick) onTick(st); return; }
+    // ⚠ a job quicker than one feed tick is never SEEN running - but its
+    // finished state differs from the one we started with, so that counts
+    const now = JSON.stringify(st);
+    if (first === null) { first = now; if (!seen) return; }
+    if (!seen && now === first) return;
+    ended = true;
+    setTimeout(() => off && off(), 0);
+    onDone(st);
+  });
+  liveKick();
+  return () => { ended = true; if (off) off(); };
+}
+function liveStart() {
+  if (live.started) return;
+  live.started = true;
+  // EventSource cannot send headers. The server already accepts the token as
+  // a cookie, which keeps it out of the stream's URL.
+  const tok = adminToken();
+  if (tok && /^[\w.~-]+$/.test(tok)) {
+    try { document.cookie = 'acecm_token=' + tok + '; path=/; SameSite=Strict'; }
+    catch (e) {}
+  }
+  if (typeof EventSource === 'function') {
+    try {
+      live.es = new EventSource('/api/events');
+      live.es.onmessage = ev => {
+        try { liveEmit(JSON.parse(ev.data)); } catch (e) {}
+      };
+    } catch (e) { live.es = null; }
+  }
+  // the server sends at least every 5 s; silence for 6 s means fall back
+  setInterval(() => { if (Date.now() - live.lastAt > 6000) liveKick(); }, 3000);
+  setInterval(liveTick, 1000);
+  liveOn(paintActivity);
+  liveKick();
+}
+
+/* ---- the Join / Start job, described once for every page ------------- */
+const JOB_TERMINAL = ['idle', 'launched', 'failed', 'cancelled'];
+const JOB_STEP = {
+  writing: 'Write the session',
+  entering: 'Check the running game',
+  launching_game: 'Launch the game',
+  starting_backend: 'Start the lobby proxy',
+  starting_server: 'Start your server',
+  waiting_for_menu: 'Wait for the main menu',
+  waiting_for_session: 'Wait for the session',
+  selecting_car: 'Set your car',
+  selecting_track: 'Set the track',
+  setting_conditions: 'Set weather, time and mode',
+  opening_sp: 'Open Single Player',
+  starting_session: 'Start the session',
+  joining: 'Join the server',
+  capturing_list: 'Capture the public server list',
+  quitting_game: 'Close the game',
+};
+// what usually comes next, so the list can show the road ahead dimmed
+const JOB_PLAN = {
+  sp: ['writing', 'launching_game', 'waiting_for_menu', 'starting_session'],
+  local: ['starting_backend', 'starting_server', 'launching_game',
+          'waiting_for_menu', 'selecting_car', 'joining'],
+  server: ['launching_game', 'waiting_for_menu', 'selecting_car', 'joining'],
+  capture: ['capturing_list', 'quitting_game'],
+};
+const JOB_KIND = { sp: 'Single player', local: 'Joining your server',
+                   server: 'Joining', capture: 'Refreshing the server list' };
+function jobBusy(d) { return !!d && !JOB_TERMINAL.includes(d.phase || 'idle'); }
+function fmtSecs(s) {
+  s = Math.max(0, Math.round(s));
+  return s < 60 ? s + 's' : Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+// 45 s on one step is where "slow" turns into "probably stuck"
+const JOB_SLOW = 45;
+
+/* ---- activity strip: what is happening, on every page ----------------- */
+let _actFailSeen = 0;
+function paintActivity(s) {
+  const box = $('#activity');
+  if (!box) return;
+  const chips = [];
+  const d = s.drive || {};
+  const steps = d.steps || [];
+  const cur = steps[steps.length - 1];
+  if (jobBusy(d) && _page !== 'drive') {
+    const t = cur ? liveNow() - cur.at : 0;
+    chips.push({ cls: t > JOB_SLOW ? 'warn' : 'busy', go: 'drive',
+      text: `${JOB_KIND[d.kind] || 'Working'} · `
+        + `${JOB_STEP[d.phase] || d.hint || d.phase} · ${fmtSecs(t)}` });
+  } else if (d.phase === 'failed' && d.started > _actFailSeen
+             && _page !== 'drive') {
+    chips.push({ cls: 'bad', go: 'drive', dismiss: () => { _actFailSeen = d.started; },
+      text: `${JOB_KIND[d.kind] || 'Drive'} failed: ${d.fault || 'see Drive'}` });
+  }
+  const c = s.compress || {};
+  if (c.active) chips.push({ cls: 'busy', go: 'settings',
+    text: (c.undo ? 'Uncompressing' : 'Compressing') + ' the mods folder…' });
+  for (const [k, what, page] of [['thumbs', 'Rendering car pictures', 'cars'],
+                                 ['covers', 'Decoding track covers', 'tracks']]) {
+    const j = s[k] || {};
+    if (j.state === 'running') chips.push({ cls: 'busy', go: page,
+      text: `${what} ${j.done || 0}/${j.total || '?'}` });
+  }
+  const px = s.proxy || {};
+  if (d.game_running && px.up === false) {
+    chips.push({ cls: 'bad', text: 'Lobby proxy is down — the in-game server '
+      + 'list will be empty', action: ['Start it', 'backend/ensure'] });
+  } else if (d.game_running && px.up && px.ours === false) {
+    chips.push({ cls: 'warn', text: 'The lobby proxy is serving another '
+      + 'ACECM\'s servers', action: ['Use mine', 'backend/ensure'] });
+  }
+  const up = (s.servers || []).filter(v => v.running);
+  if (up.length) chips.push({ cls: 'ok', go: 'servers',
+    text: up.length === 1 ? `${up[0].name || 'Server'} is running`
+                          : `${up.length} servers running` });
+  // ⚠ rebuilt only when the text changes - this runs every second
+  const key = JSON.stringify(chips.map(c => [c.cls, c.text]));
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = '';
+  box.hidden = !chips.length;
+  for (const c of chips) {
+    const b = el('div', 'act ' + c.cls);
+    b.append(el('span', 'actdot'), el('span', 'acttext', esc(c.text)));
+    if (c.go) { b.classList.add('link'); b.onclick = () => go(c.go); }
+    if (c.action) {
+      const a = el('button', 'mini', esc(c.action[0]));
+      a.onclick = async ev => {
+        ev.stopPropagation();
+        a.disabled = true;
+        const r = await api(c.action[1], {});
+        toast(r.ok ? 'Lobby proxy started' : (r.error || 'failed'), !r.ok);
+        liveKick();
+      };
+      b.append(a);
+    }
+    if (c.dismiss) {
+      const x = el('button', 'mini ghost', '×');
+      x.title = 'Dismiss';
+      x.onclick = ev => { ev.stopPropagation(); c.dismiss(); paintActivity(live.snap); };
+      b.append(x);
+    }
+    box.append(b);
+  }
+}
+
+/* ---- the Join / Start checklist ----------------------------------------
+   The job used to show one line of text. When it stalled you saw "waiting for
+   the menu" and nothing else - not how long, not what came before, not what
+   was next. This lists every step it has been through with its time, the one
+   it is on, and the ones still ahead, and turns red on the step that failed.
+   opts: { onRetry, onStop } */
+function paintJobSteps(box, d, opts) {
+  opts = opts || {};
+  const steps = (d && d.steps) || [];
+  // a finished job is kept on screen for 10 minutes, then the list goes away
+  const last = steps[steps.length - 1];
+  const stale = !jobBusy(d) && last && liveNow() - last.at > 600;
+  if (!steps.length || stale || d.phase === 'idle') {
+    if (box.dataset.key !== '') { box.dataset.key = ''; box.innerHTML = ''; }
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const busy = jobBusy(d);
+  const work = steps.filter(x => !JOB_TERMINAL.includes(x.phase));
+  const endAt = busy ? liveNow()
+    : (last && JOB_TERMINAL.includes(last.phase) ? last.at : liveNow());
+  const rows = work.map((x, i) => {
+    const next = work[i + 1];
+    const until = next ? next.at : endAt;
+    const isLast = i === work.length - 1;
+    let state = 'done';
+    if (isLast && busy) state = 'now';
+    else if (isLast && d.phase === 'failed') state = 'bad';
+    else if (isLast && d.phase === 'cancelled') state = 'stop';
+    return { state, label: JOB_STEP[x.phase] || x.phase, hint: x.hint || '',
+             secs: until - x.at };
+  });
+  // the road ahead, dimmed - only while it is still moving
+  const plan = JOB_PLAN[d.kind] || [];
+  if (busy) {
+    const seen = new Set(work.map(x => x.phase));
+    const at = plan.indexOf(d.phase);
+    const lastSeen = Math.max(-1, ...work.map(x => plan.indexOf(x.phase)));
+    plan.slice(Math.max(at, lastSeen) + 1)
+      .filter(p => !seen.has(p))
+      .forEach(p => rows.push({ state: 'todo', label: JOB_STEP[p] || p,
+                                hint: '', secs: null }));
+  }
+  const key = JSON.stringify([rows.map(r => [r.state, r.label, r.hint,
+                               r.secs == null ? null : Math.round(r.secs)]),
+                              d.phase, d.fault, d.hint, d.stopping]);
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = '';
+  const head = el('div', 'jobhead');
+  head.append(el('b', null, esc(JOB_KIND[d.kind] || 'Drive')));
+  const tot = work.length ? endAt - work[0].at : 0;
+  head.append(el('span', 'tiny dim', fmtSecs(tot)));
+  box.append(head);
+  const ICON = { done: '✓', now: '', bad: '✕', stop: '■', todo: '' };
+  for (const r of rows) {
+    const row = el('div', 'jobstep ' + r.state);
+    const slow = r.state === 'now' && r.secs > JOB_SLOW;
+    if (slow) row.classList.add('slow');
+    row.append(el('span', 'jobicon', ICON[r.state]),
+               el('span', 'joblabel', esc(r.label)
+                 + (r.hint && r.state !== 'todo'
+                    ? `<span class="tiny dim"> · ${esc(r.hint)}</span>` : '')),
+               el('span', 'jobtime tiny', r.secs == null ? '' : fmtSecs(r.secs)));
+    box.append(row);
+  }
+  const cur = rows.find(r => r.state === 'now');
+  if (cur && cur.secs > JOB_SLOW) {
+    box.append(el('div', 'jobnote warn',
+      'This step is taking longer than usual. If the game is sitting on a '
+      + 'menu, Stop and try again.'));
+  }
+  if (d.phase === 'failed') {
+    box.append(el('div', 'jobnote bad', esc(d.fault || 'It stopped without saying why.')));
+  } else if (d.phase === 'launched') {
+    box.append(el('div', 'jobnote ok', esc(d.hint || 'Done')));
+  } else if (d.phase === 'cancelled') {
+    box.append(el('div', 'jobnote', 'Stopped.'));
+  }
+  const btns = el('div', 'row jobbtns');
+  if (busy && opts.onStop) {
+    const b = el('button', 'mini', d.stopping ? 'Stopping…' : 'Stop');
+    b.disabled = !!d.stopping;
+    b.onclick = () => { b.disabled = true; opts.onStop(); };
+    btns.append(b);
+  }
+  if ((d.phase === 'failed' || d.phase === 'cancelled') && opts.onRetry) {
+    const b = el('button', 'mini primary', 'Try again');
+    b.onclick = () => opts.onRetry();
+    btns.append(b);
+  }
+  if (d.phase === 'failed') {
+    const b = el('button', 'mini ghost', 'Open logs');
+    b.onclick = () => go('logs');
+    btns.append(b);
+  }
+  if (btns.childNodes.length) box.append(btns);
+}
+
 /* --------------------------------------------------------------- drive -- */
 /* Content Manager's home: pick car + track + mode, then Drive walks the
    client into a dedicated session. EVO has no -car/-track launch flags. */
-let driveTimer = null;
-let driveRate = 0;
-let driveReloadT = null;
 /* ⚠ The live Drive selection, kept across rebuilds of the page.
    drivePage() reconstructs `sel` from the SAVED pick, and the pick is only
    written when you press Drive/Join - so anything chosen and not yet started
@@ -78,11 +395,6 @@ let driveReloadT = null;
    which it does after a capture finishes. That read as the app "jumping back
    to singleplayer and forgetting the car". */
 let _driveSel = null;
-// ⚠ poll() is defined INSIDE drivePage(), so this top-level helper
-// cannot name it directly - drivePage hands it over here. Calling
-// setInterval(poll, ...) from out here threw ReferenceError on every
-// arm, which is why the heartbeat never started.
-let drivePollFn = null;
 let driveFilter = {
   car: '', track: '',
   sort: 'players',
@@ -99,28 +411,7 @@ let driveLocal = null;
 // not in the captured list, so serverOf falls back to this
 let directPicked = null;
 
-/* ⚠ The Drive poll must not stop when the launch job finishes.
-   /api/drive/status is the ONLY thing that reports whether the game is
-   running, so stopping at the terminal phase froze the screen on its last
-   state: close the game and the button kept its old label and disabled flag
-   until you switched tabs and back, which rebuilt the page from scratch.
-   Now it drops to a slow heartbeat instead of going dark. */
-function armDrivePoll(ms) {
-  if (!drivePollFn) return;
-  if (driveTimer && driveRate === ms) return;
-  if (driveTimer) clearInterval(driveTimer);
-  driveRate = ms;
-  driveTimer = setInterval(drivePollFn, ms);
-}
-
-function stopDrivePoll() {
-  if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
-  driveRate = 0;
-  if (driveReloadT) { clearTimeout(driveReloadT); driveReloadT = null; }
-}
-
 async function drivePage() {
-  stopDrivePoll();
   /* ⚠ Declared HERE, at the top, not next to the code that reads them.
      paintModeBar() assigns pullBtn while it builds the Public-servers row,
      and it runs long before the bottom of this function is reached - so a
@@ -351,16 +642,14 @@ async function drivePage() {
     // top row where they read as modes themselves.
     if (sel.via === 'server') {
       const pull = el('button', 'sm', 'Refresh list');
-      // ⚠ poll() has to be able to disable this, and it lives in a different
-      // scope - see the note there. Hand it out through the outer binding.
+      // ⚠ onDrive() disables this while a job runs, and it lives in a
+      // different scope - hand it out through the outer binding.
       pullBtn = pull;
       pull.title = 'Launch the game, open Multiplayer, save the public list, then quit';
       pull.onclick = async () => {
         const r = await api('drive/capture', {});
         if (!r.ok) { toast(r.error || 'Could not start', true); return; }
-        stopDrivePoll();
-        armDrivePoll(1200);
-        poll();
+        liveKick();
       };
       subRow.append(pull);
     }
@@ -817,7 +1106,10 @@ async function drivePage() {
   const hint = el('div', 'tiny dim',
     'Writes the session, launches the game, and opens the pit menu '
     + 'so you can change setup. Close the game first so the save sticks.');
-  sessionPane.append(pwField, driveBtn, st, hint);
+  // the step checklist sits right under the button it reports on
+  const stepsBox = el('div', 'jobsteps');
+  stepsBox.hidden = true;
+  sessionPane.append(pwField, driveBtn, stepsBox, st, hint);
   // ⚠ computed BEFORE the assists block is added: it selects direct-child
   // label.f, and the assists fields live one level down so they cannot be
   // caught by the single-player show/hide.
@@ -1794,76 +2086,52 @@ async function drivePage() {
   hour.onchange = () => { sel.tod_hour = Number(hour.value); };
   paintVia();
 
-  async function poll() {
-    /* ⚠ _wanted, not just _page. `_page` is only assigned AFTER the page
-       function resolves, so the poll() call at the end of drivePage() always
-       saw the previous page here and returned before arming anything - the
-       heartbeat never started on a freshly opened Drive screen. `_wanted` is
-       set synchronously by go() before the builder runs. */
-    if (_page !== 'drive' && _wanted !== 'drive') {
-      stopDrivePoll();
-      return;
-    }
-    let pollBusy = false;
-    try {
-      const r = await fetch('/api/drive/status').then(x => x.json());
-      if (_page !== 'drive' && _wanted !== 'drive') {
-        stopDrivePoll();
-        return;
-      }
-      const phase = r.phase || 'idle';
-      const busy = pollBusy = ['writing', 'launching_game', 'starting_backend',
-                    'waiting_for_menu', 'waiting_for_session',
-                    'entering', 'selecting_car', 'starting_session',
-                    'starting_server', 'joining',
-                    'capturing_list', 'quitting_game'].includes(phase);
-      driveBtn.disabled = busy;
-      /* ⚠ `pull` is declared inside `if (sel.via === 'server')` in
-         paintModeBar - a block scope this function cannot see. Referencing it
-         here threw ReferenceError on EVERY poll, and the empty catch below
-         swallowed it, so everything after this line was dead: the button was
-         never re-enabled, the status text never updated, and the screen only
-         recovered when switching tabs rebuilt the page. */
-      if (pullBtn) pullBtn.disabled = busy;
-      driveBtn.textContent = busy ? (r.hint || phase)
-        : (sel.via === 'local'
-          ? ((localOf() && !localOf().running) ? 'Start & Join' : 'Join')
-          : (sel.via === 'server' ? 'Join' : 'Drive'));
-      if (r.fault) {
-        st.innerHTML = `<b style="color:var(--red)">${esc(r.fault)}</b>`;
-      } else if (phase === 'launched') {
-        st.innerHTML = `<b style="color:var(--ok)">${esc(r.hint || 'Launched')}</b>`;
-        if ((r.captured || 0) > 0 && sel.via === 'server') {
-          stopDrivePoll();
-          driveReloadT = setTimeout(() => {
-            driveReloadT = null;
-            if (_page === 'drive') drivePage();
-          }, 500);
-        }
-      } else if (busy) {
-        st.textContent = r.hint || phase;
-      } else if (r.game_running) {
-        st.textContent = sel.via === 'server' || sel.via === 'local'
-          ? 'Game is running — Join will set the car and push into the server.'
-          : 'Game is running. Close it, then Drive.';
-      } else {
-        st.textContent = sel.via === 'local'
-          ? 'Pick your ACECM server and an allowed car, then Join.'
-          : (sel.via === 'server'
-            ? 'Pick a public server and an allowed car, then Join.'
-            : 'Pick a car and track, then Drive.');
-      }
-    } catch (e) {
-      // ⚠ Not silent. An empty catch here hid a ReferenceError that broke
-      // this whole function for weeks; a dead poll must be visible.
-      console.warn('drive poll', e);
-    } finally {
-      // fast while the job is moving, slow once it settles - but never off,
-      // or nothing notices the game starting or closing (see armDrivePoll).
-      // In `finally` so a throw in the body can never kill the heartbeat.
-      if (_page === 'drive' || _wanted === 'drive') {
-        armDrivePoll(pollBusy ? 1200 : 3000);
-      }
+  function idleLabel() {
+    if (sel.via === 'local')
+      return (localOf() && !localOf().running) ? 'Start & Join' : 'Join';
+    return sel.via === 'server' ? 'Join' : 'Drive';
+  }
+  async function stopJob() {
+    const x = await api('drive/cancel', {});
+    if (!x.ok) toast(x.error || 'Could not stop', true);
+    liveKick();
+  }
+  /* Everything the job reports arrives through the live feed now, so there
+     is no Drive timer to arm, disarm or lose (see the live feed notes). */
+  function onDrive(r) {
+    if (!r) return;
+    const phase = r.phase || 'idle';
+    const busy = jobBusy(r);
+    driveBtn.disabled = busy;
+    if (pullBtn) pullBtn.disabled = busy;
+    driveBtn.textContent = busy ? (JOB_STEP[phase] || r.hint || phase) + '…'
+                                : idleLabel();
+    paintJobSteps(stepsBox, r, {
+      onStop: stopJob,
+      onRetry: async () => {
+        if (r.kind === 'capture') {
+          const x = await api('drive/capture', {});
+          if (!x.ok) toast(x.error || 'Could not start', true);
+          liveKick();
+        } else driveBtn.onclick();
+      },
+    });
+    // the one-line status is only for "nothing running": the checklist
+    // carries everything about a job
+    if (busy || !stepsBox.hidden) st.textContent = '';
+    else if (r.game_running) st.textContent = sel.via === 'server' || sel.via === 'local'
+      ? 'Game is running — Join will set the car and push into the server.'
+      : 'Game is running. Close it, then Drive.';
+    else st.textContent = sel.via === 'local'
+      ? 'Pick your ACECM server and an allowed car, then Join.'
+      : (sel.via === 'server'
+        ? 'Pick a public server and an allowed car, then Join.'
+        : 'Pick a car and track, then Drive.');
+    // a finished list capture brings new servers: rebuild once for it
+    if (r.kind === 'capture' && phase === 'launched' && (r.captured || 0) > 0
+        && drivePage._reloadedFor !== r.started) {
+      drivePage._reloadedFor = r.started;
+      setTimeout(() => { if (_page === 'drive') drivePage(); }, 500);
     }
   }
 
@@ -1913,12 +2181,13 @@ async function drivePage() {
       st.innerHTML = `<b style="color:var(--red)">${esc(r.error || 'failed')}</b>`;
       return;
     }
-    stopDrivePoll();
-    armDrivePoll(1200);
-    poll();
+    liveKick();
   };
-  drivePollFn = poll;
-  poll();
+  // a capture that finished BEFORE this page was built must not trigger
+  // the rebuild-once below on first paint
+  if (live.snap && live.snap.drive && drivePage._reloadedFor === undefined)
+    drivePage._reloadedFor = live.snap.drive.started;
+  livePage('drive', s => onDrive(s.drive));
 }
 
 /* ------------------------------------------------------------- shared -- */
@@ -3081,16 +3350,13 @@ async function carGallery(p) {
     const r = await api('thumbs/build', {});
     if (!r.ok) { toast(r.error || 'busy', true); return; }
     toast('Rendering cars — this runs in the background');
-    const poll = setInterval(async () => {
-      const j = await api('thumbs/status');
-      build.textContent = j.state === 'running'
-        ? `Rendering ${j.done}/${j.total} — ${j.current}` : 'Render missing';
-      if (j.state !== 'running') {
-        clearInterval(poll);
-        toast(`${j.made} car render(s) made`);
-        carsPage();
-      }
-    }, 1500);
+    liveWatch(s => s.thumbs, j => j.state === 'running', j => {
+      build.textContent = 'Render missing';
+      toast(`${j.made} car render(s) made`);
+      if (_page === 'cars') carsPage();
+    }, j => {
+      build.textContent = `Rendering ${j.done}/${j.total} — ${j.current}`;
+    });
   };
   row.append(search, build);
   c.append(row);
@@ -3259,17 +3525,14 @@ async function buildMissingCarThumbs(models) {
         + (missing.length === 1 ? '' : 's') + ' in the background…');
   const r = await api('thumbs/build', {});
   if (!r || r.error) { carThumbBuild = false; return; }
-  const poll = setInterval(async () => {
-    const j = await api('thumbs/status');
-    if (!j || j.state === 'running') return;
-    clearInterval(poll);
+  liveWatch(s => s.thumbs, j => j.state === 'running', j => {
     // repaint so the new pictures actually appear, but only if the user is
     // still looking at this page
     if (j.made) {
       toast(`${j.made} car picture${j.made === 1 ? '' : 's'} rendered`);
       if (_page === 'cars') carsPage();
     }
-  }, 2000);
+  });
 }
 
 async function carsPage() {
@@ -3563,16 +3826,13 @@ async function tracksPage() {
     const r = await api('thumbs/covers', { force: done >= shipped });
     if (!r.ok) { toast(r.error || 'busy', true); return; }
     dec.disabled = true;
-    const poll = setInterval(async () => {
-      const j = (await api('thumbs/status')).cover_job || {};
-      dec.textContent = j.state === 'running'
-        ? `Decoding ${j.done}/${j.total} — ${j.current}` : 'Decode all covers';
-      if (j.state !== 'running') {
-        clearInterval(poll);
-        toast(`${j.made} cover(s) ready in ${j.seconds}s`);
-        tracksPage();
-      }
-    }, 1200);
+    liveWatch(s => s.covers, j => j.state === 'running', j => {
+      dec.textContent = 'Decode all covers';
+      toast(`${j.made} cover(s) ready in ${j.seconds}s`);
+      if (_page === 'tracks') tracksPage();
+    }, j => {
+      dec.textContent = `Decoding ${j.done}/${j.total} — ${j.current}`;
+    });
   };
   drow.append(dec, el('span', 'tiny dim',
     `${done}/${shipped} decoded`));
@@ -3803,9 +4063,16 @@ async function settingsPage() {
     diskRow.innerHTML = '';
     diskLine.textContent = 'Working… this can take a while on a large folder. '
                          + 'You can leave this page.';
-    const tick = async () => {
-      const st = await api('compress/status');
-      if (!st || !st.ok) { setTimeout(tick, 3000); return; }
+    // from the live feed; page-scoped, and a revisit picks it up again below
+    let sawActive = false, ended = false;
+    const off = livePage('compress', s => {
+      if (ended) return;
+      const st = s.compress || {};
+      if (st.active) { sawActive = true; return; }
+      // ⚠ a snapshot from just BEFORE Start shows the last run's result
+      if (!sawActive) return;
+      ended = true;
+      setTimeout(() => off(), 0);
       if (st.phase === 'error') {
         toast(st.error || 'compression failed', true);
         api('compress?refresh=1').then(paintDisk);
@@ -3820,9 +4087,8 @@ async function settingsPage() {
         paintDisk(a);
         return;
       }
-      setTimeout(tick, 3000);
-    };
-    setTimeout(tick, 1500);
+    });
+    liveKick();
   };
   /* measured lazily: walking ~90k files costs seconds and must not hold up
      the rest of Settings */
@@ -4458,10 +4724,9 @@ let _progRate = { done: 0, at: 0, v: 0 };
 function progClaim(who) { _progOwner = who; }
 function progRelease(who) { if (_progOwner === who) _progOwner = null; }
 
-async function pollProgress() {
+// fed from the live snapshot (liveOn in startProgressWatch), not its own poll
+function pollProgress(p) {
   if (_progOwner) return;                       // a drop is driving it
-  let p;
-  try { p = await api('progress'); } catch (e) { return; }
   const prog = dropProgress();
   if (!p || !p.active) {
     // ⚠ hide unconditionally, not only after a run this poller saw start. A
@@ -4501,28 +4766,19 @@ async function pollProgress() {
 }
 
 function startProgressWatch() {
-  if (_progTimer) return;
-  // ⚠ Slow when nothing is happening. This runs on every page for the whole
-  // session, so a fixed 1s poll would be a request a second for ever; the
-  // endpoint is a dict lookup, but the log noise alone is not worth it.
-  // Anything WE start calls progKick, so the idle rate only has to catch a
-  // job started elsewhere - another window, or a drop onto the tray.
-  const tick = async () => {
-    await pollProgress();
-    const fast = pollProgress._was || _progOwner;
-    clearTimeout(_progTimer);
-    _progTimer = setTimeout(tick, fast ? 700 : 2500);
-  };
-  _progTimer = setTimeout(tick, 0);
+  if (startProgressWatch._on) return;
+  startProgressWatch._on = true;
+  // ⚠ The bar used to run its own poller (0.7 s busy, 2.5 s idle). It now
+  // reads the one live feed like everything else, so it cannot drift out of
+  // step with the rest of the app or keep polling on its own.
+  liveOn(s => pollProgress(s.progress));
 }
 
-/* Poll NOW rather than up to a couple of seconds from now. Without this the
-   bar lagged behind the button that started the job, which reads as the
-   click not having worked. */
+/* Refresh NOW rather than on the next push. Without this the bar lagged
+   behind the button that started the job, which reads as the click not
+   having worked. */
 function progKick() {
-  clearTimeout(_progTimer);
-  _progTimer = null;
-  startProgressWatch();
+  liveKick();
 }
 
 function putFile(url, file, onProgress) {
@@ -5553,20 +5809,28 @@ async function evoshareQueue(base, queue) {
        says a multi-GB download has begun - which is the whole reason this
        path stopped relying on toasts. */
     progKick();
-    evoshareWatch(job.it, next);
+    evoshareWatch(job.it, next, r.job);
   };
   next();
 }
 
-function evoshareWatch(item, onDone) {
-  let misses = 0;
-  const tick = async () => {
-    const st = await api('evoshare/status');
-    if (!st || !st.ok) {
-      if (++misses > 5) return;
-      setTimeout(tick, 2000); return;
-    }
-    misses = 0;
+function evoshareWatch(item, onDone, jobId) {
+  /* From the live feed, not a poll of its own. App-wide (liveOn, not
+     livePage): a download keeps going when you change page, and so must
+     the toast and the refresh at its end.
+     ⚠ Only THIS job's end counts. The snapshot can still be showing the
+     previous download's "done" for a moment after this one starts, which
+     would fire onDone at once and start the whole queue over. */
+  // ⚠ a flag, not just `off`: liveOn calls back once immediately, before
+  // `off` exists, and a job that already ended would then fire twice
+  let ended = false, off = null;
+  off = liveOn(s => {
+    if (ended) return;
+    const st = s.evoshare || {};
+    if (jobId && st.job !== jobId) return;
+    if (st.active || !st.phase) return;
+    ended = true;
+    setTimeout(() => off && off(), 0);
     if (st.phase === 'done') {
       /* ⚠ Downloaded is not installed. A track needs its table rows, which
          cannot be written while the game holds content.kspkg; a car needs its
@@ -5585,20 +5849,12 @@ function evoshareWatch(item, onDone) {
         toast('Installed ' + (item.name || item.id));
       }
       if (onDone) onDone();
-      return;
+    } else if (st.phase === 'error') {
+      toast(st.error || 'download failed', true);
+    } else if (st.phase === 'cancelled') {
+      toast('Download cancelled');
     }
-    if (st.phase === 'error') {
-      toast(st.error || 'download failed', true); return;
-    }
-    if (st.phase === 'cancelled') { toast('Download cancelled'); return; }
-    if (st.active) {
-      /* No progress toasts: /api/progress now carries this job, so the shared
-         bar shows percentage, rate and time left. Toasting the same numbers
-         on top of it was just noise. */
-      setTimeout(tick, 2000);
-    }
-  };
-  setTimeout(tick, 1200);
+  });
 }
 
 async function contentFrom(s) {
@@ -6497,7 +6753,8 @@ Object.entries(PAGES).forEach(([name, spec]) => {
 function go(name) {
   if (typeof telTimer !== 'undefined' && telTimer) { clearInterval(telTimer); telTimer = null; }
   if (typeof telRaf !== 'undefined' && telRaf) { cancelAnimationFrame(telRaf); telRaf = null; }
-  if (name !== 'drive') stopDrivePoll();
+  // page-level live subscriptions belong to the page being left
+  livePageClear();
   if (name !== 'servers') stopAllLogFollows();
   _wanted = PAGES[name] ? name : 'drive';
   const [title, sub, fn] = PAGES[name] || PAGES.drive;
@@ -6614,6 +6871,8 @@ function bindThemes() {
 bindThemes();
 { const b = $('#brand'); if (b) b.onclick = () => go('drive'); }
 
+// the live feed first, so the first page subscribes to a running stream
+liveStart();
 go((location.hash || '#drive').slice(1));
 // problems are worth noticing wherever you are, but they do not change
 // often - a slow tick is plenty and costs one small request.

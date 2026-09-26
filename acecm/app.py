@@ -19,7 +19,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
 from . import (auth, backend, compress, config, content, contentsync,
-               detect, drive,
+               detect, drive, events,
                evoreg, evoshare,
                push as pushmod,
                gameui, hooking, hotkey, install,
@@ -308,6 +308,45 @@ class Handler(BaseHTTPRequestHandler):
             "error": "that action is only allowed from this PC",
         }, 403)
 
+    def _events(self):
+        """Server-Sent Events: the live snapshot, pushed when it changes.
+
+        One thread per open window (ThreadingHTTPServer), which is fine for a
+        desktop app and a handful of remote viewers. The snapshot itself is
+        shared and cached, so N windows do not cost N times the probing.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        # no Content-Length on a stream, so the connection cannot be reused
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        last, beat = None, time.time()
+        try:
+            self.wfile.write(b"retry: 2000\n\n")
+            while True:
+                s = events.snapshot(_progress)
+                # compare WITHOUT the clocks, or every tick is a "change";
+                # the page derives elapsed time from the last `now` it got
+                key = json.dumps({**s, "at": 0, "age": 0,
+                                  "drive": {**s["drive"], "now": 0}})
+                now = time.time()
+                # resend unchanged state every 5 s too: the page's watchdog
+                # treats a silent stream as dead and falls back to polling,
+                # and comment-only pings never reach its onmessage
+                if key != last or now - beat > 5:
+                    self.wfile.write(b"data: " + json.dumps(s).encode("utf-8")
+                                     + b"\n\n")
+                    last, beat = key, now
+                self.wfile.flush()
+                # reading the snapshot is free now (a background thread
+                # builds it), so check often and a change lands within ~0.5 s
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                OSError):
+            return
+
     # ---------------------------------------------------------------- GET --
     def do_GET(self):
         path, _, qs = self.path.partition("?")
@@ -361,6 +400,14 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, drive.public_servers())
             if path == "/api/drive/status":
                 return _json(self, drive.status())
+            # --- the one live feed every page subscribes to ---------------
+            if path == "/api/events":
+                return self._events()
+            if path == "/api/events/snapshot":
+                # fresh=1: built now, for the page's "I just started
+                # something" refresh; otherwise the cached copy
+                return _json(self, events.snapshot(
+                    _progress, fresh=(q.get("fresh") or [""])[0] == "1"))
             # 3D viewer: which cars can be shown, and how a pending
             # extraction is getting on
             # --- joining someone else's server ---------------------------
@@ -705,6 +752,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # --------------------------------------------------------------- POST --
     def do_POST(self):
+        # every action can change what the live feed shows - rebuild it now
+        # rather than up to a tick later
+        try:
+            return self._do_post()
+        finally:
+            events.kick()
+
+    def _do_post(self):
         path, _, qs = self.path.partition("?")
         if not self._admin_ok(urllib.parse.parse_qs(qs)):
             return self._deny_remote()
@@ -1103,7 +1158,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/game/launch":
                 return _json(self, backend.launch_game())
             if path == "/api/drive":
-                return _json(self, drive.start(body))
+                r = drive.start(body)
+                events.kick()
+                return _json(self, r)
             if path == "/api/drive/direct":
                 return _json(self, drive.direct_lookup(
                     body.get("target") or ""))
@@ -1114,7 +1171,17 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, drive.favourite_remove(
                     body.get("id") or ""))
             if path == "/api/drive/capture":
-                return _json(self, drive.capture_list())
+                r = drive.capture_list()
+                events.kick()
+                return _json(self, r)
+            if path == "/api/drive/cancel":
+                r = drive.cancel()
+                events.kick()
+                return _json(self, r)
+            if path == "/api/backend/ensure":
+                # start the lobby proxy, or replace one serving another
+                # ACECM's servers - what the activity strip's button does
+                return _json(self, drive._ensure_backend())
             if path == "/api/drive/list":
                 return _json(self, drive.publish_local(
                     body.get("id") or body.get("local_id")))

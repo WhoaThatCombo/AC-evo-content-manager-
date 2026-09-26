@@ -38,6 +38,7 @@ import gzip
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -232,12 +233,14 @@ def start(base, fname, folder="", kind="track"):
         if _state.get("active"):
             return {"ok": False, "error": "a download is already running"}
         _state.clear()
+        # `job` lets a watcher tell THIS download's end from the last one's
+        job = time.time()
         _state.update(active=True, phase="planning", done=0, total=0,
                       bytes=0, want=0, error="", server=base, file=fname,
-                      kind=kind)
+                      kind=kind, job=job)
     threading.Thread(target=_run, args=(base, fname, folder, kind),
                      daemon=True).start()
-    return {"ok": True, "started": True}
+    return {"ok": True, "started": True, "job": job}
 
 
 def cancel():
