@@ -11,9 +11,9 @@ const PAGES = {
   gamesettings: ['Game settings', 'FFB, graphics, audio and bindings', gameSettingsPage],
   logs: ['Logs', 'What ACECM did, and every error in full', logsPage],
   settings: ['Settings', 'Paths and ports', settingsPage],
-  // ⚠ back in the table: it was dropped in September while the Servers
-  // page kept its "live map" button, so that button silently opened Drive
-  telemetry: ['Live map', 'Live car positions from your server', telemetryPage],
+  // ⚠ Live map (telemetryPage, 13-telemetry.js) is deliberately NOT here:
+  // telemetry is unfinished. The Servers page renders no telemetry controls
+  // either, so nothing links to it - add it back here AND to Host below.
 };
 /* ---- sections: what you are doing, not how it works ----------------------
    The bar used to list pages - Drive, Servers, Cars, Tracks, Content, with
@@ -23,8 +23,7 @@ const PAGES = {
    saved bookmarks) are unchanged.                                          */
 const SECTIONS = [
   { id: 'play', label: 'Play', pages: [['drive', 'Play']] },
-  { id: 'host', label: 'Host', pages: [['servers', 'Servers'],
-                                       ['telemetry', 'Live map']] },
+  { id: 'host', label: 'Host', pages: [['servers', 'Servers']] },
   { id: 'content', label: 'Content', pages: [['content', 'Install & share'],
                                              ['cars', 'Cars'],
                                              ['tracks', 'Tracks']] },
@@ -38,8 +37,7 @@ const SIDE_SECTIONS = [
                                                      ['logs', 'Logs']] },
 ];
 // friendly aliases for links people type or share
-const PAGE_ALIAS = { play: 'drive', host: 'servers', diagnostics: 'backend',
-                     map: 'telemetry', live: 'telemetry' };
+const PAGE_ALIAS = { play: 'drive', host: 'servers', diagnostics: 'backend' };
 function sectionOf(page) {
   return [...SECTIONS, ...SIDE_SECTIONS].find(sec =>
     sec.pages.some(([n]) => n === page)) || SECTIONS[0];

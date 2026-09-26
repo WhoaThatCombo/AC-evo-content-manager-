@@ -15,7 +15,7 @@
      10-patches     binary patches page (not in the nav)
      11-gamesettings Settings > Game settings
      12-remote      fetching content from other people's servers
-     13-telemetry   Host > Live map
+     13-telemetry   live map page (unfinished; not in the nav)
      14-logs        Diagnostics > Logs
      15-nav         pages, sections, router, themes - and boot (keep LAST)
 

@@ -807,6 +807,21 @@ def main():
         print("no centreline (TELEM_TRACK unset) - origin filter only")
 
     proc = Proc(pid)
+
+    def watchdog():
+        # ⚠ Exit with the server. This used to loop forever after its server
+        # was gone: one tracker outlived its server by a day, and because it
+        # runs from the installed ACECM.exe it held that exe open and made
+        # the next update refuse with "ACECM is still running".
+        code = C.c_ulong(0)
+        while True:
+            time.sleep(5.0)
+            if (not k32.GetExitCodeProcess(proc.h, C.byref(code))
+                    or code.value != 259):          # 259 = STILL_ACTIVE
+                print(f"server pid {pid} has exited - stopping")
+                os._exit(0)
+
+    threading.Thread(target=watchdog, daemon=True).start()
     tr = Tracker(proc)
     tr.log_path = log
 

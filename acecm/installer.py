@@ -431,6 +431,45 @@ def running_installed_pids():
     return out
 
 
+def helper_pids():
+    """Background helpers running from the INSTALLED exe (`ACECM.exe --tool
+    ...`): the lobby proxy, telemetry trackers, render jobs.
+
+    ⚠ Each one holds the exe image open exactly like the main window does,
+    so any of them blocks an update. Quitting the main window never stopped
+    them (quit_now used to os._exit straight away), and a tracker whose
+    parent died could sit there for days - one did, and the update refused
+    with "the installed ACECM is still running (process 56328)" while no
+    ACECM window was open at all.
+    """
+    try:
+        from . import winproc
+    except Exception:
+        return []
+    out = []
+    for pid in running_installed_pids():
+        cmd = winproc.cmdline(pid) or ""
+        if " --tool " in f" {cmd} ":
+            out.append(pid)
+    return out
+
+
+def _stop_helpers(reason):
+    """Stop our own --tool helpers so the installed exe unlocks."""
+    from . import winproc
+    killed = []
+    for pid in helper_pids():
+        try:
+            if winproc.kill(pid):
+                killed.append(pid)
+        except Exception:
+            pass
+    if killed:
+        logs.LOG.info("update: stopped %d leftover helper(s) %s (%s)",
+                      len(killed), killed, reason)
+    return killed
+
+
 def _ask_installed_to_quit(any_acecm=False):
     """Ask a running copy to exit.
 
@@ -529,7 +568,11 @@ def apply_update(relaunch=True):
     logs.LOG.info("self-update: v%s -> v%s  (this exe: %s)",
                   installed_version() or "?", version.VERSION, running_exe())
     if _exe_locked(dst):
+        # the window first (so it cannot respawn its proxy), then whatever
+        # helpers are still holding the exe - its own, or orphans
         _ask_installed_to_quit()
+        if not _wait_unlocked(dst, timeout=8.0):
+            _stop_helpers("installed exe still locked after quit")
         if not _wait_unlocked(dst):
             pids = running_installed_pids()
             who = (" (process " + ", ".join(str(p) for p in pids) + ")"
@@ -604,6 +647,19 @@ def quit_now(delay=0.4):
     def bye():
         import time
         time.sleep(delay)
+        # ⚠ Take our helpers down with us. os._exit leaves child processes
+        # running, and each still holds the exe open - the lobby proxy
+        # alone was enough to make the update that asked us to quit fail.
+        try:
+            from . import backend, telemetry
+            stops = (backend.stop, telemetry.stop)
+        except Exception:
+            stops = ()
+        for stop in stops:
+            try:
+                stop()
+            except Exception:
+                pass
         try:
             from . import ui
             ui.destroy()
