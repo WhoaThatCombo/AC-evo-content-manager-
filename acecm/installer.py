@@ -622,7 +622,11 @@ def quit_now(delay=0.4):
 # another PyInstaller app's. Never delete a _MEI directory without it: other
 # frozen programs use the same %TEMP%\_MEInnnnnn naming, and one of them may
 # be running right now.
-_OURS_MARKER = os.path.join("acecm", "web", "app.js")
+# ⚠ Two markers: the UI was one web/app.js until 1.0.18 and is web/js/ since.
+# With only the new one, every leftover folder from an OLDER build would
+# never be recognised as ours again - and never cleaned.
+_OURS_MARKERS = (os.path.join("acecm", "web", "app.js"),
+                 os.path.join("acecm", "web", "js", "15-nav.js"))
 
 
 def stale_bundles(older_than=1800.0):
@@ -651,7 +655,7 @@ def stale_bundles(older_than=1800.0):
         d = os.path.join(root, name)
         if not os.path.isdir(d) or os.path.normcase(d) == live:
             continue
-        if not os.path.isfile(os.path.join(d, _OURS_MARKER)):
+        if not any(os.path.isfile(os.path.join(d, m)) for m in _OURS_MARKERS):
             continue
         try:
             # ⚠ mtime, so a copy that is merely OLD but still running is not a

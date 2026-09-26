@@ -76,6 +76,24 @@ window.addEventListener('error', function (e) {
   }
 });
 </script>
-<script src="/app.js"></script>
+<!-- The UI, as ordered classic scripts sharing one global scope (not ES
+     modules: the pages call each other and the router rebinds them by
+     name). ORDER MATTERS only in that 15-nav.js, which boots the app,
+     comes last. -->
+<script src="/js/01-core.js"></script>
+<script src="/js/02-drive.js"></script>
+<script src="/js/03-shared.js"></script>
+<script src="/js/04-servers.js"></script>
+<script src="/js/05-cars.js"></script>
+<script src="/js/06-tracks.js"></script>
+<script src="/js/07-backend.js"></script>
+<script src="/js/08-settings.js"></script>
+<script src="/js/09-content.js"></script>
+<script src="/js/10-patches.js"></script>
+<script src="/js/11-gamesettings.js"></script>
+<script src="/js/12-remote.js"></script>
+<script src="/js/13-telemetry.js"></script>
+<script src="/js/14-logs.js"></script>
+<script src="/js/15-nav.js"></script>
 </body>
 </html>

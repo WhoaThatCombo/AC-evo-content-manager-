@@ -280,6 +280,36 @@ RUNTIME_TOOLS = (
 )
 
 
+WEB_EXT = (".html", ".css", ".js")
+
+
+def stage_web():
+    """Copy the UI files that ship into build_tmp/web_ship and return it.
+
+    ⚠ The web folder used to be added WHOLESALE, so three stale backups of
+    an older UI (app.js.bak_carpolicy, app.js.bak_settings,
+    style.css.bak_revamp - about 550 KB) went out in every release. Name
+    what ships instead: .html / .css / .js only, subfolders included.
+    """
+    src = os.path.join(HERE, "acecm", "web")
+    stage = os.path.join(HERE, "build_tmp", "web_ship")
+    if os.path.isdir(stage):
+        shutil.rmtree(stage)
+    shipped = []
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in files:
+            if not f.lower().endswith(WEB_EXT):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), src)
+            dst = os.path.join(stage, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(os.path.join(root, f), dst)
+            shipped.append(rel.replace(os.sep, "/"))
+    print(f"web/: staged {len(shipped)} file(s): {', '.join(sorted(shipped))}")
+    return stage
+
+
 def harden_tools():
     """Stage a shippable tools/ that leaks as little as practical.
 
@@ -360,6 +390,7 @@ def build(clean=False):
         return 1
     global _TOOLS_SHIP
     _TOOLS_SHIP = harden_tools()
+    _WEB_SHIP = stage_web()
     ver_file, ver = _version_file()
     print(f"version resource: {ver}")
     windows = sys.platform == "win32"
@@ -389,7 +420,7 @@ def build(clean=False):
         # ⚠ FIRST data entry and at the archive ROOT, so unpacking the exe
         # surfaces the licence before anything else.
         "--add-data", f"{os.path.join(HERE, 'LICENSE.txt')}{os.pathsep}.",
-        "--add-data", f"{os.path.join(HERE, 'acecm', 'web')}{os.pathsep}acecm/web",
+        "--add-data", f"{_WEB_SHIP}{os.pathsep}acecm/web",
         "--add-data", f"{_TOOLS_SHIP}{os.pathsep}tools",
         # ⚠ WINDOWED, not console. A console-subsystem exe is handed its
         # console by Windows before any of our code runs, so hiding it later

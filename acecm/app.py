@@ -8,6 +8,7 @@ package; no framework, so it runs anywhere Python does.
 import json
 import mimetypes
 import os
+import re
 import shutil
 import socket
 import socketserver
@@ -1416,17 +1417,21 @@ class Handler(BaseHTTPRequestHandler):
             # keep yesterday's JS. Stamp the files' mtime instead.
             if not config.FROZEN:
                 try:
+                    jsdir = os.path.join(config.WEB, "js")
                     stamp = max(
-                        os.path.getmtime(os.path.join(config.WEB, "app.js")),
-                        os.path.getmtime(os.path.join(config.WEB, "style.css")),
-                    )
+                        [os.path.getmtime(os.path.join(jsdir, f))
+                         for f in os.listdir(jsdir) if f.endswith(".js")]
+                        + [os.path.getmtime(os.path.join(config.WEB,
+                                                         "style.css"))])
                     tag = str(int(stamp)).encode("ascii")
                 except OSError:
                     pass
             data = data.replace(b'href="/style.css"',
                                 b'href="/style.css?v=' + tag + b'"')
-            data = data.replace(b'src="/app.js"',
-                                b'src="/app.js?v=' + tag + b'"')
+            # every UI script (web/js/NN-*.js), not just one app.js
+            data = re.sub(rb'src="(/js/[\w.-]+\.js)"',
+                          lambda m: b'src="' + m.group(1) + b"?v=" + tag + b'"',
+                          data)
             # ⚠ The theme is ALSO kept in config, not only in localStorage:
             # an update wipes the webview profile (see ui._storage_path) and
             # took the user's accent with it. Injected here so it applies
