@@ -272,6 +272,16 @@ pre.log{
      viewport would crush both into half a screen each. Below this width the
      page is meant to scroll. */
   .drive{grid-template-columns:1fr;height:auto;min-height:0}
+  /* ⚠ ...and the cards must stop SHARING a height. Their flex basis of 0
+     only works inside a grid of fixed height; stacked with height:auto it
+     collapsed each card to its title, and the car picture (absolutely
+     positioned inside) spilled over the track card below it. */
+  .drive-left > .card:first-child,
+  .drive-left > .card:last-child{flex:0 0 auto}
+  /* .drive prefix: the column rules below have the same specificity and
+     come later in the file, so without it they win */
+  .drive .drive-left .drive-pick{flex:0 0 auto;aspect-ratio:16/9}
+  .drive .drive-left .drive-pick.empty-pick{aspect-ratio:auto}
 }
 .drive-col{display:flex;flex-direction:column;min-height:0;margin-bottom:0}
 .drive-col .drive-list{flex:1;min-height:200px;max-height:none}
@@ -659,3 +669,11 @@ button.ghost:hover{color:var(--fg);border-color:var(--line)}
 .jobnote.warn{color:var(--gold)}
 .jobnote.bad{color:var(--red)}
 .jobbtns{margin-top:8px;gap:6px}
+
+/* ---- sub-tabs: the pages inside the current section ------------------- */
+#subnav{display:flex;justify-content:center;gap:4px;margin-top:8px;flex-wrap:wrap}
+#subnav[hidden]{display:none}
+#subnav a{color:var(--dim);cursor:pointer;user-select:none;font-size:12.5px;
+  padding:3px 11px;border-radius:999px;border:1px solid transparent}
+#subnav a:hover{color:var(--fg);border-color:var(--line)}
+#subnav a.on{color:var(--fg);background:var(--panel2);border-color:var(--line)}

@@ -1240,14 +1240,33 @@ async function drivePage() {
      subtraction was right at one size and wrong at the next, which is what
      made the page overflow on first open and while resizing. */
   function fitDrive() {
-    if (_page !== 'drive' || !wrap.isConnected) return;
+    // ⚠ _wanted too: _page is only set AFTER the page finishes building, so
+    // every fit during the build bailed out here and the grid ran on the
+    // calc() fallback - the page was never actually fitted except on resize
+    if ((_page !== 'drive' && _wanted !== 'drive') || !wrap.isConnected) return;
     const top = wrap.getBoundingClientRect().top;
     // the .page bottom padding is the only thing below the grid
     const pad = parseFloat(getComputedStyle(p).paddingBottom) || 0;
     const h = Math.max(340, Math.round(innerHeight - top - pad));
     document.documentElement.style.setProperty('--drive-h', h + 'px');
   }
-  addEventListener('resize', fitDrive);
+  // ⚠ Re-fit whenever anything ABOVE the grid changes size, not just the
+  // window: the activity strip and the attention banner come and go on
+  // their own, and a stale fit left the page scrolling by their height.
+  // One observer per build, replacing the last - the old
+  // addEventListener('resize') here added another listener every rebuild.
+  if (drivePage._ro) drivePage._ro.disconnect();
+  if (typeof ResizeObserver === 'function') {
+    const ro = new ResizeObserver(() => fitDrive());
+    ['header', '#activity', '#attention'].forEach(q => { const n = $(q); if (n) ro.observe(n); });
+    ro.observe(viaBar);
+    drivePage._ro = ro;
+  }
+  if (!drivePage._onResize) {
+    drivePage._onResize = true;
+    addEventListener('resize', () => drivePage._fit && drivePage._fit());
+  }
+  drivePage._fit = fitDrive;
   requestAnimationFrame(fitDrive);
 
   function matchPaneHeights() {
@@ -4153,21 +4172,8 @@ async function settingsPage() {
   lc.append(lrow);
   p.append(lc);
 
-  // Backend and Logs used to own a slot in the top bar each. They are things
-  // you go looking for, not things you switch between, so they live here.
-  const more = el('div', 'card');
-  more.innerHTML = '<h2>More</h2>';
-  const moreRow = el('div', 'row wrap');
-  [['gamesettings', 'Game settings', 'FFB, graphics, audio and bindings'],
-   ['backend', 'Backend', 'Host through our own lobby'],
-   ['logs', 'Logs', 'What ACECM did, and every error in full']].forEach(
-    ([page, label, why]) => {
-      const b = el('button', null, label);
-      b.title = why;
-      b.onclick = () => go(page);
-      moreRow.append(b);
-    });
-  more.append(moreRow);
+  // (The "More" card that linked Game settings, Backend and Logs is gone:
+  // Game settings is a tab beside this page, the other two are Diagnostics.)
 
 
   // ---- faster loading ----------------------------------------------------
@@ -4421,9 +4427,6 @@ async function settingsPage() {
 
   c.append(save);
   p.append(c);
-  // ⚠ appended LAST: 'More' is a way out of Settings, so it belongs at the
-  // bottom rather than above the settings themselves.
-  p.append(more);
 }
 
 
@@ -6690,7 +6693,42 @@ const PAGES = {
   gamesettings: ['Game settings', 'FFB, graphics, audio and bindings', gameSettingsPage],
   logs: ['Logs', 'What ACECM did, and every error in full', logsPage],
   settings: ['Settings', 'Paths and ports', settingsPage],
+  // ⚠ back in the table: it was dropped in September while the Servers
+  // page kept its "live map" button, so that button silently opened Drive
+  telemetry: ['Live map', 'Live car positions from your server', telemetryPage],
 };
+/* ---- sections: what you are doing, not how it works ----------------------
+   The bar used to list pages - Drive, Servers, Cars, Tracks, Content, with
+   Backend and Logs tucked into Settings. It is grouped by task now: Play,
+   Host, Content, with Settings and Diagnostics small on the right. A section
+   with more than one page gets a sub-tab row. Page names (and so #links and
+   saved bookmarks) are unchanged.                                          */
+const SECTIONS = [
+  { id: 'play', label: 'Play', pages: [['drive', 'Play']] },
+  { id: 'host', label: 'Host', pages: [['servers', 'Servers'],
+                                       ['telemetry', 'Live map']] },
+  { id: 'content', label: 'Content', pages: [['content', 'Install & share'],
+                                             ['cars', 'Cars'],
+                                             ['tracks', 'Tracks']] },
+];
+const SIDE_SECTIONS = [
+  { id: 'settings', label: 'Settings', pages: [['settings', 'Settings'],
+                                               ['gamesettings', 'Game settings']] },
+  // the lobby proxy is plumbing: it lives here, and the activity strip
+  // speaks up on every page when it is actually down
+  { id: 'diagnostics', label: 'Diagnostics', pages: [['backend', 'Lobby proxy'],
+                                                     ['logs', 'Logs']] },
+];
+// friendly aliases for links people type or share
+const PAGE_ALIAS = { play: 'drive', host: 'servers', diagnostics: 'backend',
+                     map: 'telemetry', live: 'telemetry' };
+function sectionOf(page) {
+  return [...SECTIONS, ...SIDE_SECTIONS].find(sec =>
+    sec.pages.some(([n]) => n === page)) || SECTIONS[0];
+}
+// the page you were last on inside each section, so clicking Content takes
+// you back to Cars if that is where you were
+const _lastInSection = {};
 /* ---- keep the view where the user left it -------------------------------
    Every page rebuilds itself wholesale (`p.innerHTML = ''`) and most actions
    finish by calling their page function again. That threw the scroll back to
@@ -6932,6 +6970,7 @@ Object.entries(PAGES).forEach(([name, spec]) => {
 });
 
 function go(name) {
+  name = PAGE_ALIAS[name] || name;
   bufferAbandon();
   if (typeof telTimer !== 'undefined' && telTimer) { clearInterval(telTimer); telTimer = null; }
   if (typeof telRaf !== 'undefined' && telRaf) { cancelAnimationFrame(telRaf); telRaf = null; }
@@ -6942,8 +6981,7 @@ function go(name) {
   const [title, sub, fn] = PAGES[name] || PAGES.drive;
   $('#ttl').textContent = title;
   $('#sub').textContent = sub;
-  document.querySelectorAll('nav a').forEach(a =>
-    a.classList.toggle('on', a.dataset.page === name));
+  paintNav(name);
   // ⚠ Only blank when the page is actually changing. Blanking on a refresh is
   // what makes the content flick away and come back.
   if (name !== _page) $('#page').innerHTML = '<div class="empty">Loading…</div>';
@@ -6952,26 +6990,42 @@ function go(name) {
   location.hash = name;
   refreshAttention();
 }
-/* The section links are built from PAGES rather than written out in the HTML,
-   so adding a page cannot leave the nav out of step with it. The everyday
-   sections read as words next to the title; the occasional ones sit small on
-   the right so the main row stays short enough to scan. */
-const PRIMARY = ['drive', 'servers', 'cars', 'tracks', 'content'];
-// Reachable, but not worth a permanent place in the bar: you go to them
-// from Settings, which is where you were heading anyway.
-const NAV_HIDDEN = ['backend', 'logs', 'gamesettings'];
+/* The section links are built from SECTIONS rather than written out in the
+   HTML, so adding a page cannot leave the nav out of step with it. */
 function buildSections() {
   const main = $('#sections'), side = $('#sections2');
   main.innerHTML = ''; side.innerHTML = '';
-  Object.keys(PAGES).forEach(name => {
-    if (NAV_HIDDEN.includes(name)) return;
-    const a = el('a', null, PAGES[name][0]);
-    a.dataset.page = name;
-    a.onclick = () => go(name);
-    (PRIMARY.includes(name) ? main : side).append(a);
-  });
+  const add = (box, sec) => {
+    const a = el('a', null, esc(sec.label));
+    a.dataset.section = sec.id;
+    a.onclick = () => go(_lastInSection[sec.id] || sec.pages[0][0]);
+    box.append(a);
+  };
+  SECTIONS.forEach(sec => add(main, sec));
+  SIDE_SECTIONS.forEach(sec => add(side, sec));
+}
+function paintNav(page) {
+  const sec = sectionOf(page);
+  _lastInSection[sec.id] = page;
+  document.querySelectorAll('#sections a, #sections2 a').forEach(a =>
+    a.classList.toggle('on', a.dataset.section === sec.id));
+  const sub = $('#subnav');
+  if (!sub) return;
+  sub.innerHTML = '';
+  sub.hidden = sec.pages.length < 2;
+  for (const [n, label] of sec.pages) {
+    const a = el('a', n === page ? 'on' : null, esc(label));
+    a.onclick = () => go(n);
+    sub.append(a);
+  }
 }
 buildSections();
+/* Back / Forward. go() sets the hash; a hash we did not set (the buttons, a
+   pasted link) navigates. Without this the app ignored both. */
+addEventListener('hashchange', () => {
+  const want = PAGE_ALIAS[location.hash.slice(1)] || location.hash.slice(1);
+  if (want && PAGES[want] && want !== _wanted) go(want);
+});
 
 /* ------------------------------------------------------------- themes ---
    Accent-only, and stored per browser profile. index.html applies the saved
