@@ -436,11 +436,11 @@ def helper_pids():
     ...`): the lobby proxy, telemetry trackers, render jobs.
 
     ⚠ Each one holds the exe image open exactly like the main window does,
-    so any of them blocks an update. Quitting the main window never stopped
-    them (quit_now used to os._exit straight away), and a tracker whose
-    parent died could sit there for days - one did, and the update refused
-    with "the installed ACECM is still running (process 56328)" while no
-    ACECM window was open at all.
+    so any of them blocks an update. The lobby proxy exits with its parent
+    window (verified 1.0.18 -> 1.0.19), but a telemetry tracker had no exit
+    condition at all: one outlived its server by a day, and the update
+    refused with "the installed ACECM is still running (process 56328)"
+    while no ACECM window was open.
     """
     try:
         from . import winproc
@@ -647,9 +647,9 @@ def quit_now(delay=0.4):
     def bye():
         import time
         time.sleep(delay)
-        # ⚠ Take our helpers down with us. os._exit leaves child processes
-        # running, and each still holds the exe open - the lobby proxy
-        # alone was enough to make the update that asked us to quit fail.
+        # Take our helpers down with us. os._exit does not stop children;
+        # the proxy happens to exit with us, but anything that does not
+        # would keep the exe open and fail the update that asked us to quit.
         try:
             from . import backend, telemetry
             stops = (backend.stop, telemetry.stop)
