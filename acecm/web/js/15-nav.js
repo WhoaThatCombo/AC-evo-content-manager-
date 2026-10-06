@@ -331,7 +331,10 @@ function go(name) {
     fresh.innerHTML = '<div class="empty">Loading…</div>';
     old.replaceWith(fresh);
   }
-  fn().then(() => { const p = $('#page'); if (p) p.dataset.booted = '1'; })
+  fn().then(() => {
+    const p = $('#page');
+    if (p) { p.dataset.booted = '1'; markClamps(p); }
+  })
     .catch(e => { $('#page').innerHTML = ''; toast(String(e), true); });
   location.hash = name;
   refreshAttention();
@@ -372,6 +375,22 @@ buildSections();
 addEventListener('hashchange', () => {
   const want = PAGE_ALIAS[location.hash.slice(1)] || location.hash.slice(1);
   if (want && PAGES[want] && want !== _wanted) go(want);
+});
+
+/* Section descriptions show two lines (redesign.css); mark the ones that
+   were actually cut so only those get the click-to-expand cursor. Pages
+   that paint late are caught by a second look a moment later. */
+function markClamps(root) {
+  const run = () => root.querySelectorAll(':scope > .card > .tiny.dim')
+    .forEach(d => d.classList.toggle('clamped',
+      d.classList.contains('open') || d.scrollHeight > d.clientHeight + 2));
+  run();
+  setTimeout(run, 600);
+}
+document.addEventListener('click', e => {
+  if (e.target.closest('a,button,input,select,label')) return;
+  const d = e.target.closest('#page > .card > .tiny.dim.clamped');
+  if (d) d.classList.toggle('open');
 });
 
 /* ------------------------------------------------------------- themes ---

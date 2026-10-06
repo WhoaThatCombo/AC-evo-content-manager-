@@ -461,6 +461,14 @@ async function carsPage() {
     rightCol.innerHTML = '';
     const m = models.get(carSel);
     if (!m) {
+      // an empty half-page reads as broken; show the first car instead
+      const first = all.filter(match)[0];
+      if (first && models.get(first.model)) {
+        carSel = first.model;
+        drawList();
+        drawDetail();
+        return;
+      }
       rightCol.append(el('div', 'empty', 'Pick a car on the left'));
       return;
     }

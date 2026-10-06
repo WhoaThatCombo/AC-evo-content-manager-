@@ -276,3 +276,74 @@ label.f span{color:var(--dim)}
   .onl .drive-row.srv{grid-template-columns:52px minmax(0,1fr) 64px auto}
   .onl .drive-row.srv > :nth-child(4){display:none}
 }
+
+/* =====================================================================
+   App-wide: ONE surface per page, not a stack of bubbles.
+   Consecutive top-level cards join into a single panel and read as its
+   sections, divided by hairlines - the way Windows Settings, Steam or
+   Discord lay out a page. Each card keeps its own markup and behaviour;
+   only the edges change. A warning card (inline border-color) stays a
+   separate callout and breaks the run around it.
+   ===================================================================== */
+.page > .card{margin:0;border-radius:0;border-top-width:0;padding:20px 26px}
+.page > .card:first-child,
+.page > :not(.card) + .card,
+.page > .card[style*="border-color"] + .card{
+  border-top-width:1px;border-top-left-radius:16px;border-top-right-radius:16px}
+.page > .card:last-child,
+.page > .card:has(+ :not(.card)),
+.page > .card:has(+ .card[style*="border-color"]){
+  border-bottom-left-radius:16px;border-bottom-right-radius:16px;
+  margin-bottom:18px}
+.page > .card[style*="border-color"]{border-width:1px;border-radius:14px;
+  margin-bottom:14px;background:color-mix(in srgb,var(--panel) 88%,#ff8a3d 12%)}
+.page > .card h2{font-size:13px;letter-spacing:.1em;color:var(--dim);margin-bottom:10px}
+/* explanations under a section title: secondary text, readable line length */
+.page > .card > p,.page > .card > .dim,.page > .card > .tiny{max-width:82ch;
+  color:var(--dim);font-size:12.5px;line-height:1.55}
+/* a card inside a card is a sub-section of it, not another bubble */
+.card .card{background:none;border:0;border-top:1px solid var(--line);
+  border-radius:0;padding:14px 0 0;margin:14px 0 0;box-shadow:none}
+.card .card:first-child{border-top:0;padding-top:0;margin-top:0}
+/* A section that is just title + description + one control is a SETTING
+   ROW: words on the left, the control on the right, one line tall. */
+.page > .card:has(> h2:first-child + .dim + :is(.row,label.ctl,button):last-child){
+  display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:32px;
+  align-items:center}
+.page > .card:has(> h2:first-child + .dim + :is(.row,label.ctl,button):last-child) > h2{
+  grid-column:1;margin-bottom:4px}
+.page > .card:has(> h2:first-child + .dim + :is(.row,label.ctl,button):last-child) > .dim{
+  grid-column:1}
+.page > .card:has(> h2:first-child + .dim + :is(.row,label.ctl,button):last-child) > :last-child{
+  grid-column:2;grid-row:1 / span 2;margin:0;justify-content:flex-end;
+  flex-wrap:nowrap}
+/* descriptions: two lines, click to read the rest */
+.page > .card > .tiny.dim{display:-webkit-box;-webkit-box-orient:vertical;
+  -webkit-line-clamp:2;overflow:hidden}
+.page > .card > .tiny.dim.open{display:block;-webkit-line-clamp:unset}
+.page > .card > .tiny.dim.clamped{cursor:pointer}
+.page > .card > .tiny.dim.clamped:not(.open):hover{color:var(--fg)}
+@media (max-width:760px){
+  .page > .card:has(> h2:first-child + .dim + :is(.row,label.ctl,button):last-child){
+    display:block}
+}
+/* master-detail pages (Garage): list and detail share one surface */
+.page > .split{background:var(--panel);border:1px solid var(--line);
+  border-radius:16px;gap:0;margin-bottom:18px;overflow:hidden}
+.page > .split > .split-list{border-right:1px solid var(--line);
+  padding:14px 0 10px;max-height:calc(100vh - 120px);background:var(--panel)}
+.page > .split > .split-list .filterbar{padding:0 14px 10px;
+  border-bottom:1px solid var(--line)}
+.page > .split > .split-list .rows{overflow:auto;flex:1;min-height:0;
+  border:0;background:none;padding:4px 0}
+.page > .split > .split-list > .tiny{padding:8px 14px 0}
+.page > .split > .split-detail{padding:20px 26px}
+/* scrollbars that belong to a dark app */
+*{scrollbar-width:thin;scrollbar-color:var(--panel3) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:8px;
+  border:2px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:var(--dim2);background-clip:padding-box}
+.split-detail .card{background:none;border:0;border-top:1px solid var(--line);
+  border-radius:0;padding:16px 0 0;margin:16px 0 0}
