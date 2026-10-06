@@ -1166,7 +1166,23 @@ class Handler(BaseHTTPRequestHandler):
                 prof = next((p for p in servers.load() if p["id"] == pid), None)
                 if not prof:
                     return _json(self, {"ok": False, "error": "no profile"}, 404)
-                return _json(self, servers.start(prof))
+                # ⚠ Off the request: a start that deploys a track runs past
+                # the page's 12 s limit, which looked like nothing happened
+                # and invited a second click. Answer within 8 s either way;
+                # a slower start finishes in the background and reports
+                # through the live feed (servers[].starting / start_error).
+                done = {}
+                t = threading.Thread(
+                    target=lambda: done.update(r=servers.start(prof)),
+                    daemon=True)
+                t.start()
+                t.join(8.0)
+                if "r" in done:
+                    return _json(self, done["r"])
+                return _json(self, {"ok": True, "starting": True,
+                                    "note": "still starting (deploying the "
+                                            "track) - it will show as live "
+                                            "when it is up"})
             if path == "/api/server/stop":
                 # ⚠ honour the id. Ignoring it made every "stop this server"
                 # stop all of them.
@@ -1486,6 +1502,8 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             data = data.replace(b'href="/style.css"',
                                 b'href="/style.css?v=' + tag + b'"')
+            data = data.replace(b'href="/redesign.css"',
+                                b'href="/redesign.css?v=' + tag + b'"')
             # every UI script (web/js/NN-*.js), not just one app.js
             data = re.sub(rb'src="(/js/[\w.-]+\.js)"',
                           lambda m: b'src="' + m.group(1) + b"?v=" + tag + b'"',

@@ -2,7 +2,8 @@
    index.html; they share one global scope (see 01-core.js). */
 /* ----------------------------------------------------------------- nav --- */
 const PAGES = {
-  drive: ['Drive', 'Single player or a local server — same car picker', drivePage],
+  home: ['Home', 'Pick up where you left off', homePage],
+  drive: ['Play', 'Single player or a server — same car picker', drivePage],
   servers: ['Servers', 'Create, configure and run dedicated servers', serversPage],
   cars: ['Cars', 'What the dedicated server can actually load', carsPage],
   tracks: ['Tracks', 'Layouts available to host', tracksPage],
@@ -22,12 +23,30 @@ const PAGES = {
    with more than one page gets a sub-tab row. Page names (and so #links and
    saved bookmarks) are unchanged.                                          */
 const SECTIONS = [
+  { id: 'home', label: 'Home', pages: [['home', 'Home']] },
   { id: 'play', label: 'Play', pages: [['drive', 'Play']] },
   { id: 'host', label: 'Host', pages: [['servers', 'Servers']] },
+  { id: 'garage', label: 'Garage', pages: [['cars', 'Cars']] },
   { id: 'content', label: 'Content', pages: [['content', 'Install & share'],
-                                             ['cars', 'Cars'],
                                              ['tracks', 'Tracks']] },
 ];
+/* Sidebar icons: inline stroke SVG, no icon font or image to load. */
+const _ico = d => '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+  + 'stroke-linejoin="round" aria-hidden="true">' + d + '</svg>';
+const SECTION_ICON = {
+  home: _ico('<path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/>'),
+  play: _ico('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/>'
+    + '<path d="M12 14.5V21M9.6 11.2 3.5 9.5M14.4 11.2l6.1-1.7"/>'),
+  host: _ico('<rect x="3" y="4" width="18" height="7" rx="2"/>'
+    + '<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>'),
+  garage: _ico('<path d="M3 15l2.2-5.5A2 2 0 0 1 7.1 8h9.8a2 2 0 0 1 1.9 1.5L21 15v3H3z"/>'
+    + '<circle cx="7.5" cy="18" r="1.6"/><circle cx="16.5" cy="18" r="1.6"/>'),
+  content: _ico('<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>'),
+  settings: _ico('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/>'
+    + '<circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>'),
+  diagnostics: _ico('<path d="M3 12h4l3-8 4 16 3-8h4"/>'),
+};
 const SIDE_SECTIONS = [
   { id: 'settings', label: 'Settings', pages: [['settings', 'Settings'],
                                                ['gamesettings', 'Game settings']] },
@@ -37,7 +56,8 @@ const SIDE_SECTIONS = [
                                                      ['logs', 'Logs']] },
 ];
 // friendly aliases for links people type or share
-const PAGE_ALIAS = { play: 'drive', host: 'servers', diagnostics: 'backend' };
+const PAGE_ALIAS = { play: 'drive', host: 'servers', diagnostics: 'backend',
+                     garage: 'cars' };
 function sectionOf(page) {
   return [...SECTIONS, ...SIDE_SECTIONS].find(sec =>
     sec.pages.some(([n]) => n === page)) || SECTIONS[0];
@@ -293,8 +313,8 @@ function go(name) {
   // page-level live subscriptions belong to the page being left
   livePageClear();
   if (name !== 'servers') stopAllLogFollows();
-  _wanted = PAGES[name] ? name : 'drive';
-  const [title, sub, fn] = PAGES[name] || PAGES.drive;
+  _wanted = PAGES[name] ? name : 'home';
+  const [title, sub, fn] = PAGES[name] || PAGES.home;
   $('#ttl').textContent = title;
   $('#sub').textContent = sub;
   paintNav(name);
@@ -322,7 +342,8 @@ function buildSections() {
   const main = $('#sections'), side = $('#sections2');
   main.innerHTML = ''; side.innerHTML = '';
   const add = (box, sec) => {
-    const a = el('a', null, esc(sec.label));
+    const a = el('a', null, (SECTION_ICON[sec.id] || '') + '<span>'
+      + esc(sec.label) + '</span>');
     a.dataset.section = sec.id;
     a.onclick = () => go(_lastInSection[sec.id] || sec.pages[0][0]);
     box.append(a);
@@ -357,16 +378,17 @@ addEventListener('hashchange', () => {
    Accent-only, and stored per browser profile. index.html applies the saved
    theme before first paint so there is no flash of the default colour. */
 const THEMES = [
-  ['teal', '#2ee6c8'], ['blue', '#4c8dff'], ['purple', '#a78bfa'],
+  ['ember', '#ff6b35'], ['teal', '#2ee6c8'], ['blue', '#4c8dff'], ['purple', '#a78bfa'],
   ['red', '#ff5c7a'], ['orange', '#ff9d47'], ['green', '#3fb950'],
   ['pink', '#f472b6'], ['amber', '#ffd166'],
 ];
 function currentTheme() {
-  try { return localStorage.getItem('acecm.theme') || 'teal'; } catch (e) { return 'teal'; }
+  try { return localStorage.getItem('acecm.theme') || 'ember'; } catch (e) { return 'ember'; }
 }
 function setTheme(name) {
-  // teal is the stylesheet default, so it is the ABSENCE of data-theme
-  if (name === 'teal') delete document.documentElement.dataset.theme;
+  // ember is the stylesheet default (redesign.css), so it is the ABSENCE of
+  // data-theme; teal is an ordinary theme now
+  if (name === 'ember') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = name;
   try { localStorage.setItem('acecm.theme', name); } catch (e) {}
   // ⚠ and in config, so it survives the profile wipe an update performs
@@ -431,11 +453,11 @@ function bindThemes() {
   }, true);
 }
 bindThemes();
-{ const b = $('#brand'); if (b) b.onclick = () => go('drive'); }
+{ const b = $('#brand'); if (b) b.onclick = () => go('home'); }
 
 // the live feed first, so the first page subscribes to a running stream
 liveStart();
-go((location.hash || '#drive').slice(1));
+go((location.hash || '#home').slice(1));
 // problems are worth noticing wherever you are, but they do not change
 // often - a slow tick is plenty and costs one small request.
 setInterval(refreshAttention, 20000);

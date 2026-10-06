@@ -198,6 +198,9 @@ function liveStart() {
   setInterval(() => { if (Date.now() - live.lastAt > 6000) liveKick(); }, 3000);
   setInterval(liveTick, 1000);
   liveOn(paintActivity);
+  liveOn(paintSideStat);
+  fetch('/api/version').then(r => r.json())
+    .then(v => { live.version = v && v.version; }).catch(() => {});
   liveKick();
 }
 
@@ -238,6 +241,30 @@ function fmtSecs(s) {
 // 45 s on one step is where "slow" turns into "probably stuck"
 const JOB_SLOW = 45;
 
+/* ---- sidebar status: the three things worth a glance, always visible --- */
+function paintSideStat(s) {
+  const box = $('#sidestat');
+  if (!box) return;
+  const d = s.drive || {}, px = s.proxy || {};
+  const up = (s.servers || []).filter(v => v.running);
+  const lines = [
+    [px.up ? (px.ours === false ? 'bad' : 'ok') : 'bad',
+     px.up ? (px.ours === false ? 'Lobby proxy · not ours' : 'Lobby proxy · ready')
+           : 'Lobby proxy · down'],
+    [jobBusy(d) ? 'busy' : (d.game_running ? 'ok' : ''),
+     jobBusy(d) ? 'Game · ' + (JOB_STEP[d.phase] || 'working').toLowerCase()
+                : (d.game_running ? 'Game · running' : 'Game · closed')],
+    [up.length ? 'ok' : '', up.length === 1 ? (up[0].name || 'Server') + ' · live'
+                         : (up.length ? up.length + ' servers live' : 'No server running')],
+  ];
+  const key = JSON.stringify([lines, live.version]);
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = lines.map(([c, t]) =>
+    `<div class="ln"><i class="${c}"></i><span>${esc(t)}</span></div>`).join('')
+    + (live.version ? `<div class="ver">v${esc(live.version)}</div>` : '');
+}
+
 /* ---- activity strip: what is happening, on every page ----------------- */
 let _actFailSeen = 0;
 function paintActivity(s) {
@@ -274,10 +301,13 @@ function paintActivity(s) {
     chips.push({ cls: 'warn', text: 'The lobby proxy is serving another '
       + 'ACECM\'s servers', action: ['Use mine', 'backend/ensure'] });
   }
-  const up = (s.servers || []).filter(v => v.running);
-  if (up.length) chips.push({ cls: 'ok', go: 'servers',
-    text: up.length === 1 ? `${up[0].name || 'Server'} is running`
-                          : `${up.length} servers running` });
+  // (running servers are shown in the sidebar status card, not here)
+  for (const v of s.servers || []) {
+    if (v.starting) chips.push({ cls: 'busy', go: 'servers',
+      text: `Starting ${v.name || 'server'}…` });
+    else if (v.start_error) chips.push({ cls: 'bad', go: 'servers',
+      text: `${v.name || 'Server'} did not start: ${v.start_error}` });
+  }
   // ⚠ rebuilt only when the text changes - this runs every second
   const key = JSON.stringify(chips.map(c => [c.cls, c.text]));
   if (box.dataset.key === key) return;

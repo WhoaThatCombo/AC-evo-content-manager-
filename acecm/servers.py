@@ -577,7 +577,41 @@ def _custom_track_problem(profile):
             + (f" (its archive calls it {close[0]!r})" if close else ""))
 
 
+import threading as _threading
+
+# ⚠ ONE start at a time, for every profile. A start can spend 30 s+
+# deploying a track into the server's content.kspkg before it launches; the
+# page gave up waiting at 12 s, the user clicked again, and on 2026-10-03
+# three starts ran at once: two deploys wrote the same archive concurrently
+# and two servers launched on the same port - the runaway that freezes the
+# whole PC (acevo-server-port-conflict-hangs-pc). The launch-grace guard below
+# only protected the launch itself, which comes AFTER the deploy.
+_START_LOCK = _threading.Lock()
+STARTING = {}          # profile id -> {"at": t, "name": ...} while in progress
+LAST_START = {}        # profile id -> {"at": t, "ok": bool, "error": str}
+
+
 def start(profile):
+    """One start at a time; see _START_LOCK."""
+    pid_ = profile.get("id") or ""
+    if not _START_LOCK.acquire(blocking=False):
+        who = next(iter(STARTING.values()), {}).get("name") or "another server"
+        return {"ok": False, "busy": True,
+                "error": f"{who} is already starting - wait for it to finish"}
+    STARTING[pid_] = {"at": time.time(), "name": profile.get("name") or ""}
+    try:
+        r = _start(profile)
+    except Exception as ex:                        # noqa: BLE001
+        r = {"ok": False, "error": f"{type(ex).__name__}: {ex}"}
+    finally:
+        STARTING.pop(pid_, None)
+        _START_LOCK.release()
+    LAST_START[pid_] = {"at": time.time(), "ok": bool(r.get("ok")),
+                        "error": r.get("error") or ""}
+    return r
+
+
+def _start(profile):
     """Launch the dedicated server for a profile.
 
     ⚠ REFUSE to start on ports that are already in use. Starting a second

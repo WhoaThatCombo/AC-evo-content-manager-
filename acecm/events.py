@@ -38,7 +38,14 @@ def _servers():
             st = servers.status(p)
         except Exception:                          # noqa: BLE001
             st = {}
-        out.append({"id": p.get("id"), "name": p.get("name") or "",
+        pid = p.get("id")
+        last = servers.LAST_START.get(pid) or {}
+        out.append({"id": pid, "name": p.get("name") or "",
+                    "starting": pid in servers.STARTING,
+                    # a failed start in the last 2 minutes, for the strip
+                    "start_error": (last.get("error") or "")
+                    if not last.get("ok") and time.time() - (last.get("at") or 0) < 120
+                    else "",
                     "running": bool(st.get("running")),
                     "tcp_port": int(p.get("tcp_port") or 0),
                     "clients": st.get("clients")})

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>Assetto Corsa EVO Content Manager</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/redesign.css">
 <script>
 // Apply the saved theme before first paint, so there is no flash of the
 // default accent on every load.
@@ -20,45 +21,32 @@ if (t && t !== '__ACECM' + '_THEME__') document.documentElement.dataset.theme = 
 </head>
 <body>
 
+<!-- Sidebar shell (2026-10 redesign). Every id the scripts use is kept:
+     #sections / #sections2 are built by buildSections(), #subnav by paintNav,
+     #sidestat by the live feed. -->
+<aside class="side" aria-label="ACECM">
+  <a class="brand" id="brand" title="Home">
+    <span class="mark" aria-hidden="true"></span>
+    <span class="wordmark">ACECM</span>
+  </a>
+  <nav id="sections" aria-label="Sections"></nav>
+  <div class="side-fill"></div>
+  <nav id="sections2" aria-label="Settings and diagnostics"></nav>
+  <div id="sidestat" class="side-stat" aria-live="polite"></div>
+</aside>
 <main>
-  <!-- One centred bar. The active section is the only title we need, so the
-       old 34px heading and its subtitle are gone - they cost ~125px of every
-       page and mostly repeated the highlighted nav word underneath them.
-       Left / centre / right are grid columns so the nav is centred on the
-       WINDOW, not on whatever happens to be beside it. -->
   <header>
     <div class="bar">
-      <div class="barL">
-        <!-- The mark used to sit beside a 34px title; alone it read as a stray
-             dot, so it is a proper lockup now. Clicking it goes home. -->
-        <a class="brand" id="brand" title="Assetto Corsa EVO Content Manager">
-          <span class="mark"></span>
-          <span class="wordmark">ACECM</span>
-        </a>
-      </div>
-      <div class="barC">
-        <nav id="sections"></nav>
-      </div>
-      <!-- Settings sits far right, away from the sections you move between.
-           The "server ready" line is gone: it was permanent furniture that
-           said the same thing on every page, and a genuine problem already
-           shows up in the attention banner below. -->
-      <div class="barR">
-        <div id="hdr" class="row"></div>
-        <nav id="sections2"></nav>
-        <button id="themebtn" class="themebtn" title="Colour theme"></button>
-      </div>
+      <h1 id="ttl"></h1>
+      <!-- pages within the current section (Content: Install & share / Tracks) -->
+      <nav id="subnav" hidden></nav>
+      <div class="grow"></div>
+      <div id="hdr" class="row"></div>
+      <button id="themebtn" class="themebtn" title="Colour theme" aria-label="Colour theme"></button>
     </div>
-    <!-- pages within the current section (Host: Servers / Live map, ...) -->
-    <nav id="subnav" hidden></nav>
-    <!-- kept for the router, which still sets them; not displayed -->
-    <h1 id="ttl" hidden></h1>
     <div class="sub" id="sub" hidden></div>
   </header>
-  <!-- Anything actually wrong, on every page. Empty and invisible when there
-       is nothing to report. -->
-  <!-- What is happening right now - a join, a download, compression, your
-       running servers - on every page, from the one live feed. -->
+  <!-- What is happening right now, and anything actually wrong - every page. -->
   <div id="activity" hidden></div>
   <div id="attention"></div>
   <div class="page" id="page"></div>
@@ -94,6 +82,7 @@ window.addEventListener('error', function (e) {
 <script src="/js/12-remote.js"></script>
 <script src="/js/13-telemetry.js"></script>
 <script src="/js/14-logs.js"></script>
+<script src="/js/14b-home.js"></script>
 <script src="/js/15-nav.js"></script>
 </body>
 </html>
