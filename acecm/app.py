@@ -168,6 +168,10 @@ def _apply_server_build(did):
     if not zips:
         return {"ok": False, "error": "the upload was not a build archive"}
     src = os.path.join(d, zips[0])
+    bad = install.archive_budget(src, root)
+    if bad:
+        install.drop_cleanup(did)
+        return bad
     root_abs = os.path.abspath(root)
     wrote, skipped = 0, []
     try:
@@ -295,6 +299,55 @@ class Handler(BaseHTTPRequestHandler):
         """
         return self._peer_local() or auth.ok(self.headers, q)
 
+    def _explicit_token(self, q=None):
+        """A token in a header or the query - never the ambient cookie,
+        which a browser attaches on its own."""
+        h = self.headers
+        return bool((h.get("X-ACECM-Token") or "").strip()
+                    or (h.get("Authorization") or "").strip()
+                    or (q and (q.get("token") or [""])[0]))
+
+    def _browser_ok(self, write, q=None):
+        """Refuse requests a web PAGE made without the user meaning to.
+
+        ⚠ Loopback is trusted, and "loopback" includes every website open in
+        the user's browser: a page can POST to 127.0.0.1:8092 with no
+        preflight (text/plain counts as a simple request) and drive ACECM -
+        start servers, launch the game, install content. Two checks:
+          * CSRF: a write must come from our own page. Browsers send Origin
+            (and Sec-Fetch-Site) on cross-site POSTs; scripts and our own
+            tools send neither and are unaffected.
+          * DNS rebinding: a hostile name resolved to 127.0.0.1 makes its
+            page "same-origin" with us. On loopback, only our own host names
+            are accepted unless the request carries the admin token.
+        """
+        h = self.headers
+        host = (h.get("Host") or "").strip().lower()
+        if write:
+            if (h.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+                return False
+            origin = (h.get("Origin") or "").strip().lower()
+            if origin:
+                if origin == "null":
+                    return False
+                if urllib.parse.urlsplit(origin).netloc != host:
+                    return False
+        if self._peer_local() and host and not self._explicit_token(q):
+            name = (host.split("]")[0] + "]" if host.startswith("[")
+                    else host.rsplit(":", 1)[0])
+            if name not in ("127.0.0.1", "localhost", "[::1]"):
+                return False
+        return True
+
+    def _deny_browser(self):
+        logs.LOG.warning("refused %s %s: Origin=%r Host=%r Sec-Fetch-Site=%r",
+                         self.command, self.path.split("?")[0],
+                         self.headers.get("Origin"), self.headers.get("Host"),
+                         self.headers.get("Sec-Fetch-Site"))
+        return _json(self, {"ok": False,
+                            "error": "refused: that request did not come "
+                                     "from ACECM's own window"}, 403)
+
     def _deny_remote(self):
         if auth.enabled():
             return _json(self, {
@@ -359,6 +412,9 @@ class Handler(BaseHTTPRequestHandler):
         if (path.startswith("/api/") and path not in _SHARE_GET
                 and not self._admin_ok(q)):
             return self._deny_remote()
+        if (path.startswith("/api/") and path not in _SHARE_GET
+                and not self._browser_ok(False, q)):
+            return self._deny_browser()
         try:
             if path == "/api/state":
                 return _json(self, self._state())
@@ -764,6 +820,8 @@ class Handler(BaseHTTPRequestHandler):
         path, _, qs = self.path.partition("?")
         if not self._admin_ok(urllib.parse.parse_qs(qs)):
             return self._deny_remote()
+        if not self._browser_ok(True, urllib.parse.parse_qs(qs)):
+            return self._deny_browser()
         # Drag-drop streams the file; do not parse it as JSON.
         if path == "/api/drop/part":
             return self._drop_part(urllib.parse.parse_qs(qs))

@@ -188,6 +188,11 @@ def install(path, progress=None):
         return {"ok": False,
                 "error": "this package was made by a newer ACECM - update, "
                          "then drop it again"}
+    # sizes from the zip's own directory, not the manifest: the manifest is
+    # inside the same file and says whatever its author wrote
+    bad = installmod.archive_budget(path, contentsync.tracks_dir())
+    if bad:
+        return bad
     entries = man.get("files") or []
     total = sum(int(e.get("size") or 0) for e in entries) or 1
     installmod.ingest_begin("installing server package", total)

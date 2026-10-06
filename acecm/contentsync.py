@@ -804,6 +804,10 @@ def fetch_track_pack(base, sid, folder, files, progress=None):
             return None
         return member
 
+    bad = install.archive_budget(tmp, dest_dir)
+    if bad:
+        os.remove(tmp)
+        raise ValueError(bad["error"])
     with tarfile.open(tmp, "r:") as tar:
         tar.extractall(dest_dir, filter=_safe)
     try:

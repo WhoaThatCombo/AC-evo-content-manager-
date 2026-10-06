@@ -510,6 +510,11 @@ def install(path, only=None, overwrite=False):
 
     done, skipped = [], []
     if os.path.isfile(path):
+        dests = _mod_dests(create=False)
+        bad = archive_budget(path, dests[0] if dests else
+                             os.path.dirname(path))
+        if bad:
+            return bad
         with zipfile.ZipFile(path) as z:
             for n in z.namelist():
                 base, ext = os.path.splitext(os.path.basename(n))
@@ -1024,6 +1029,69 @@ def _content_ok(rel):
     return _content_allowed(rel)
 
 
+# ⚠ Generous on purpose. Flat-colour uncompressed .dds skins really do
+# compress 500-700x (measured: a T-180 car mod, 16.8 MB -> 24 KB), and an 8K
+# one is ~268 MB. The free-space check below is the real guard - zipfile never
+# writes more than a member's DECLARED size, and the declared total is what we
+# check - so this only catches the absurd: over 1 GB at over 1000x.
+BOMB_RATIO = 1000
+BOMB_MIN_BYTES = 1 << 30
+FREE_MARGIN = 1 << 30
+
+
+def _existing_dir(p):
+    p = os.path.abspath(p)
+    while p and not os.path.isdir(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return p
+
+
+def archive_budget(path, dest):
+    """None if `path` is safe to unpack into `dest`, else an error dict.
+
+    ⚠ Checked BEFORE anything is deleted or written. Archive sizes come from
+    the archive's own directory, which costs nothing to read, and used to be
+    trusted blindly: a zip can declare a member of any size, and the
+    extraction would fill the drive (the game and Windows share C:) before
+    failing. Two checks - it must fit with a margin to spare, and no large
+    member may claim an implausible compression ratio.
+    """
+    entries = []                                  # (name, size, packed)
+    try:
+        if path.lower().endswith(".zip"):
+            with zipfile.ZipFile(path) as z:
+                entries = [(i.filename, i.file_size, i.compress_size)
+                           for i in z.infolist() if not i.is_dir()]
+        else:
+            import tarfile
+            with tarfile.open(path, "r:*") as tar:
+                entries = [(m.name, m.size, None)
+                           for m in tar.getmembers() if m.isfile()]
+    except Exception as ex:                        # noqa: BLE001
+        return {"ok": False, "error": f"cannot read the archive: {ex}"}
+    for name, size, packed in entries:
+        if (packed is not None and size > BOMB_MIN_BYTES
+                and size > packed * BOMB_RATIO):
+            return {"ok": False, "error":
+                    f"refusing {os.path.basename(path)}: {name} claims "
+                    f"{size / 1e9:.1f} GB from {packed / 1e6:.1f} MB - that "
+                    f"is a decompression bomb, not game content"}
+    total = sum(s for _n, s, _p in entries)
+    try:
+        free = shutil.disk_usage(_existing_dir(dest)).free
+    except OSError:
+        free = None
+    if free is not None and total > free - FREE_MARGIN:
+        return {"ok": False, "error":
+                f"{os.path.basename(path)} unpacks to {total / 1e9:.1f} GB "
+                f"but only {max(0, free) / 1e9:.1f} GB is free there - "
+                f"make room first"}
+    return None
+
+
 def _extract_archive(path, dest):
     """Unpack a track pack into dest. Members cannot escape dest, and only
     content file types are written - see _content_ok."""
@@ -1131,6 +1199,9 @@ def install_track_pack(path, folder=None, overwrite=False):
                               meta.get("display_name") or folder)
         if hit:
             return hit
+    bad = archive_budget(path, dest)
+    if bad:
+        return bad
     if overwrite and _track_has_files(dest):
         shutil.rmtree(dest)
     os.makedirs(dest, exist_ok=True)
