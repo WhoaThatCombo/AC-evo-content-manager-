@@ -99,6 +99,59 @@ def _opener():
 # historical name so existing installs keep updating; Linux has no extension.
 ASSET_NAME = "ACECM.exe" if sys.platform == "win32" else "ACECM"
 
+# ---- release signatures ---------------------------------------------------
+# ⚠ The SHA-256 the updater checks comes from the SAME GitHub release as the
+# exe, so on its own it only catches a corrupted download - whoever can
+# replace the exe (a hijacked account or token) can replace its checksum too.
+# Every release is now also signed with an Ed25519 key that never touches
+# GitHub (tools/release_sign.py), and the updater refuses anything whose
+# <asset>.sig does not verify against one of these pinned public keys.
+# More than one entry = key rotation: ship the new key alongside the old,
+# sign with the new one, drop the old a few releases later.
+RELEASE_PUBKEYS = (
+    "ScPZslRHuUNMFcqqHc6TG3My2SgS/EsY4THCkv2gs6A=",
+)
+
+
+def release_message(asset, ver, sha256):
+    """What a release signature covers.
+
+    The version is in it so an OLD signed build cannot be served as an
+    update (a downgrade to a known-bad version would otherwise verify); the
+    asset name so the Windows and Linux binaries cannot be swapped.
+    """
+    return ("ACECM-release-v1\n" + str(asset).strip().lower() + "\n"
+            + str(ver).strip().lstrip("vV") + "\n"
+            + str(sha256).strip().lower() + "\n").encode("ascii")
+
+
+def verify_release(asset, ver, sha256, sig_text):
+    """(ok, reason). Never raises."""
+    import base64
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PublicKey)
+    except Exception as ex:                        # noqa: BLE001
+        return False, f"signature support missing ({ex})"
+    try:
+        sig = base64.b64decode((sig_text or "").strip(), validate=True)
+    except Exception:                              # noqa: BLE001
+        return False, "the signature file is not valid base64"
+    if len(sig) != 64:
+        return False, "no signature for this release"
+    msg = release_message(asset, ver, sha256)
+    for k in RELEASE_PUBKEYS:
+        try:
+            Ed25519PublicKey.from_public_bytes(base64.b64decode(k)).verify(
+                sig, msg)
+            return True, ""
+        except InvalidSignature:
+            continue
+        except Exception as ex:                    # noqa: BLE001
+            return False, f"bad pinned key ({ex})"
+    return False, "the signature does not match ACECM's release key"
+
 
 def _newer(a, b):
     """Is version a newer than b? Compares numerically, not as text."""
@@ -254,6 +307,20 @@ def _check_now():
                             sha = hexpart
                     except Exception:
                         pass
+            # the release signature, checked in apply() before anything moves
+            sig = ""
+            sig_asset = next((a for a in assets
+                              if a.get("name", "").lower() == want + ".sig"),
+                             None)
+            if sig_asset:
+                sig_url = (sig_asset.get("url")
+                           or sig_asset.get("browser_download_url"))
+                if sig_url:
+                    try:
+                        with _open_download(sig_url, timeout=20) as r:
+                            sig = r.read().decode("ascii", "replace").strip()
+                    except Exception:
+                        pass
             # Prefer the API asset URL. browser_download_url 404s after a
             # tag is deleted and recreated — the CDN keeps the old path
             # and answers "The specified blob does not exist".
@@ -267,6 +334,7 @@ def _check_now():
                     "url": api_url or cdn_url,
                     "browser_url": cdn_url,
                     "sha256": sha,
+                    "sig": sig,
                     "error": None if asset else
                              "that release has no ACECM.exe asset attached"}
         man = _get_json(url)
@@ -275,7 +343,7 @@ def _check_now():
                 "source": url,
                 "latest": latest, "available": _newer(latest, VERSION),
                 "notes": man.get("notes", ""), "url": man.get("url", ""),
-                "sha256": man.get("sha256", "")}
+                "sha256": man.get("sha256", ""), "sig": man.get("sig", "")}
     except urllib.error.HTTPError as ex:
         hint = ""
         if ex.code == 404:
@@ -631,6 +699,21 @@ def apply(url=None, sha256=None):
         return {"ok": False,
                 "error": f"checksum mismatch (got {got[:12]}, "
                          f"expected {sha256[:12]})"}
+
+    # ⚠ AND the signature, over the hash we actually downloaded. The
+    # checksum alone comes from the same release as the exe; only this proves
+    # the build was made by whoever holds ACECM's release key.
+    ok_sig, why = verify_release(ASSET_NAME, info.get("latest") or "",
+                                 got, info.get("sig") or "")
+    if not ok_sig:
+        try:
+            os.remove(new)
+        except OSError:
+            pass
+        logs.LOG.warning("update to %s refused: %s", info.get("latest"), why)
+        return {"ok": False,
+                "error": f"refusing the update: {why}. Download it from the "
+                         "GitHub release page yourself if you trust it."}
 
     if sys.platform != "win32":
         # ⚠ Swap NOW rather than scheduling it. Renaming a running binary is
