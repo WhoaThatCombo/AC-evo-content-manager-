@@ -36,6 +36,8 @@ async function drivePage() {
      survived a build. Anything a paint function touches belongs up here. */
   // Refresh-list button, when the Public servers sub-mode has built one.
   let pullBtn = null;
+  // set once the Online panel exists; paintModeBar runs before it does
+  let _onlReady = false;
   // bumped whenever something changes what the car LOOKS like
   let thumbBust = 0;
   const d = await api('drive');
@@ -118,7 +120,8 @@ async function drivePage() {
   if (_driveSel) {
     for (const k of ['via', 'onlineVia', 'server_id', 'local_id', 'server_ip',
                      'server_tcp_port', 'server_udp_port', 'password', 'car',
-                     'livery', 'track_index', 'custom_track', 'game_mode']) {
+                     'livery', 'track_index', 'custom_track', 'game_mode',
+                     'favTab']) {
       if (_driveSel[k] !== undefined && _driveSel[k] !== '' &&
           _driveSel[k] !== null) sel[k] = _driveSel[k];
     }
@@ -173,7 +176,7 @@ async function drivePage() {
     return (d.local_servers || []).find(s => s.id === sel.local_id) || null;
   }
   function allowedCars() {
-    const sv = sel.via === 'local' && !sel.favPick ? localOf() : serverOf();
+    const sv = sel.via === 'local' ? localOf() : serverOf();
     if ((sel.via !== 'server' && sel.via !== 'local') || !sv || !(sv.cars || []).length)
       return null;
     return new Set(sv.cars);
@@ -246,34 +249,9 @@ async function drivePage() {
       b.onclick = () => setVia(v === 'sp' ? 'sp' : sel.onlineVia);
       modeRow.append(b);
     });
-    if (!isOnline()) { subRow.style.display = 'none'; return; }
-    subRow.style.display = '';
-    [['local', 'My servers'], ['server', 'Public servers']].forEach(([v, lab]) => {
-      const b = el('button', 'sm' + (sel.via === v ? ' primary' : ''), lab);
-      b.onclick = () => setVia(v);
-      subRow.append(b);
-    });
-    // Actions belong to the sub-mode they act on, rather than sitting on the
-    // top row where they read as modes themselves.
-    if (sel.via === 'server') {
-      const pull = el('button', 'sm', 'Refresh list');
-      // ⚠ onDrive() disables this while a job runs, and it lives in a
-      // different scope - hand it out through the outer binding.
-      pullBtn = pull;
-      pull.title = 'Ask the lobby for the public list (a few seconds). If '
-        + 'that cannot work, launches the game and reads it from Multiplayer';
-      pull.onclick = async () => {
-        const r = await api('drive/capture', {});
-        if (!r.ok) { toast(r.error || 'Could not start', true); return; }
-        liveKick();
-      };
-      subRow.append(pull);
-    }
-    // ⚠ no "Full browser" link any more - the server-browser page is gone and
-    // its one genuinely useful part (fetch from a host) now lives on Content.
-    const manage = el('button', 'sm', 'Manage servers');
-    manage.onclick = () => go('servers');
-    subRow.append(manage);
+    // the online sub-modes are tabs inside the Online panel (paintOnlTabs)
+    subRow.style.display = 'none';
+    if (_onlReady) paintOnlTabs();
   }
   viaBar.append(modeRow, subRow);
   paintModeBar();
@@ -493,6 +471,7 @@ async function drivePage() {
      Joining never needed the list - the address is enough - so this is about
      seeing what you are about to join, and keeping the ones you go back to. */
   let favs = [];
+  let favsLoaded = false, favsLoading = false;
 
   function selectServer(info) {
     sel.server_id = '';                 // an address, not a captured entry
@@ -555,39 +534,39 @@ async function drivePage() {
         const r = await api('drive/fav/add', { target: t });
         if (!r || !r.ok) { toast((r && r.error) || 'could not save', true); return; }
         favs = r.favourites || [];
-        toast('Saved — it is under Online › My servers');
+        toast('Saved to Favourites');
+        paintOnlTabs();
       };
       row.append(inp, go, star);
       directBox.append(row);
     }
   }
   async function loadFavs() {
+    if (favsLoading) return;
+    favsLoading = true;
     const r = await api('drive/fav');
+    favsLoading = false;
     favs = (r && r.favourites) || [];
-    drivePage._favsLoaded = true;
-    if (sel.via === 'local') paintLocal();
+    favsLoaded = true;
+    paintOnlTabs();
+    if (sel.via === 'server' && sel.favTab) paintServers();
   }
 
-  /* Favourites live under My servers - the places YOU go back to - rather
-     than above the public list, where they took a third of its height. A
-     favourite is still joined as an address (via 'server'); see favPick. */
+  /* Favourites are their own tab beside Public, like any server browser -
+     they are joined exactly like a public server (by address), so the tab is
+     via 'server' with favTab set, and everything downstream is unchanged. */
   function paintFavs(box) {
-    if (!favs.length) return;
-    box.append(el('div', 'tiny dim fav-title', 'Favourites'));
     favs.forEach(f => {
-      const r = el('div', 'fav-row'
-        + (sel.favPick && sel.server_ip === f.ip
+      const r = el('div', 'drive-row srv'
+        + (sel.server_ip === f.ip
            && Number(sel.server_tcp_port) === Number(f.tcp) ? ' on' : ''));
       const t = el('div', 'grow');
-      t.innerHTML = `<div class="name">${esc(f.name)}</div>`
+      t.innerHTML = `<div class="name"><span class="nm">${esc(f.name)}</span></div>`
         + `<div class="tiny dim">${esc(f.ip)}:${f.tcp}</div>`;
       // ⚠ look it up again rather than trusting what was saved: the player
       // count and even the name will have moved on since it was pinned
       r.onclick = () => {
-        sel.favPick = true;
-        sel.local_id = '';
-        lookupAndSelect(`${f.ip}:${f.tcp}`, true).then(() => paintLocal());
-        paintLocal();
+        lookupAndSelect(`${f.ip}:${f.tcp}`, true).then(() => paintServers());
       };
       /* Fetch what this server needs, without going to the browser page and
          finding it in a list. Content only comes from a host running ACECM,
@@ -626,10 +605,13 @@ async function drivePage() {
         ev.stopPropagation();
         const res = await api('drive/fav/remove', { id: f.id });
         favs = (res && res.favourites) || [];
-        if (sel.favPick && sel.server_ip === f.ip) sel.favPick = false;
-        paintLocal();
+        paintOnlTabs();
+        paintServers();
       };
-      r.append(t, get, x);
+      const acts = el('div', 'acts');
+      acts.append(get, x);
+      r.append(trackThumb(''), t, el('div', 'cell dim', ''),
+               el('div', 'cell dim', ''), acts);
       box.append(r);
     });
   }
@@ -733,6 +715,138 @@ async function drivePage() {
   const stepsBox = el('div', 'jobsteps');
   stepsBox.hidden = true;
   sessionPane.append(pwField, driveBtn, stepsBox, st, hint);
+
+  /* ---- Online: ONE panel, laid out like any server browser -------------
+     Tabs and tools across the top, the list filling the middle, and what
+     you are about to commit to - server, car, Join - in a bar along the
+     bottom. It used to be five separate cards (car, selected server,
+     Session/Assists, filters, list) and the list itself got one row.
+     ⚠ It BORROWS the nodes Single player uses (search, list, filters, the
+     two picks, Join, the checklist) instead of building its own, so every
+     paint function keeps writing into the same elements whichever layout
+     shows them. borrow()/giveBack() leave a marker so each goes home. */
+  const onl = el('div', 'card onl');
+  onl.style.display = 'none';
+  const onlBar = el('div', 'onl-bar');
+  const onlTabs = el('div', 'onl-tabs');
+  const onlTools = el('div', 'onl-tools');
+  const slotSearch = el('div', 'onl-search');
+  const slotDirect = el('div', 'onl-direct');
+  const filtBtn = el('button', 'sm', 'Filters');
+  filtBtn.onclick = () => {
+    onl.classList.toggle('filters-open');
+    filtBtn.classList.toggle('primary', onl.classList.contains('filters-open'));
+  };
+  const refreshBtn = el('button', 'sm', 'Refresh');
+  refreshBtn.title = 'Ask the lobby for the public list (a few seconds). If '
+    + 'that cannot work, launches the game and reads it from Multiplayer';
+  refreshBtn.onclick = async () => {
+    const r = await api('drive/capture', {});
+    if (!r.ok) { toast(r.error || 'Could not start', true); return; }
+    liveKick();
+  };
+  // ⚠ onDrive() disables this while a job runs - through the outer binding
+  pullBtn = refreshBtn;
+  const manageBtn = el('button', 'sm', 'Manage servers');
+  manageBtn.onclick = () => go('servers');
+  onlTools.append(slotSearch, filtBtn, refreshBtn, manageBtn, slotDirect);
+  onlBar.append(onlTabs, onlTools);
+  const onlBody = el('div', 'onl-body');
+  const onlFoot = el('div', 'onl-foot');
+  const footSel = el('div', 'onl-sel');
+  const footCar = el('div', 'onl-car');
+  const footGo = el('div', 'onl-go');
+  const assistBtn = el('button', '', 'Assists');
+  assistBtn.title = 'Driving assists - saved to your game profile';
+  assistBtn.onclick = () => openAssists();
+  onlFoot.append(footSel, footCar, footGo);
+  onl.append(onlBar, onlBody, onlFoot);
+  p.append(onl);
+
+  const homes = new Map();
+  function borrow(node, into) {
+    if (!homes.has(node) && node.parentNode) {
+      const m = document.createComment('home');
+      node.parentNode.insertBefore(m, node);
+      homes.set(node, m);
+    }
+    if (node.parentNode !== into) into.append(node);
+  }
+  function giveBack(node) {
+    const m = homes.get(node);
+    if (m && m.parentNode && node.nextSibling !== m)
+      m.parentNode.insertBefore(node, m);
+  }
+
+  function paintOnlTabs() {
+    onlTabs.innerHTML = '';
+    const tab = sel.via === 'local' ? 'mine' : (sel.favTab ? 'favs' : 'public');
+    [['public', 'Public', (d.servers || []).length],
+     ['favs', 'Favourites', favs.length],
+     ['mine', 'My servers', (d.local_servers || []).length]].forEach(([k, lab, n]) => {
+      const b = el('button', k === tab ? 'on' : '');
+      b.append(document.createTextNode(lab));
+      if (n) b.append(el('span', 'n', String(n)));
+      b.onclick = () => {
+        sel.favTab = k === 'favs';
+        if (sel.favTab && !favsLoaded) loadFavs();
+        setVia(k === 'mine' ? 'local' : 'server');
+        paintTracks();
+      };
+      onlTabs.append(b);
+    });
+    if (!favsLoaded) loadFavs();
+    const pub = tab === 'public';
+    filtBtn.style.display = pub ? '' : 'none';
+    refreshBtn.style.display = pub ? '' : 'none';
+    manageBtn.style.display = tab === 'mine' ? '' : 'none';
+    slotDirect.style.display = tab === 'mine' ? 'none' : '';
+    if (!pub) {
+      onl.classList.remove('filters-open');
+      filtBtn.classList.remove('primary');
+    }
+  }
+  _onlReady = true;
+
+  function openAssists() {
+    const veil = el('div', 'pk-veil');
+    const box = el('div', 'pk-box');
+    const head = el('div', 'pk-head');
+    const x = el('button', 'pk-x', '×');
+    head.append(el('h3', null, 'Assists'), x);
+    const body = el('div', 'pk-body pk-pad');
+    const was = assistPane.style.display;
+    borrow(assistPane, body);
+    assistPane.style.display = '';
+    box.append(head, body);
+    veil.append(box);
+    document.body.append(veil);
+    const close = () => {
+      giveBack(assistPane);
+      assistPane.style.display = was;
+      veil.remove();
+    };
+    x.onclick = close;
+    veil.onclick = e => { if (e.target === veil) close(); };
+  }
+
+  function layoutOnline(on) {
+    wrap.style.display = on ? 'none' : '';
+    onl.style.display = on ? '' : 'none';
+    const parts = [[trkSearch, slotSearch], [directBox, slotDirect],
+                   [srvBox, onlBody], [stepsBox, onlBody],
+                   [trkHead, footSel], [carHead, footCar],
+                   [pwField, footGo], [assistBtn, footGo], [driveBtn, footGo],
+                   [st, onlFoot]];
+    if (on) {
+      parts.forEach(([n, into]) => borrow(n, into));
+      hint.style.display = 'none';
+      paintOnlTabs();
+    } else {
+      parts.forEach(([n]) => giveBack(n));
+      hint.style.display = '';
+    }
+  }
   // ⚠ computed BEFORE the assists block is added: it selects direct-child
   // label.f, and the assists fields live one level down so they cannot be
   // caught by the single-player show/hide.
@@ -867,7 +981,8 @@ async function drivePage() {
     // every fit during the build bailed out here and the grid ran on the
     // calc() fallback - the page was never actually fitted except on resize
     if ((_page !== 'drive' && _wanted !== 'drive') || !wrap.isConnected) return;
-    const top = wrap.getBoundingClientRect().top;
+    const top = (wrap.style.display === 'none' ? onl : wrap)
+      .getBoundingClientRect().top;
     // the .page bottom padding is the only thing below the grid
     const pad = parseFloat(getComputedStyle(p).paddingBottom) || 0;
     const h = Math.max(340, Math.round(innerHeight - top - pad));
@@ -1314,6 +1429,7 @@ async function drivePage() {
           d.servers_meta = r.servers_meta || {};
           d.servers_pending = false;
         }
+        paintOnlTabs();
         // the user may have clicked away, or switched to a different source
         if (_page !== 'drive') return;
         defaultServer();
@@ -1343,6 +1459,19 @@ async function drivePage() {
     const q = (trkSearch.value || '').toLowerCase();
     driveFilter.track = trkSearch.value;
     trkList.innerHTML = '';
+    if (sel.favTab) {
+      trkSearch.placeholder = 'Filter favourites…';
+      if (!favs.length) {
+        trkList.append(el('div', 'empty', favsLoaded
+          ? 'No favourites yet. Pick a server, or type an address in Direct '
+            + 'connect, and press ☆.'
+          : 'Loading…'));
+        if (!favsLoaded) loadFavs();
+        return;
+      }
+      paintFavs(trkList);
+      return;
+    }
     const meta = d.servers_meta || {};
     if (!(d.servers || []).length) {
       // ⚠ "still coming" and "there are none" are different things to say.
@@ -1384,20 +1513,18 @@ async function drivePage() {
       return;
     }
     const shown = rows.slice(0, 250);
-    if (rows.length > shown.length) {
-      trkList.append(el('div', 'tiny dim',
-        `Showing ${shown.length} of ${rows.length}`));
-    }
+    trkList.append(srvHead(rows.length > shown.length
+      ? `Showing ${shown.length} of ${rows.length}` : `${rows.length} servers`));
     shown.forEach(s => {
       const on = (sel.server_id && s.id === sel.server_id)
         || (sel.server_ip && s.server_ip === sel.server_ip
             && Number(s.server_tcp_port) === Number(sel.server_tcp_port));
-      const r = el('div', 'drive-row' + (on ? ' on' : ''));
+      const r = el('div', 'drive-row srv' + (on ? ' on' : ''));
       r.dataset.ip = s.server_ip || '';
       const t = el('div', 'grow');
       const name = el('div', 'name');
-      name.append(document.createTextNode(
-        (s.name || '(unnamed)') + (s.locked ? ' 🔒' : '')));
+      name.append(el('span', 'nm',
+        esc((s.name || '(unnamed)') + (s.locked ? ' 🔒' : ''))));
       if (isAcecm(s)) {
         name.append(el('span', 'pill acecm', '<i class="dot"></i>ACECM'));
       }
@@ -1410,10 +1537,13 @@ async function drivePage() {
       }
       const sub = el('div', 'tiny dim',
         `${esc(s.track || '—')} · ${esc(s.layout || '')}`
-        + ` · ${s.players || 0}/${s.max_players || 0}`
-        + ` · ${esc(carsLine(s))}`
         + (s.ping ? ` · ${s.ping}ms` : ''));
       t.append(name, sub);
+      const full = num(s.max_players) > 0 && num(s.players) >= num(s.max_players);
+      const ply = el('div', 'cell ply' + (num(s.players) ? ' live' : '')
+        + (full ? ' full' : ''), `${s.players || 0}/${s.max_players || 0}`);
+      const carsC = el('div', 'cell dim', esc(carsLine(s)));
+      carsC.title = (s.cars || []).map(carLabel).join(', ');
       const get = el('button', 'sm', 'Get content');
       get.title = s.share_url
         ? ('Download this track from ' + s.share_url)
@@ -1428,7 +1558,7 @@ async function drivePage() {
           name: s.name || '',
         });
       };
-      r.append(trackThumb(s.track), t, get);
+      r.append(trackThumb(s.track), t, ply, carsC, get);
       r.onclick = () => {
         sel.server_id = s.id;
         sel.server_ip = s.server_ip;
@@ -1447,6 +1577,20 @@ async function drivePage() {
     tagDriveIps(shown);
   }
 
+  /* Column titles; Server and Players sort, like any server browser. */
+  function srvHead(count) {
+    const h = el('div', 'drive-row srv srv-head');
+    const col = (lab, key) => {
+      const c = el('div', 'cell' + (key ? ' sort' : '')
+        + (key && driveFilter.sort === key ? ' on' : ''), lab);
+      if (key) c.onclick = () => { driveFilter.sort = key; paintServers(); };
+      return c;
+    };
+    h.append(el('div', 'cell dim', ''), col('Server · ' + count, 'name'),
+             col('Players', 'players'), col('Cars'), el('div', 'cell', ''));
+    return h;
+  }
+
   function paintLocal() {
     srvFilters.style.display = 'none';
     delete trkList.dataset.built;
@@ -1461,14 +1605,12 @@ async function drivePage() {
         .concat(s.cars || []).join(' ').toLowerCase();
       return blob.includes(q);
     });
-    if (!drivePage._favsLoaded) loadFavs();
     if (!rows.length) {
       trkList.append(el('div', 'empty',
         'No ACECM server profiles yet. Open Servers and create one, then come back.'));
-      paintFavs(trkList);
       return;
     }
-    if (!sel.local_id && !sel.favPick && rows[0]) sel.local_id = (rows.find(s => s.running) || rows[0]).id;
+    if (!sel.local_id && rows[0]) sel.local_id = (rows.find(s => s.running) || rows[0]).id;
     const note = el('div', 'tiny dim');
     note.style.padding = '6px 4px 10px';
     note.innerHTML = 'Join starts the host if it is stopped, writes the lobby '
@@ -1510,7 +1652,6 @@ async function drivePage() {
       r.append(trackThumb(s.track), t, listB);
       r.onclick = () => {
         sel.local_id = s.id;
-        sel.favPick = false;
         const allow = allowedCars();
         if (allow && sel.car && !carAllowed(carOf(sel.car) || {id: sel.car}, allow))
           sel.car = '';
@@ -1521,7 +1662,6 @@ async function drivePage() {
       };
       trkList.append(r);
     });
-    paintFavs(trkList);
   }
 
   function paintTracks() {
@@ -1607,7 +1747,7 @@ async function drivePage() {
       c ? c.label : 'Pick a car',
       c ? c.id : '',
       () => { paintCars(); openPicker('Choose a car', carSearch, carList); });
-    if (sel.via === 'server' || (sel.via === 'local' && sel.favPick)) {
+    if (sel.via === 'server') {
       const s = serverOf();
       paintHead(trkHead,
         'api/thumb/track?folder=' + encodeURIComponent((s && s.track) || ''),
@@ -1620,10 +1760,7 @@ async function drivePage() {
              : `${s.track || ''} · ${s.players || 0}/${s.max_players || 0}`
                + ` · ${carsLine(s)}`
                + (s.locked ? ' · password' : '')) : '',
-        () => {
-          paintServers();
-          openPicker('Public servers', trkSearch, trkList, srvFilters, true);
-        });
+        null);
       showTrackList(true);
       return;
     }
@@ -1636,10 +1773,7 @@ async function drivePage() {
           + ` · ${carsLine(s)}`
           + (s.running ? ' · running' : ' · stopped')
           + (s.no_lobby ? ' · private' : '') : '',
-        () => {
-          paintLocal();
-          openPicker('My servers', trkSearch, trkList);
-        });
+        null);
       showTrackList(true);
       return;
     }
@@ -1685,19 +1819,7 @@ async function drivePage() {
        button, in Single player it goes back under its own preview so the
        picker dialog can borrow it. */
     if (trkCol.parentNode !== leftCol) leftCol.append(trkCol);
-    // online, the list is the page: the right column gets the width
-    wrap.classList.toggle('online', on);
-    /* Online, Join and its checklist sit under the selected server on the
-       left - pick on the right, act on the left - so the right column is all
-       list. In Single player they go back below the session settings. */
-    const actHome = on ? trkCol : sessionPane;
-    if (driveBtn.parentNode !== actHome)
-      actHome.append(pwField, driveBtn, stepsBox, st, hint);
-    if (on) {
-      if (srvBox.parentNode !== sessionPane) sessionPane.prepend(srvBox);
-    } else if (srvBox.parentNode !== trkCol) {
-      trkCol.append(srvBox);
-    }
+    layoutOnline(on);
     if (typeof matchPaneHeights === 'function') matchPaneHeights();
     if (sel.via === 'server') {
       const s = serverOf();
@@ -1800,8 +1922,7 @@ async function drivePage() {
     if (sel.via === 'server' && !sel.server_ip && !sel.server_id) {
       toast('Pick a public server first', true); return;
     }
-    const via = sel.via === 'local' && sel.favPick && sel.server_ip
-      ? 'server' : sel.via;
+    const via = sel.via;
     if (via === 'local' && !sel.local_id) {
       toast('Pick one of your ACECM servers first', true); return;
     }

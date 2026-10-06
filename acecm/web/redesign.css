@@ -188,34 +188,91 @@ label.f span{color:var(--dim)}
 @media (prefers-reduced-motion:reduce){
   :root[data-theme="rgb"]{animation-duration:60s}}
 
-/* ---- Play, online: the server list is the page -----------------------
-   Online you are choosing a SERVER, so the list column takes the width and
-   the car + selected-server cards on the left become a narrow summary.
-   ⚠ The list box must own its height (flex:1, min-height:0 on the list).
-   With min-height:0 on the box but 140px on the list, the list overflowed
-   its box and drew underneath the Join button. */
-.drive.online{grid-template-columns:minmax(280px,.62fr) 1.38fr}
-.drive.online .drive-left > .card:first-child{flex:1 1 0}
-.drive.online .drive-left > .card:last-child{flex:0 0 auto}
-.drive.online .drive-left > .card:last-child .drive-pick{aspect-ratio:auto;
-  min-height:96px;flex:0 0 auto}
-.drive-go .pane > .drive-srvbox{flex:1 1 auto;min-height:260px}
-.drive-go .pane > .drive-srvbox .drive-list{flex:1 1 0;min-height:0}
-.drive-srv-filters{gap:4px 12px;padding:8px 10px}
-.drive-direct{margin-bottom:8px}
-.drive-list .fav-title{margin:14px 6px 6px}
-.drive-list .fav-row{margin:0 4px 4px}
-@media (max-width:900px){.drive.online{grid-template-columns:1fr}}
-/* the visible pane fills the column, so the list box can take what is left */
-.drive.online .drive-go .pane{flex:1 1 0;min-height:0}
-.drive.online .drive-go{overflow:hidden}
-.drive.online .drive-left > .card:last-child .go-btn{margin-top:4px}
-.drive.online .drive-left > .card:last-child .jobsteps{margin-top:10px}
-.drive.online .drive-left > .card:last-child .drive-status{min-height:0;margin-top:8px}
-/* left column online: a short car banner, then the server + Join; it may
-   scroll on a small window rather than squash the car specs into the pick */
-.drive.online .drive-left{overflow-y:auto;min-height:0}
-.drive.online .drive-left > .card:first-child{flex:0 0 auto}
-.drive.online .drive-left > .card:first-child .drive-pick{flex:0 0 auto;
-  aspect-ratio:16/7;max-height:none}
-.drive.online .drive-left > .card:last-child{flex:1 0 auto}
+/* ---- Play › Online: one panel, laid out like a server browser ----------
+   Tab strip + tools / the list / a bottom bar with the choice and Join.
+   Sections are divided by hairlines inside ONE surface, not boxed. */
+.onl{height:var(--drive-h,calc(100vh - 155px));min-height:420px;display:flex;
+  flex-direction:column;padding:0;overflow:hidden;margin:0}
+.onl-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;
+  padding:12px 14px;border-bottom:1px solid var(--line)}
+.onl-tabs{display:flex;gap:2px;padding:3px;border-radius:11px;background:var(--well)}
+.onl-tabs button{border:0;background:none;color:var(--dim);padding:6px 14px;
+  border-radius:8px;font-weight:600;display:flex;align-items:center;gap:7px}
+.onl-tabs button:hover{background:var(--panel2);color:var(--fg)}
+.onl-tabs button.on{background:var(--panel3);color:#fff}
+.onl-tabs .n{font:600 11px/1 var(--mono);color:var(--dim2)}
+.onl-tabs button.on .n{color:var(--accent)}
+.onl-tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;flex:1 1 360px;
+  min-width:0;justify-content:flex-end}
+.onl-search{flex:1 1 200px;max-width:380px}
+.onl-search input{width:100%;margin:0;display:block}
+.onl-direct .drive-direct{margin:0}
+.onl-direct .row{flex-wrap:nowrap;gap:6px}
+.onl-direct input{min-width:0 !important;width:190px;flex:0 1 190px !important}
+.onl-body{flex:1;min-height:0;position:relative;display:flex;flex-direction:column}
+.onl-body .drive-srvbox{flex:1;min-height:0;display:flex;flex-direction:column;margin:0}
+.onl-body .drive-list{flex:1 1 0;min-height:0;overflow:auto;max-height:none;
+  border:0;border-radius:0;background:transparent;display:block !important}
+.onl .drive-srv-filters{margin:0;border:0;border-radius:0;
+  border-bottom:1px solid var(--line);padding:10px 14px;background:var(--panel2)}
+.onl:not(.filters-open) .drive-srv-filters{display:none !important}
+.onl .empty{padding:40px 20px;text-align:center}
+/* rows as a table: thumb | server | players | cars | action */
+.onl .drive-row.srv{display:grid;align-items:center;gap:14px;
+  grid-template-columns:60px minmax(0,1fr) 72px minmax(0,200px) auto;
+  padding:7px 14px;border-bottom:1px solid var(--line);border-radius:0}
+.onl .drive-row.srv img{width:60px;height:36px}
+.onl .drive-row .name{display:flex;flex-wrap:nowrap;gap:6px;min-width:0;
+  align-items:center}
+.onl .drive-row .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-weight:600;min-width:0}
+.onl .drive-row .tiny{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.onl .drive-row .cell{font-size:12.5px;min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.onl .cell.ply{font:600 13px var(--mono);color:var(--dim2)}
+.onl .cell.ply.live{color:var(--ok)}
+.onl .cell.ply.full{color:var(--gold)}
+.onl .drive-row .acts{display:flex;gap:6px}
+.onl .drive-row.on{background:var(--panel2);box-shadow:inset 3px 0 0 var(--accent)}
+.onl .srv-head{position:sticky;top:0;z-index:2;background:var(--panel);
+  cursor:default;padding-top:9px;padding-bottom:9px}
+.onl .srv-head:hover{background:var(--panel)}
+.onl .srv-head .cell{font:700 11px/1 var(--body);letter-spacing:.08em;
+  text-transform:uppercase;color:var(--dim2)}
+.onl .srv-head .cell.sort{cursor:pointer}
+.onl .srv-head .cell.sort:hover,.onl .srv-head .cell.on{color:var(--fg)}
+.onl .srv-head .cell.on::after{content:" ↓";color:var(--accent)}
+/* the checklist floats over the list's corner while a job runs */
+.onl-body > .jobsteps{position:absolute;right:14px;bottom:14px;z-index:5;margin:0;
+  width:min(440px,calc(100% - 28px));box-shadow:0 18px 40px -14px #000}
+/* bottom bar: what you are joining, with what, and the button */
+.onl-foot{display:grid;align-items:center;gap:10px 16px;padding:12px 14px;
+  grid-template-columns:minmax(0,1.25fr) minmax(0,1fr) auto;
+  border-top:1px solid var(--line);background:var(--panel2)}
+.onl-foot .drive-pick{display:flex;align-items:center;gap:0;height:62px;
+  aspect-ratio:auto;margin:0;border-radius:10px;background:var(--well)}
+.onl-foot .drive-pick img{position:relative;inset:auto;width:104px;height:100%;
+  flex:none;object-fit:cover}
+.onl-foot .drive-pick .dp-bar{position:static;background:none;padding:6px 12px;
+  min-width:0;flex:1}
+.onl-foot .drive-pick .dp-bar b{display:block;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font:700 14px/1.2 var(--display);letter-spacing:.03em;
+  text-transform:uppercase}
+.onl-foot .drive-pick .dp-sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.onl-sel .drive-pick{cursor:default}
+.onl-go{display:flex;align-items:center;gap:8px}
+.onl-go label.f{margin:0}
+.onl-go label.f span{display:none}
+.onl-go label.f input{width:150px;margin:0}
+.onl-go .go-btn{width:auto;min-height:50px;padding:0 38px;margin:0}
+.onl-go > button:not(.go-btn){min-height:50px}
+.onl-foot > .drive-status{grid-column:1/-1;margin:0;min-height:0}
+.onl-foot > .drive-status:empty{display:none}
+.pk-pad{padding:4px 18px 18px}
+@media (max-width:980px){
+  .onl-foot{grid-template-columns:1fr 1fr}
+  .onl-go{grid-column:1/-1}
+  .onl-go .go-btn{flex:1}
+  .onl .drive-row.srv{grid-template-columns:52px minmax(0,1fr) 64px auto}
+  .onl .drive-row.srv > :nth-child(4){display:none}
+}
