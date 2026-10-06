@@ -206,6 +206,13 @@ async function drivePage() {
     }
     return false;
   }
+  function carsShort(s) {
+    const cars = s.cars || [];
+    if (!cars.length) return 'Any car';
+    const mods = cars.filter(carIsMod).length;
+    const base = cars.length === 1 ? carLabel(cars[0]) : cars.length + ' cars';
+    return base + (mods ? (mods === cars.length ? ' · mods' : ` · ${mods} mod${mods === 1 ? '' : 's'}`) : '');
+  }
   function carsLine(s) {
     const cars = s.cars || [];
     if (!cars.length) return 'all cars';
@@ -749,13 +756,58 @@ async function drivePage() {
   pullBtn = refreshBtn;
   const manageBtn = el('button', 'sm', 'Manage servers');
   manageBtn.onclick = () => go('servers');
-  onlTools.append(slotSearch, filtBtn, refreshBtn, manageBtn, slotDirect);
+  const ipBtn = el('button', 'sm', '+ Add by IP');
+  ipBtn.title = 'Join or save a server by its address';
+  ipBtn.onclick = e => {
+    e.stopPropagation();
+    const open = !onl.classList.contains('direct-open');
+    onl.classList.toggle('direct-open', open);
+    ipBtn.classList.toggle('primary', open);
+    if (open) { const i = slotDirect.querySelector('input'); if (i) i.focus(); }
+  };
+  slotDirect.onclick = e => e.stopPropagation();
+  // one document listener for the life of the app; it closes whichever
+  // panel is current (a rebuild replaces drivePage._closeIp)
+  drivePage._closeIp = () => {
+    onl.classList.remove('direct-open');
+    ipBtn.classList.remove('primary');
+  };
+  if (!drivePage._ipBound) {
+    drivePage._ipBound = true;
+    document.addEventListener('click', () => drivePage._closeIp && drivePage._closeIp());
+  }
+  const ipWrap = el('div', 'onl-ipwrap');
+  ipWrap.append(ipBtn, slotDirect);
+  onlTools.append(slotSearch, filtBtn, refreshBtn, manageBtn, ipWrap);
   onlBar.append(onlTabs, onlTools);
   const onlBody = el('div', 'onl-body');
   const onlFoot = el('div', 'onl-foot');
   const footSel = el('div', 'onl-sel');
   const footCar = el('div', 'onl-car');
   const footGo = el('div', 'onl-go');
+  const favBtn = el('button', 'onl-fav', '☆');
+  function favOfSel() {
+    return favs.find(f => f.ip === sel.server_ip
+      && Number(f.tcp) === Number(sel.server_tcp_port));
+  }
+  function paintFavBtn() {
+    const on = !!favOfSel();
+    favBtn.textContent = on ? '★' : '☆';
+    favBtn.classList.toggle('on', on);
+    favBtn.title = on ? 'Remove from Favourites' : 'Save to Favourites';
+    favBtn.style.display = sel.via === 'server' && sel.server_ip ? '' : 'none';
+  }
+  favBtn.onclick = async () => {
+    const f = favOfSel();
+    const r = f ? await api('drive/fav/remove', { id: f.id })
+      : await api('drive/fav/add',
+                  { target: `${sel.server_ip}:${sel.server_tcp_port}` });
+    if (!r || r.ok === false) { toast((r && r.error) || 'could not save', true); return; }
+    favs = r.favourites || [];
+    toast(f ? 'Removed from Favourites' : 'Saved to Favourites');
+    paintOnlTabs();
+    if (sel.favTab) paintServers();
+  };
   const assistBtn = el('button', '', 'Assists');
   assistBtn.title = 'Driving assists - saved to your game profile';
   assistBtn.onclick = () => openAssists();
@@ -800,7 +852,8 @@ async function drivePage() {
     filtBtn.style.display = pub ? '' : 'none';
     refreshBtn.style.display = pub ? '' : 'none';
     manageBtn.style.display = tab === 'mine' ? '' : 'none';
-    slotDirect.style.display = tab === 'mine' ? 'none' : '';
+    ipWrap.style.display = tab === 'mine' ? 'none' : '';
+    paintFavBtn();
     if (!pub) {
       onl.classList.remove('filters-open');
       filtBtn.classList.remove('primary');
@@ -835,7 +888,7 @@ async function drivePage() {
     onl.style.display = on ? '' : 'none';
     const parts = [[trkSearch, slotSearch], [directBox, slotDirect],
                    [srvBox, onlBody], [stepsBox, onlBody],
-                   [trkHead, footSel], [carHead, footCar],
+                   [trkHead, footSel], [favBtn, footSel], [carHead, footCar],
                    [pwField, footGo], [assistBtn, footGo], [driveBtn, footGo],
                    [st, onlFoot]];
     if (on) {
@@ -1540,9 +1593,13 @@ async function drivePage() {
         + (s.ping ? ` · ${s.ping}ms` : ''));
       t.append(name, sub);
       const full = num(s.max_players) > 0 && num(s.players) >= num(s.max_players);
+      const pct = num(s.max_players) ? Math.min(100,
+        Math.round(100 * num(s.players) / num(s.max_players))) : 0;
       const ply = el('div', 'cell ply' + (num(s.players) ? ' live' : '')
-        + (full ? ' full' : ''), `${s.players || 0}/${s.max_players || 0}`);
-      const carsC = el('div', 'cell dim', esc(carsLine(s)));
+        + (full ? ' full' : ''),
+        `<span><b>${s.players || 0}</b>/${s.max_players || 0}</span>`
+        + `<i><u style="width:${pct}%"></u></i>`);
+      const carsC = el('div', 'cell dim', esc(carsShort(s)));
       carsC.title = (s.cars || []).map(carLabel).join(', ');
       const get = el('button', 'sm', 'Get content');
       get.title = s.share_url
@@ -1811,6 +1868,7 @@ async function drivePage() {
 
   function paintVia() {
     paintDirect();
+    if (_onlReady) paintFavBtn();
     const on = sel.via === 'server' || sel.via === 'local';
     spFields.forEach(n => { n.style.display = on ? 'none' : ''; });
     extras.style.display = on ? 'none' : '';
