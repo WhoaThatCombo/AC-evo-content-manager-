@@ -46,7 +46,11 @@ body{background:var(--bg);font:14px/1.5 var(--body);color:var(--fg)}
   height:4px;border-radius:2px;background:var(--on-accent);transform:skewX(-20deg)}
 .side .wordmark{font:700 20px/1 var(--display);letter-spacing:.1em;color:var(--fg)}
 .side-fill{flex:1 1 auto;min-height:16px}
-#sections,#sections2{display:flex;flex-direction:column;gap:2px;flex-wrap:nowrap}
+/* ⚠ stretch: style.css centres these (they were a horizontal bar), which
+   left every item shrink-wrapped and floating in the middle of the sidebar */
+#sections,#sections2{display:flex;flex-direction:column;gap:2px;flex-wrap:nowrap;
+  align-items:stretch;justify-content:flex-start;width:100%}
+#sections a,#sections2 a{width:100%;box-sizing:border-box;justify-content:flex-start}
 #sections a,#sections2 a{display:flex;align-items:center;gap:12px;
   padding:10px 12px;border-radius:10px;border:0;cursor:pointer;
   color:var(--dim);text-decoration:none;user-select:none;
