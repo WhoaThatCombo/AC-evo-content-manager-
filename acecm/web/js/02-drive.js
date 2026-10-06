@@ -173,7 +173,7 @@ async function drivePage() {
     return (d.local_servers || []).find(s => s.id === sel.local_id) || null;
   }
   function allowedCars() {
-    const sv = sel.via === 'local' ? localOf() : serverOf();
+    const sv = sel.via === 'local' && !sel.favPick ? localOf() : serverOf();
     if ((sel.via !== 'server' && sel.via !== 'local') || !sv || !(sv.cars || []).length)
       return null;
     return new Set(sv.cars);
@@ -555,34 +555,40 @@ async function drivePage() {
         const r = await api('drive/fav/add', { target: t });
         if (!r || !r.ok) { toast((r && r.error) || 'could not save', true); return; }
         favs = r.favourites || [];
-        toast('Saved to favourites');
-        paintFavs();
+        toast('Saved — it is under Online › My servers');
       };
       row.append(inp, go, star);
-      directBox.append(row, el('div', 'fav-list'));
+      directBox.append(row);
     }
-    if (!favs.length) {
-      const r = await api('drive/fav');
-      favs = (r && r.favourites) || [];
-    }
-    paintFavs();
+  }
+  async function loadFavs() {
+    const r = await api('drive/fav');
+    favs = (r && r.favourites) || [];
+    drivePage._favsLoaded = true;
+    if (sel.via === 'local') paintLocal();
   }
 
-  function paintFavs() {
-    const box = directBox.querySelector('.fav-list');
-    if (!box) return;
-    box.innerHTML = '';
+  /* Favourites live under My servers - the places YOU go back to - rather
+     than above the public list, where they took a third of its height. A
+     favourite is still joined as an address (via 'server'); see favPick. */
+  function paintFavs(box) {
     if (!favs.length) return;
     box.append(el('div', 'tiny dim fav-title', 'Favourites'));
     favs.forEach(f => {
       const r = el('div', 'fav-row'
-        + (sel.server_ip === f.ip && sel.server_tcp_port === f.tcp ? ' on' : ''));
+        + (sel.favPick && sel.server_ip === f.ip
+           && Number(sel.server_tcp_port) === Number(f.tcp) ? ' on' : ''));
       const t = el('div', 'grow');
       t.innerHTML = `<div class="name">${esc(f.name)}</div>`
         + `<div class="tiny dim">${esc(f.ip)}:${f.tcp}</div>`;
       // ⚠ look it up again rather than trusting what was saved: the player
       // count and even the name will have moved on since it was pinned
-      r.onclick = () => lookupAndSelect(`${f.ip}:${f.tcp}`, true);
+      r.onclick = () => {
+        sel.favPick = true;
+        sel.local_id = '';
+        lookupAndSelect(`${f.ip}:${f.tcp}`, true).then(() => paintLocal());
+        paintLocal();
+      };
       /* Fetch what this server needs, without going to the browser page and
          finding it in a list. Content only comes from a host running ACECM,
          and we cannot know whether it is until we ask - so the button is
@@ -620,7 +626,8 @@ async function drivePage() {
         ev.stopPropagation();
         const res = await api('drive/fav/remove', { id: f.id });
         favs = (res && res.favourites) || [];
-        paintFavs();
+        if (sel.favPick && sel.server_ip === f.ip) sel.favPick = false;
+        paintLocal();
       };
       r.append(t, get, x);
       box.append(r);
@@ -1454,12 +1461,14 @@ async function drivePage() {
         .concat(s.cars || []).join(' ').toLowerCase();
       return blob.includes(q);
     });
+    if (!drivePage._favsLoaded) loadFavs();
     if (!rows.length) {
       trkList.append(el('div', 'empty',
         'No ACECM server profiles yet. Open Servers and create one, then come back.'));
+      paintFavs(trkList);
       return;
     }
-    if (!sel.local_id && rows[0]) sel.local_id = (rows.find(s => s.running) || rows[0]).id;
+    if (!sel.local_id && !sel.favPick && rows[0]) sel.local_id = (rows.find(s => s.running) || rows[0]).id;
     const note = el('div', 'tiny dim');
     note.style.padding = '6px 4px 10px';
     note.innerHTML = 'Join starts the host if it is stopped, writes the lobby '
@@ -1501,6 +1510,7 @@ async function drivePage() {
       r.append(trackThumb(s.track), t, listB);
       r.onclick = () => {
         sel.local_id = s.id;
+        sel.favPick = false;
         const allow = allowedCars();
         if (allow && sel.car && !carAllowed(carOf(sel.car) || {id: sel.car}, allow))
           sel.car = '';
@@ -1511,6 +1521,7 @@ async function drivePage() {
       };
       trkList.append(r);
     });
+    paintFavs(trkList);
   }
 
   function paintTracks() {
@@ -1596,7 +1607,7 @@ async function drivePage() {
       c ? c.label : 'Pick a car',
       c ? c.id : '',
       () => { paintCars(); openPicker('Choose a car', carSearch, carList); });
-    if (sel.via === 'server') {
+    if (sel.via === 'server' || (sel.via === 'local' && sel.favPick)) {
       const s = serverOf();
       paintHead(trkHead,
         'api/thumb/track?folder=' + encodeURIComponent((s && s.track) || ''),
@@ -1674,6 +1685,14 @@ async function drivePage() {
        button, in Single player it goes back under its own preview so the
        picker dialog can borrow it. */
     if (trkCol.parentNode !== leftCol) leftCol.append(trkCol);
+    // online, the list is the page: the right column gets the width
+    wrap.classList.toggle('online', on);
+    /* Online, Join and its checklist sit under the selected server on the
+       left - pick on the right, act on the left - so the right column is all
+       list. In Single player they go back below the session settings. */
+    const actHome = on ? trkCol : sessionPane;
+    if (driveBtn.parentNode !== actHome)
+      actHome.append(pwField, driveBtn, stepsBox, st, hint);
     if (on) {
       if (srvBox.parentNode !== sessionPane) sessionPane.prepend(srvBox);
     } else if (srvBox.parentNode !== trkCol) {
@@ -1781,13 +1800,15 @@ async function drivePage() {
     if (sel.via === 'server' && !sel.server_ip && !sel.server_id) {
       toast('Pick a public server first', true); return;
     }
-    if (sel.via === 'local' && !sel.local_id) {
+    const via = sel.via === 'local' && sel.favPick && sel.server_ip
+      ? 'server' : sel.via;
+    if (via === 'local' && !sel.local_id) {
       toast('Pick one of your ACECM servers first', true); return;
     }
     driveBtn.disabled = true;
     driveBtn.textContent = 'Starting…';
     const r = await api('drive', {
-      via: sel.via,
+      via,
       local_id: sel.local_id,
       server_id: sel.server_id,
       server_ip: sel.server_ip,
