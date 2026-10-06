@@ -1811,6 +1811,12 @@ def serve():
     # meant a joiner's 4s probe timed out and the host looked like it was not
     # running ACECM until they had retried enough times.
     threading.Thread(target=registry.warm_public_list, daemon=True).start()
+    # public server list: a stale saved copy is refreshed from the lobby in
+    # the background, so the Play page opens on a fresh list (~2.5 s, no game)
+    try:
+        backend.lobby_prefetch()
+    except Exception as ex:                        # noqa: BLE001
+        logs.LOG.warning("lobby prefetch at startup: %s", ex)
     # ⚠ Warm the EvoForge directory the same way, for the same reason. Since
     # it became non-blocking (so a slow host cannot stall the Drive list past
     # the point the browser gives up), the FIRST call returns whatever is

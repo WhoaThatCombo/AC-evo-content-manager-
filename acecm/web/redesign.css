@@ -166,3 +166,24 @@ label.f span{color:var(--dim)}
   .side-fill,.side-stat{display:none}
   .page,header{padding-left:16px;padding-right:16px}
 }
+
+/* ---- RGB: the accent cycles through the colour wheel -----------------
+   ⚠ No JS timer: the accent colours themselves are animated on :root, and
+   everything that uses var(--accent) follows. They are REGISTERED as
+   <color> so the browser can interpolate them - and animated directly,
+   because deriving them from an animated --hue with hsl(var(--hue) ...)
+   froze at hue 0 in Chromium (dependent var()s are not recomputed per
+   frame). Honours reduced motion by slowing right down. */
+@property --accent {syntax:"<color>";inherits:true;initial-value:#ff6b35}
+@property --accent2{syntax:"<color>";inherits:true;initial-value:#c9522a}
+@property --accent3{syntax:"<color>";inherits:true;initial-value:#ffb347}
+@keyframes acecm-rgb{
+  0%,100%{--accent:#ff4d4d;--accent2:#b83030;--accent3:#ffd84d}
+  16.7%  {--accent:#ffd84d;--accent2:#b8962a;--accent3:#5cff7a}
+  33.3%  {--accent:#5cff7a;--accent2:#2f9e45;--accent3:#4de1ff}
+  50%    {--accent:#4de1ff;--accent2:#2a8ba8;--accent3:#5c7cff}
+  66.7%  {--accent:#5c7cff;--accent2:#3448b8;--accent3:#e04dff}
+  83.3%  {--accent:#e04dff;--accent2:#9330b0;--accent3:#ff4d4d}}
+:root[data-theme="rgb"]{--on-accent:#111;animation:acecm-rgb 10s linear infinite}
+@media (prefers-reduced-motion:reduce){
+  :root[data-theme="rgb"]{animation-duration:60s}}

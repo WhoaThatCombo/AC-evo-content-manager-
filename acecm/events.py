@@ -19,7 +19,7 @@ import os
 import threading
 import time
 
-from . import backend, compress, drive, evoshare, lobby, logs, servers, thumbs
+from . import backend, compress, config, drive, evoshare, lobby, logs, servers, thumbs
 
 FAST = 0.8      # drive + progress: what the Join checklist and bar need
 SLOW = 3.0      # servers + proxy: they change on a human timescale
@@ -64,6 +64,13 @@ def _proxy():
             "client": bool(js.get("client_connected"))}
 
 
+def _lobby():
+    """When the saved public list was taken, and whether a fetch is running."""
+    return {"at": backend._cached_at(os.path.join(config.DATA,
+                                                  "server_list.json")),
+            "running": bool(backend.LOBBY["running"])}
+
+
 def _timed(name, fn, fallback):
     t = time.perf_counter()
     try:
@@ -82,6 +89,7 @@ def _build(progress):
     if now - _state["slow_at"] >= SLOW:
         _state["servers"] = _timed("servers", _servers, _state["servers"])
         _state["proxy"] = _timed("proxy", _proxy, _state["proxy"])
+        _state["lobby"] = _timed("lobby", _lobby, _state.get("lobby") or {})
         _state["slow_at"] = time.time()
     d = _timed("drive", drive.status, {"ok": True, "phase": "idle"})
     d = dict(d)
@@ -99,6 +107,7 @@ def _build(progress):
         "covers": _timed("covers", thumbs.cover_job, {}),
         "servers": _state["servers"],
         "proxy": _state["proxy"],
+        "lobby": _state.get("lobby") or {},
     }
     _state["snap"] = snap
     return snap

@@ -19,6 +19,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 from . import config, detect, logs, netutil, shell, winproc
@@ -863,13 +864,13 @@ def join_state():
 
 
 def server_list():
-    """Every public EVO server, as captured by the proxy.
+    """Every public EVO server: whichever copy is NEWER, the proxy's or ours.
 
-    ⚠ The proxy only sees this when a game client asks for it, so the list is a
-    snapshot from the last time the browser was opened in-game - not a live
-    query. Kunos will not answer us directly: the first frame of the session is
-    a Steam auth ticket bound to a real client session, which we relay rather
-    than possess.
+    Two things fill this. The proxy captures the list whenever the game asks
+    for it; lobby_fetch() asks the lobby itself with a Steam ticket minted
+    for the purpose, no game needed. Either can be the fresher one, so they
+    are compared by captured_at - a proxy that captured once at 9:00 must not
+    hide a direct fetch from 9:30, and must not overwrite it on disk either.
     """
     import urllib.request
     cache = os.path.join(config.DATA, "server_list.json")
@@ -894,6 +895,8 @@ def server_list():
         # Do not clobber a good snapshot with an empty live reply (game closed
         # or browser not opened this session).
         live = got.get("servers") or []
+        if live and int(got.get("captured_at") or 0) < _cached_at(cache):
+            raise OSError("the saved list is newer than the proxy's")
         if live:
             try:
                 json.dump(got, open(cache, "w", encoding="utf-8"))
@@ -906,17 +909,142 @@ def server_list():
     try:
         got = json.load(open(cache, encoding="utf-8"))
         st = os.stat(cache)
-        got.update({"ok": True, "cached": True,
+        direct = got.get("source") == "lobby"
+        got.update({"ok": True, "cached": not direct,
                     "captured_at": got.get("captured_at") or int(st.st_mtime),
-                    "note": "from the last time the in-game browser was open - "
+                    "note": "fetched from the lobby directly" if direct else
+                            "from the last time the in-game browser was open - "
                             "player counts and pings will be stale, but it is "
                             "enough to see what content a server needs"})
+        if LOBBY["running"]:
+            got["refreshing"] = True
         return got
     except Exception as ex:
         return {"ok": False, "error": f"{type(ex).__name__}",
                 "hint": "start the proxy backend, then open Multiplayer "
                         "in-game once so the list passes through - after that "
                         "it is remembered and usable with the game closed"}
+
+
+def _cached_at(path):
+    """captured_at of the saved list, or 0. Cheap: the stamp is near the top."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            head = f.read(4096)
+        i = head.find('"captured_at"')
+        if i < 0:
+            return 0
+        return int(_re.match(r'"captured_at":\s*(\d+)', head[i:]).group(1))
+    except Exception:
+        return 0
+
+
+# Direct lobby fetch: one at a time, never while the game is up.
+LOBBY = {"running": False, "last_try": 0.0, "last": None}
+_LOBBY_LOCK = threading.Lock()
+_LOBBY_DONE = threading.Event()
+_LOBBY_DONE.set()
+LOBBY_STALE = 300       # background refresh when the saved list is older
+LOBBY_RETRY = 60        # after a failed try, wait this long before another
+
+
+def lobby_fetch(wait=True, timeout=30):
+    """Pull the public list from the Kunos lobby without starting the game.
+
+    Runs tools/lobby_fetch.py as a separate process (see its docstring for
+    why it must be separate) and writes server_list.json. ~2.5 s.
+
+    ⚠ Single flight. The Play page, the startup prefetch and a Refresh click
+    can all ask at once; a second caller waits for the first fetch instead of
+    starting another Steam session beside it.
+
+    ⚠ Never while AssettoCorsaEVO.exe is running: the proxy captures the list
+    from the game then, and a second "EVO" on the account is not worth it.
+    """
+    if sys.platform != "win32":
+        return {"ok": False, "error": "direct fetch is Windows only",
+                "fallback": True}
+    if _game_running():
+        return {"ok": False, "error": "the game is running", "fallback": True}
+    with _LOBBY_LOCK:
+        busy = LOBBY["running"]
+        if not busy:
+            LOBBY["running"] = True
+            LOBBY["last_try"] = time.time()
+            _LOBBY_DONE.clear()
+    if busy:
+        if not wait:
+            return {"ok": True, "busy": True}
+        _LOBBY_DONE.wait(timeout)
+        return dict(LOBBY["last"] or {"ok": False, "error": "timed out"})
+    try:
+        res = _lobby_fetch_run(timeout)
+    except Exception as ex:                            # noqa: BLE001
+        res = {"ok": False, "error": f"{type(ex).__name__}: {ex}"}
+    res.setdefault("at", int(time.time()))
+    LOBBY["last"] = res
+    LOBBY["running"] = False
+    _LOBBY_DONE.set()
+    (logs.LOG.info if res.get("ok") else logs.LOG.warning)(
+        "lobby fetch: %s", res)
+    return dict(res)
+
+
+def _lobby_fetch_run(timeout):
+    from . import protos as protolib
+    from . import winproc
+    exe = _game_exe()
+    game_dir = os.path.dirname(exe) if exe else detect.game_dir()
+    if not game_dir or not os.path.isfile(os.path.join(game_dir,
+                                                       "steam_api64.dll")):
+        return {"ok": False, "fallback": True,
+                "error": "AC EVO's install folder was not found"}
+    if not protolib.has("MultiplayerServerListResponseServerList"):
+        protolib.extract()
+    if not protolib.has("MultiplayerServerListResponseServerList"):
+        return {"ok": False, "fallback": True,
+                "error": "the game's message schemas are missing"}
+    env = winproc.child_env()
+    env["ACECM_PROTOS"] = protolib.cache_dir()
+    env["PYTHONUNBUFFERED"] = "1"
+    out = os.path.join(config.DATA, "server_list.json")
+    cmd = config.tool_cmd("lobby_fetch", ["--out", out, "--game-dir", game_dir])
+    t = time.perf_counter()
+    r = winproc.hidden_run(cmd, cwd=config.DATA, env=env, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout)
+    took = round((time.perf_counter() - t) * 1000)
+    res = None
+    for line in reversed((r.stdout or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                res = json.loads(line)
+                break
+            except ValueError:
+                pass
+    if res is None:
+        tail = ((r.stdout or "") + (r.stderr or "")).strip()[-400:]
+        res = {"ok": False, "error": tail or f"exit {r.returncode}"}
+    res["spawn_ms"] = took
+    if not res.get("ok"):
+        res["fallback"] = True
+    return res
+
+
+def lobby_prefetch(max_age=LOBBY_STALE):
+    """Refresh in the background if the saved list is stale. Never blocks."""
+    cache = os.path.join(config.DATA, "server_list.json")
+    now = time.time()
+    if now - _cached_at(cache) < max_age or LOBBY["running"]:
+        return False
+    if now - LOBBY["last_try"] < LOBBY_RETRY:
+        return False
+    if sys.platform != "win32" or _game_running():
+        return False
+    threading.Thread(target=lobby_fetch, kwargs={"wait": False},
+                     name="lobby-fetch", daemon=True).start()
+    return True
 
 
 def browser_chain():

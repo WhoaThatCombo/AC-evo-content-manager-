@@ -220,7 +220,7 @@ const JOB_STEP = {
   opening_sp: 'Open Single Player',
   starting_session: 'Start the session',
   joining: 'Join the server',
-  capturing_list: 'Capture the public server list',
+  capturing_list: 'Fetch the public server list',
   quitting_game: 'Close the game',
 };
 // what usually comes next, so the list can show the road ahead dimmed
@@ -229,7 +229,7 @@ const JOB_PLAN = {
   local: ['starting_backend', 'starting_server', 'launching_game',
           'waiting_for_menu', 'selecting_car', 'joining'],
   server: ['launching_game', 'waiting_for_menu', 'selecting_car', 'joining'],
-  capture: ['capturing_list', 'quitting_game'],
+  capture: ['capturing_list'],
 };
 const JOB_KIND = { sp: 'Single player', local: 'Joining your server',
                    server: 'Joining', capture: 'Refreshing the server list' };

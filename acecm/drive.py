@@ -1607,6 +1607,21 @@ def _run_capture():
     launched_us = False
     since = int(_JOB.get("started") or time.time())
     try:
+        # Fast path: ask the lobby ourselves (~2.5 s, no game). The old way
+        # below - launch, open Multiplayer, catch the list, quit - stays as
+        # the fallback for when that cannot work (no Steam, Linux, game open).
+        if not backend._game_running():
+            _set(phase="capturing_list", hint="asking the lobby directly")
+            r = backend.lobby_fetch()
+            if r.get("ok") and not r.get("busy"):
+                n = int(r.get("count") or 0)
+                _JOB["captured"] = n
+                _set(phase="launched",
+                     hint="got " + str(n) + " public servers in "
+                          + f"{(r.get('spawn_ms') or r.get('ms') or 0) / 1000:.1f} s")
+                return
+            logs.LOG.info("direct list fetch failed, launching the game: %s",
+                          r.get("error"))
         _ensure_backend()
         st = backend.state()
         if not st.get("listening"):
@@ -1735,7 +1750,7 @@ def _run_capture():
 
 
 def capture_list():
-    """Launch, open Multiplayer, write server_list.json, quit the game."""
+    """Refresh server_list.json: straight from the lobby, else via the game."""
     phase = _JOB.get("phase")
     # ⚠ "not finished", not a hand-kept list of busy phases: a phase added
     # later and missing from that list let a second job start on top of one
@@ -1749,10 +1764,16 @@ def capture_list():
          wrote=None, captured=0)
     threading.Thread(target=_run_capture, daemon=True).start()
     return {"ok": True, "phase": _JOB["phase"],
-            "hint": "launching the game, grabbing the list, then quitting"}
+            "hint": "asking the lobby for the public list"}
 
 
 def _public_briefs():
+    # the saved copy answers now; a stale one is refreshed behind it and the
+    # page swaps the new list in when the feed says it landed
+    try:
+        backend.lobby_prefetch()
+    except Exception as ex:                        # noqa: BLE001
+        logs.LOG.warning("lobby prefetch: %s", ex)
     lst = backend.server_list()
     raw = list(lst.get("servers") or [])
     # ⚠ Merge the EvoForge directory in as a SECOND source, keyed on address.

@@ -11,6 +11,7 @@ module in the child. Same binary, different job, no interpreter to ship.
     ACECM.exe --tool server_telemetry  a telemetry tracker for one server
     ACECM.exe --tool start_vai_server  launch a dedicated server
     ACECM.exe --tool acevo_proxy       the lobby proxy backend
+    ACECM.exe --tool lobby_fetch       pull the public server list, no game
 """
 import os
 import sys
@@ -19,7 +20,8 @@ import sys
 # invoked this way, so a bad --tool value fails loudly instead of importing
 # something arbitrary.
 TOOLS = ("server_telemetry", "start_vai_server", "acevo_proxy",
-         "acevo_backend", "server_track_inject", "build_track_package")
+         "acevo_backend", "server_track_inject", "build_track_package",
+         "lobby_fetch")
 
 
 def _run_tool(name, argv):

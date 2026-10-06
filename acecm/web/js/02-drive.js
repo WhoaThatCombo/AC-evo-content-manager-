@@ -260,7 +260,8 @@ async function drivePage() {
       // ⚠ onDrive() disables this while a job runs, and it lives in a
       // different scope - hand it out through the outer binding.
       pullBtn = pull;
-      pull.title = 'Launch the game, open Multiplayer, save the public list, then quit';
+      pull.title = 'Ask the lobby for the public list (a few seconds). If '
+        + 'that cannot work, launches the game and reads it from Multiplayer';
       pull.onclick = async () => {
         const r = await api('drive/capture', {});
         if (!r.ok) { toast(r.error || 'Could not start', true); return; }
@@ -1287,12 +1288,19 @@ async function drivePage() {
     // The public list is fetched separately so the rest of Drive can draw
     // straight away - same late-load shape as browser/local above. Guarded
     // so the filter checkboxes repainting cannot start a second fetch.
-    if (d.servers_pending && !d._srvFetch) {
-      d._srvFetch = true;
+    if (d.servers_pending && !d._srvFetch) loadServers();
+  }
+  function loadServers() {
+    d._srvFetch = true;
+    {
       api('drive/servers').then(r => {
+        d._srvFetch = false;
         if (!r || r.error) {
           d.servers_pending = false;
-          d.servers_meta = { error: (r && r.error) || 'could not load list' };
+          // ⚠ keep captured_at: without it the live feed's newer-list check
+          // would fire again on every tick and refetch forever
+          d.servers_meta = { error: (r && r.error) || 'could not load list',
+                             captured_at: (d.servers_meta || {}).captured_at };
         } else {
           expandPool(r);
           d.servers = r.servers || [];
@@ -1336,8 +1344,7 @@ async function drivePage() {
       trkList.append(el('div', 'empty',
         d.servers_pending ? 'Loading public servers…'
         : (meta.hint || meta.error
-           || 'No public list yet. Use Refresh list, or open Multiplayer '
-             + 'in-game once.')));
+           || 'No public list yet. Use Refresh list.')));
       return;
     }
     const num = v => (typeof v === 'number' ? v : 0);
@@ -1679,8 +1686,8 @@ async function drivePage() {
       hint.textContent = s
         ? `Sets your car to one this server allows, then joins `
           + `${s.server_ip}:${s.server_tcp_port}.`
-        : (meta.hint || 'Pick a public server. The list is captured when you '
-          + 'open Multiplayer in-game.');
+        : (meta.hint || 'Pick a public server. Refresh list fetches the '
+          + 'latest from the lobby in a few seconds.');
       driveBtn.textContent = 'Join';
       pwField.style.display = (s && s.locked) ? '' : 'none';
     } else if (sel.via === 'local') {
@@ -1821,5 +1828,15 @@ async function drivePage() {
   // the rebuild-once below on first paint
   if (live.snap && live.snap.drive && drivePage._reloadedFor === undefined)
     drivePage._reloadedFor = live.snap.drive.started;
-  livePage('drive', s => onDrive(s.drive));
+  livePage('drive', s => {
+    onDrive(s.drive);
+    // a newer list landed (background refresh or Refresh list): swap it in
+    // without the user having to leave and come back
+    const lob = s.lobby || {};
+    const shown = (d.servers_meta || {}).captured_at || 0;
+    if (lob.at && lob.at > shown && !d._srvFetch && !d.servers_pending) {
+      d.servers_meta = { ...(d.servers_meta || {}), captured_at: lob.at };
+      loadServers();
+    }
+  });
 }

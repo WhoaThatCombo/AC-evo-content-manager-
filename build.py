@@ -276,7 +276,7 @@ def _rebuild_without_crt(args):
 RUNTIME_TOOLS = (
     "server_telemetry", "start_vai_server", "acevo_proxy", "acevo_backend",
     "acevo_proto", "join_push", "server_track_inject", "build_track_package",
-    "penalties_tool", "parse_edges", "parse_spline",
+    "penalties_tool", "parse_edges", "parse_spline", "lobby_fetch",
 )
 
 

@@ -381,6 +381,7 @@ const THEMES = [
   ['ember', '#ff6b35'], ['teal', '#2ee6c8'], ['blue', '#4c8dff'], ['purple', '#a78bfa'],
   ['red', '#ff5c7a'], ['orange', '#ff9d47'], ['green', '#3fb950'],
   ['pink', '#f472b6'], ['amber', '#ffd166'],
+  ['rgb', 'conic-gradient(#f33,#fd3,#3f6,#3df,#36f,#d3f,#f33)'],
 ];
 function currentTheme() {
   try { return localStorage.getItem('acecm.theme') || 'ember'; } catch (e) { return 'ember'; }
