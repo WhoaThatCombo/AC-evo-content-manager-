@@ -47,7 +47,7 @@ fn main() {
             listen.port)));
     std_listener.set_nonblocking(true).ok();
 
-    let side = sidecar::Sidecar::start()
+    let side = sidecar::Sidecar::start(listen.port)
         .unwrap_or_else(|e| fail(&format!("could not start the ACECM backend: {e}")));
     // ⚠ Do NOT wait for it here. The window, the page and every ported
     // route are ready at once; only a request that needs the backend waits
@@ -60,6 +60,8 @@ fn main() {
             message_box_any("the ACECM backend did not start - see data\\native_backend.log");
         }
     });
+    acecm::api::set_secret(&side.secret);
+    acecm::api::set_backend(&format!("http://{}", side.addr));
     let backend = Arc::new(proxy::Backend {
         base: format!("http://{}", side.addr),
         secret: side.secret.clone(),

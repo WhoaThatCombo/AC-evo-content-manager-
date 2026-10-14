@@ -133,3 +133,35 @@ mod tests {
         assert_eq!(s, "{\n  \"a\": [\n    1,\n    2.0,\n    \"\\u00e9\"\n  ],\n  \"b\": {},\n  \"c\": []\n}");
     }
 }
+
+/// json.dumps(v) with Python's defaults: ", " and ": " separators,
+/// non-ASCII escaped. Used for the blobs handed to the server exe.
+pub fn py_dumps(v: &Value) -> String {
+    let mut s = String::new();
+    py_compact(v, &mut s);
+    s
+}
+
+fn py_compact(v: &Value, out: &mut String) {
+    match v {
+        Value::Array(a) => {
+            out.push('[');
+            for (i, x) in a.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                py_compact(x, out);
+            }
+            out.push(']');
+        }
+        Value::Object(m) => {
+            out.push('{');
+            for (i, (k, x)) in m.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                py_str(k, out);
+                out.push_str(": ");
+                py_compact(x, out);
+            }
+            out.push('}');
+        }
+        other => py_dump(other, 0, out),
+    }
+}

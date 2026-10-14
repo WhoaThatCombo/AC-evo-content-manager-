@@ -68,6 +68,15 @@ Answered in Rust, each equal to the Python answer (`tools/diff_api.py`,
   would render/decode one still goes to the backend (221 rows identical)
 * `/api/gamesettings`, `/read`, `/backups` (180 settings files identical)
 * `/api/assists`, `/api/drive/fav`, `/api/tracks/installed`
+* Track deployment: `/api/trackdeploy` (+ deploy native / restore /
+  redeclare / redeclare_client), `/api/tracks/missing`, `/api/splines`
+  (+ ship). Archives written by Rust are byte-identical to the Python ones.
+* `/api/share/auto`, `/api/browser/local`, `/api/lobby`
+* **Servers - owned by Rust**: `/api/profiles` (+ save / delete),
+  `/api/server/status`, `/api/server/log`, `/api/server/start`, `/stop`.
+  The server exe is launched directly (hidden NEW console, CreateProcessW)
+  with launch blobs equal to start_vai_server.py's; verified end to end with
+  a private throwaway profile (bound, status, live feed, stop).
 
 Core libraries ported: kspkg reader (59 ms vs 2.05 s on the 69 GB
 content.kspkg), protobuf schema extraction + prost-reflect pool, garage
@@ -82,8 +91,18 @@ content.kspkg), protobuf schema extraction + prost-reflect pool, garage
 * Anything owned by a running process in Python memory (servers, drive job,
   proxy, telemetry) moves as a WHOLE subsystem, never route by route.
 
-Next: servers (profiles + start/stop + status), then the lobby proxy and
-drive/join, then events (needs both), install/share/registry, telemetry.
+⚠ Reverse bridge: subsystems the shell OWNS are asked for by the backend
+(`servers.start/stop/start_state` -> `/api/_native/server/*`, loopback +
+the per-launch secret), so there is one owner of server processes.
+⚠ One archive writer across BOTH processes: named mutex
+`Local\ACECM_archive_write` (Python kspkg_write.archive_lock, Rust archlock).
+⚠ Python writes its JSON files in text mode: CRLF. Rust matches
+(profiles::write_json_indent2) so a file does not flip format.
+
+Still Python: the lobby proxy + backend control, drive/join + game UI
+automation, events (the live feed), install/packs/share serving, registry
+content serving, thumbs rendering, telemetry, updater/installer, Linux.
+Next: the lobby proxy (backend.py + tools/acevo_proxy.py), then drive.
 
 ## Build
 

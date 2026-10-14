@@ -19,7 +19,7 @@ pub struct Sidecar {
     child: Child,
 }
 
-fn python() -> PathBuf {
+pub fn python() -> PathBuf {
     if let Ok(p) = std::env::var("ACECM_PYTHON") {
         return PathBuf::from(p);
     }
@@ -50,7 +50,7 @@ fn secret() -> String {
 }
 
 impl Sidecar {
-    pub fn start() -> std::io::Result<Sidecar> {
+    pub fn start(public_port: u16) -> std::io::Result<Sidecar> {
         let port = free_port();
         let secret = secret();
         let data = paths::data();
@@ -64,6 +64,9 @@ impl Sidecar {
             .env("ACECM_LISTEN", "127.0.0.1")
             .env("ACECM_PROXY_SECRET", &secret)
             .env("ACECM_PARENT_PID", std::process::id().to_string())
+            // the reverse bridge: subsystems the shell owns (servers) are
+            // asked here, with the same secret, instead of run twice
+            .env("ACECM_NATIVE_URL", format!("http://127.0.0.1:{public_port}"))
             .env("PYTHONUNBUFFERED", "1")
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)

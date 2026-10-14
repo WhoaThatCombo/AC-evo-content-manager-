@@ -591,8 +591,41 @@ STARTING = {}          # profile id -> {"at": t, "name": ...} while in progress
 LAST_START = {}        # profile id -> {"at": t, "ok": bool, "error": str}
 
 
+# ⚠ While the Rust shell is in front of this backend it OWNS the server
+# processes (start, stop, the starting/last-start state, the launch-grace
+# port claims). Two owners would be two independent "one start at a time"
+# locks - the exact concurrency this module's locks exist to prevent - so
+# every start/stop here is sent to the shell instead (ACECM_NATIVE_URL, with
+# the per-launch secret it handed us).
+_NATIVE_URL = os.environ.get("ACECM_NATIVE_URL") or ""
+
+
+def _native(path, body=None, timeout=900):
+    import json as _json
+    req = urllib.request.Request(
+        _NATIVE_URL + path, method="POST" if body is not None else "GET",
+        data=_json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json",
+                 "X-ACECM-Proxy": os.environ.get("ACECM_PROXY_SECRET") or ""})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return _json.loads(r.read() or b"{}")
+    except Exception as ex:                        # noqa: BLE001
+        return {"ok": False, "error": f"the native shell did not answer: {ex}"}
+
+
+def start_state():
+    """(starting, last_start) - from whichever process owns the servers."""
+    if _NATIVE_URL:
+        st = _native("/api/_native/server/state", timeout=5)
+        return st.get("starting") or {}, st.get("last_start") or {}
+    return STARTING, LAST_START
+
+
 def start(profile):
     """One start at a time; see _START_LOCK."""
+    if _NATIVE_URL:
+        return _native("/api/_native/server/start", {"profile": profile})
     pid_ = profile.get("id") or ""
     if not _START_LOCK.acquire(blocking=False):
         who = next(iter(STARTING.values()), {}).get("name") or "another server"
@@ -967,6 +1000,8 @@ def stop(profile_id=None):
     other servers too - and with several running that is somebody else's
     session ending for no visible reason.
     """
+    if _NATIVE_URL:
+        return _native("/api/_native/server/stop", {"id": profile_id or ""})
     from . import winproc
     if not profile_id:
         pids = list(_server_pids())

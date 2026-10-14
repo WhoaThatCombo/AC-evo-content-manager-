@@ -33,15 +33,16 @@ _wake = threading.Event()
 
 def _servers():
     out = []
+    starting, last_start = servers.start_state()
     for p in servers.load():
         try:
             st = servers.status(p)
         except Exception:                          # noqa: BLE001
             st = {}
         pid = p.get("id")
-        last = servers.LAST_START.get(pid) or {}
+        last = last_start.get(pid) or {}
         out.append({"id": pid, "name": p.get("name") or "",
-                    "starting": pid in servers.STARTING,
+                    "starting": pid in starting,
                     # a failed start in the last 2 minutes, for the strip
                     "start_error": (last.get("error") or "")
                     if not last.get("ok") and time.time() - (last.get("at") or 0) < 120

@@ -100,6 +100,59 @@ async fn thumb(peer: IpAddr, req: Request, path: &str, query: &str) -> Result<Re
     }
 }
 
+static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static BACKEND_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_secret(s: &str) {
+    let _ = SECRET.set(s.to_string());
+}
+
+pub fn set_backend(u: &str) {
+    let _ = BACKEND_URL.set(u.to_string());
+}
+
+/// A GET to the Python backend, for the parts of an answer it still owns
+/// (blocking: call inside spawn_blocking).
+pub fn backend_get(path: &str) -> Value {
+    let (Some(base), Some(sec)) = (BACKEND_URL.get(), SECRET.get()) else { return Value::Null };
+    reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10)).build().ok()
+        .and_then(|c| c.get(format!("{base}{path}")).header("Host", "127.0.0.1")
+            .header("X-ACECM-Peer", "127.0.0.1").header("X-ACECM-Proxy", sec).send().ok())
+        .and_then(|r| r.text().ok()).and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// ⚠ The reverse bridge: the backend asks the shell to start/stop servers
+/// (one owner of server processes). Only a loopback caller holding the
+/// per-launch secret is answered.
+async fn native_internal(peer: IpAddr, req: Request, path: &str) -> Response {
+    let ok = auth::is_loopback(&peer) && SECRET.get().map(|s| {
+        req.headers().get("x-acecm-proxy").and_then(|v| v.to_str().ok()) == Some(s.as_str())
+    }).unwrap_or(false);
+    if !ok {
+        return json_resp(403, &json!({"ok": false, "error": "forbidden"}));
+    }
+    let bytes = to_bytes(req.into_body(), 16 << 20).await.unwrap_or_default();
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
+    let v = match path {
+        "/api/_native/server/start" => {
+            let p = body.get("profile").cloned().unwrap_or(json!({}));
+            blocking(move || crate::serverproc::start(&p)).await
+        }
+        "/api/_native/server/stop" => {
+            let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            blocking(move || crate::serverproc::stop(&id)).await
+        }
+        "/api/_native/server/state" => crate::serverproc::start_state(),
+        _ => json!({"ok": false, "error": "not found"}),
+    };
+    json_resp(200, &v)
+}
+
+fn find_profile(id: &str) -> Option<Value> {
+    crate::profiles::load().into_iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id))
+}
+
 /// Run file-system work off the async threads.
 async fn blocking<F: FnOnce() -> Value + Send + 'static>(f: F) -> Value {
     tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| json!({"error": e.to_string()}))
@@ -115,10 +168,12 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/gamesettings" | "/api/gamesettings/read" | "/api/gamesettings/backups"
             | "/api/assists" | "/api/drive/fav" | "/api/tracks/installed"
             | "/api/trackdeploy" | "/api/tracks/missing" | "/api/splines"
-            | "/api/share/auto" | "/api/browser/local" | "/api/lobby"),
+            | "/api/share/auto" | "/api/browser/local" | "/api/lobby"
+            | "/api/profiles" | "/api/server/status" | "/api/server/log"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
-            | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"),
+            | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
+            | "/api/profiles/save" | "/api/profiles/delete" | "/api/server/start" | "/api/server/stop"),
         _ => false,
     }
 }
@@ -133,6 +188,9 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         && req.headers().contains_key("x-acecm-force-python")
     {
         return Err(req);
+    }
+    if path.starts_with("/api/_native/") {
+        return Ok(native_internal(peer, req, &path).await);
     }
     if req.method() == Method::GET && (path == "/api/thumb/car" || path == "/api/thumb/track") {
         return thumb(peer, req, &path, &query).await;
@@ -302,6 +360,60 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (true, "/api/trackdeploy/redeclare_client") => {
             let dry = bb("dry_run");
             json_resp(200, &blocking(move || crate::trackdeploy::redeclare_client_tracks(dry)).await)
+        }
+        (false, "/api/profiles") => json_resp(200, &blocking(|| {
+            let mut items = crate::profiles::load();
+            for it in items.iter_mut() {
+                it["car_policy"] = crate::servers::car_policy(it);
+                if it.get("allow_kunos").is_none() {
+                    let cat = crate::content::cars().get("cars").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+                    it["allow_kunos"] = json!(crate::servers::infer_allow_kunos(it, &cat, &crate::mods::car_names()));
+                }
+            }
+            json!({"profiles": items, "template": crate::serverproc::template(),
+                   "options": crate::serverproc::options(),
+                   // telemetry is still the backend's
+                   "telemetry": backend_get("/api/telemetry/status")})
+        }).await),
+        (false, "/api/server/status") => {
+            let id = q_get(&query, "id").unwrap_or_default();
+            match find_profile(&id) {
+                Some(p) => json_resp(200, &blocking(move || crate::serverproc::status(&p)).await),
+                None => json_resp(404, &json!({"error": "no such profile"})),
+            }
+        }
+        (false, "/api/server/log") => {
+            let id = q_get(&query, "id").unwrap_or_default();
+            let since = q_get(&query, "since").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let p = find_profile(&id).unwrap_or(json!({}));
+            json_resp(200, &blocking(move || crate::serverproc::log_tail(&p, 120, since)).await)
+        }
+        (true, "/api/profiles/save") => {
+            let b = body.clone();
+            json_resp(200, &blocking(move || crate::serverproc::upsert(&b)).await)
+        }
+        (true, "/api/profiles/delete") => {
+            let id = bs("id");
+            blocking(move || { crate::serverproc::delete(&id); Value::Null }).await;
+            json_resp(200, &json!({"ok": true}))
+        }
+        (true, "/api/server/start") => {
+            let Some(p) = find_profile(&bs("id")) else {
+                return Ok(json_resp(404, &json!({"ok": false, "error": "no profile"})));
+            };
+            // ⚠ off the request: a start that deploys a track runs past the
+            // page's 12 s limit. Answer within 8 s; a slower start finishes
+            // in the background and reports through the live feed.
+            let h = tokio::task::spawn_blocking(move || crate::serverproc::start(&p));
+            match tokio::time::timeout(std::time::Duration::from_secs(8), h).await {
+                Ok(Ok(v)) => json_resp(200, &v),
+                _ => json_resp(200, &json!({"ok": true, "starting": true,
+                    "note": "still starting (deploying the track) - it will show as live when it is up"})),
+            }
+        }
+        (true, "/api/server/stop") => {
+            let id = bs("id");
+            json_resp(200, &blocking(move || crate::serverproc::stop(&id)).await)
         }
         (true, "/api/config") => match config::save(&body) {
             Ok(v) => json_resp(200, &v),
