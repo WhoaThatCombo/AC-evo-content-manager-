@@ -114,7 +114,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/cars" | "/api/tracks"
             | "/api/gamesettings" | "/api/gamesettings/read" | "/api/gamesettings/backups"
             | "/api/assists" | "/api/drive/fav" | "/api/tracks/installed"
-            | "/api/trackdeploy" | "/api/tracks/missing" | "/api/splines"),
+            | "/api/trackdeploy" | "/api/tracks/missing" | "/api/splines"
+            | "/api/share/auto" | "/api/browser/local"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"),
@@ -250,6 +251,30 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let m = crate::trackdeploy::missing_from_client();
             json!({"ok": true, "count": m.len(), "missing": m})
         }).await),
+        (false, "/api/share/auto") => json_resp(200, &blocking(crate::autoshare::overview).await),
+        (false, "/api/browser/local") => {
+            let refresh = q_flag(&query, "refresh");
+            json_resp(200, &blocking(move || {
+                let tm = crate::trackimport::track_map(refresh);
+                let cars: Vec<String> = {
+                    let mut v: Vec<String> = crate::mods::installed("client").get("mods").and_then(|m| m.as_array())
+                        .map(|a| a.iter().filter_map(|m| m.get("name")?.as_str().filter(|s| !s.is_empty()).map(String::from)).collect())
+                        .unwrap_or_default();
+                    v.sort();
+                    v
+                };
+                let mut ids: std::collections::BTreeSet<String> = crate::carsmap::table(false).get("presets")
+                    .and_then(|p| p.as_object()).map(|o| o.keys().cloned().collect()).unwrap_or_default();
+                for m in crate::mods::installed("client").get("mods").and_then(|m| m.as_array()).cloned().unwrap_or_default() {
+                    for c in m.get("cars").and_then(|c| c.as_array()).cloned().unwrap_or_default() {
+                        if let Some(id) = c.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) { ids.insert(id.into()); }
+                    }
+                }
+                json!({"tracks": crate::trackimport::installed_tracks(), "cars": cars,
+                       "car_ids": ids.into_iter().collect::<Vec<_>>(), "track_map": tm,
+                       "tracks_dir": crate::trackimport::tracks_dir()})
+            }).await)
+        }
         (false, "/api/splines") => json_resp(200, &blocking(crate::splines::status).await),
         (true, "/api/splines/ship") => {
             let (all, f, l) = (bb("all"), bs("folder"), bs("layout"));

@@ -79,3 +79,31 @@ pub fn lan_ipv4() -> String {
     }
     String::new()
 }
+
+static PUBLIC: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// The address the outside world sees, or "" (netutil.public_ipv4): two
+/// providers, cached 15 minutes, and only a real dotted IPv4 is accepted -
+/// a captive portal page must not become "your address".
+pub fn public_ipv4() -> String {
+    if let Some((ip, at)) = PUBLIC.lock().unwrap().as_ref() {
+        if !ip.is_empty() && at.elapsed().as_secs() < 15 * 60 {
+            return ip.clone();
+        }
+    }
+    let client = match reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(4))
+        .user_agent("ACECM").build() { Ok(c) => c, Err(_) => return String::new() };
+    for url in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
+        let Ok(r) = client.get(url).send() else { continue };
+        let Ok(t) = r.text() else { continue };
+        let t: String = t.chars().take(64).collect::<String>().trim().to_string();
+        let parts: Vec<&str> = t.split('.').collect();
+        if parts.len() == 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 3
+            && p.chars().all(|c| c.is_ascii_digit()) && p.parse::<u32>().map(|n| n <= 255).unwrap_or(false))
+        {
+            *PUBLIC.lock().unwrap() = Some((t.clone(), std::time::Instant::now()));
+            return t;
+        }
+    }
+    String::new()
+}

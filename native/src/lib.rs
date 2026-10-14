@@ -4,6 +4,7 @@
 pub mod api;
 pub mod archlock;
 pub mod assists;
+pub mod autoshare;
 pub mod auth;
 pub mod carsmap;
 pub mod config;
@@ -19,7 +20,9 @@ pub mod mods;
 pub mod paths;
 pub mod pb;
 pub mod procs;
+pub mod profiles;
 pub mod protos;
+pub mod registry;
 pub mod proxy;
 pub mod sidecar;
 pub mod splines;

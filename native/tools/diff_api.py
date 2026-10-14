@@ -36,6 +36,8 @@ ROUTES = [
     "/api/trackdeploy",
     "/api/tracks/missing",
     "/api/splines",
+    "/api/share/auto",
+    "/api/browser/local",
 ]
 # values that legitimately differ between two calls
 VOLATILE = {"took_ms", "ms", "found_at", "at", "age", "now", "built"}
