@@ -10,6 +10,7 @@ pub mod content;
 pub mod detect;
 pub mod gamesettings;
 pub mod kspkg;
+pub mod kspkg_write;
 pub mod livery;
 pub mod logs;
 pub mod misc;
