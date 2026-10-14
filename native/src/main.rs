@@ -11,6 +11,7 @@ mod config;
 mod detect;
 mod logs;
 mod paths;
+mod procs;
 mod proxy;
 mod sidecar;
 mod web;
