@@ -7,6 +7,7 @@ pub mod carsmap;
 pub mod config;
 pub mod content;
 pub mod detect;
+pub mod gamesettings;
 pub mod kspkg;
 pub mod livery;
 pub mod logs;

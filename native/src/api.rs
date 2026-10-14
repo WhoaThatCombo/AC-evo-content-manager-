@@ -111,7 +111,8 @@ fn ported(m: &Method, path: &str) -> bool {
         Method::GET => matches!(path, "/api/config" | "/api/detect" | "/api/auth"
             | "/api/version" | "/api/logs" | "/api/logs/files"
             | "/api/mods" | "/api/mods/audit" | "/api/cars/map" | "/api/viewer/cars"
-            | "/api/cars" | "/api/tracks"),
+            | "/api/cars" | "/api/tracks"
+            | "/api/gamesettings" | "/api/gamesettings/read" | "/api/gamesettings/backups"),
         Method::POST => matches!(path, "/api/config"),
         _ => false,
     }
@@ -190,6 +191,21 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         }
         (false, "/api/cars") => json_resp(200, &blocking(crate::content::cars).await),
         (false, "/api/tracks") => json_resp(200, &blocking(crate::content::tracks).await),
+        (false, "/api/gamesettings") => json_resp(200, &blocking(|| {
+            let mut v = crate::gamesettings::state();
+            if let (Some(a), Value::Object(b)) = (v.as_object_mut(), crate::gamesettings::discover()) {
+                a.extend(b);
+            }
+            v
+        }).await),
+        (false, "/api/gamesettings/read") => {
+            let f = q_get(&query, "file").unwrap_or_default();
+            json_resp(200, &blocking(move || crate::gamesettings::read(&f)).await)
+        }
+        (false, "/api/gamesettings/backups") => {
+            let f = q_get(&query, "file").unwrap_or_default();
+            json_resp(200, &blocking(move || crate::gamesettings::backups(&f)).await)
+        }
         (false, "/api/mods/audit") => json_resp(200, &blocking(crate::mods::audit).await),
         (false, "/api/cars/map") => {
             let refresh = q_flag(&query, "refresh");
