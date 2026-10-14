@@ -24,13 +24,42 @@ pub fn json_resp(code: u16, v: &Value) -> Response {
 }
 
 fn q_flag(query: &str, key: &str) -> bool {
-    query.split('&').any(|kv| kv == format!("{key}=1"))
+    q_get(query, key).as_deref() == Some("1")
+}
+
+/// First value of `key` in a query string, percent-decoded.
+pub fn q_get(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        (pct(k) == key).then(|| pct(v))
+    })
+}
+
+fn pct(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                match u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16) {
+                    Ok(x) => { out.push(x); i += 2; }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Is this route ported? (method, path) - checked before reading the body.
 fn ported(m: &Method, path: &str) -> bool {
     match *m {
-        Method::GET => matches!(path, "/api/config" | "/api/detect" | "/api/auth"),
+        Method::GET => matches!(path, "/api/config" | "/api/detect" | "/api/auth"
+            | "/api/version" | "/api/logs" | "/api/logs/files"),
         Method::POST => matches!(path, "/api/config"),
         _ => false,
     }
@@ -83,6 +112,19 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             "authorised": auth::admin_ok(&cfg, &peer, &h, &query),
             "local": auth::is_loopback(&peer),
         })),
+        (false, "/api/version") => json_resp(200, &json!({
+            "name": "Assetto Corsa EVO Content Manager",
+            "version": env!("CARGO_PKG_VERSION"),
+            // the installer/updater still live in the (source) backend
+            "frozen": false,
+            "data_dir": crate::paths::data().to_string_lossy(),
+        })),
+        (false, "/api/logs") => {
+            let n = q_get(&query, "lines").and_then(|v| v.parse().ok()).unwrap_or(300);
+            let f = q_get(&query, "file").unwrap_or_else(|| "acecm.log".into());
+            json_resp(200, &crate::logs::tail(n, &f))
+        }
+        (false, "/api/logs/files") => json_resp(200, &crate::logs::files()),
         (true, "/api/config") => match config::save(&body) {
             Ok(v) => json_resp(200, &v),
             Err(e) => json_resp(500, &json!({"error": format!("OSError: {e}")})),

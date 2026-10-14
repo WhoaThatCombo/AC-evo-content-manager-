@@ -9,6 +9,7 @@ mod api;
 mod auth;
 mod config;
 mod detect;
+mod logs;
 mod paths;
 mod proxy;
 mod sidecar;

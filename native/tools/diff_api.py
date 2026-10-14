@@ -16,6 +16,11 @@ ROUTES = [
     "/api/config",
     "/api/detect",
     "/api/auth",
+    "/api/version",
+    "/api/logs?lines=200",
+    "/api/logs?lines=50&file=native_backend.log",
+    "/api/logs?file=..%5C..%5Cconfig.json",
+    "/api/logs/files",
 ]
 # values that legitimately differ between two calls
 VOLATILE = {"took_ms", "ms", "found_at", "at", "age", "now"}
