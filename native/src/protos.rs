@@ -22,7 +22,8 @@ use serde_json::{json, Value};
 use crate::{config, detect, paths};
 
 pub fn cache_dir() -> PathBuf {
-    let d = paths::data().join("protos");
+    // a tool process is handed the shell's schema folder explicitly
+    let d = std::env::var("ACECM_PROTOS").map(PathBuf::from).unwrap_or_else(|_| paths::data().join("protos"));
     let _ = std::fs::create_dir_all(&d);
     d
 }

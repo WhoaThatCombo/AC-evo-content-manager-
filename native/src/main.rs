@@ -38,6 +38,15 @@ fn message_box_any(msg: &str) {
 }
 
 fn main() {
+    // `acecm --tool <name>`: a helper process, never a second window
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|a| a == "--tool").unwrap_or(false) {
+        let code = match args.get(2).map(|s| s.as_str()) {
+            Some("acevo_proxy") => acecm::lobbyproxy::run(),
+            other => { eprintln!("unknown tool {other:?}"); 2 }
+        };
+        std::process::exit(code);
+    }
     let listen = paths::listen();
     // ⚠ Bind the public port FIRST: if another ACECM already has it, say so
     // and stop, rather than starting a second backend on the same data.

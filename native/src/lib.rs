@@ -16,6 +16,7 @@ pub mod gamesettings;
 pub mod kspkg;
 pub mod kspkg_write;
 pub mod livery;
+pub mod lobbyproxy;
 pub mod lobby;
 pub mod logs;
 pub mod misc;

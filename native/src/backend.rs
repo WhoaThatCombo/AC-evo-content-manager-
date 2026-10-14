@@ -450,7 +450,9 @@ fn running() -> Value {
 pub fn start(mode: &str) -> Value {
     let Some(tool) = tool_name(mode) else { return json!({"ok": false, "error": format!("unknown mode {mode}")}) };
     let script = paths::repo().join("tools").join(format!("{tool}.py"));
-    if !script.exists() {
+    // the proxy is ported (acecm --tool acevo_proxy); standalone is not yet
+    let native = mode == "proxy" && std::env::var("ACECM_PY_PROXY").is_err();
+    if !native && !script.exists() {
         return json!({"ok": false, "error": format!("missing {}", script.display())});
     }
     let made = ensure_cert(false);
@@ -480,8 +482,16 @@ pub fn start(mode: &str) -> Value {
         ours.push(lan.clone());
     }
     ours.sort();
-    let mut c = std::process::Command::new(sidecar::python());
-    c.args(["-u", &script.to_string_lossy()]).current_dir(paths::data())
+    let mut c = if native {
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap_or_default());
+        c.args(["--tool", tool]);
+        c
+    } else {
+        let mut c = std::process::Command::new(sidecar::python());
+        c.args(["-u", &script.to_string_lossy()]);
+        c
+    };
+    c.current_dir(paths::data())
         .env("ACECM_PROTOS", protos::cache_dir()).env("ACECM_CERTS", certs_dir())
         .env("LOBBY_JSON", lobby::path()).env("OUR_IPS", ours.join(","))
         .env("PORT", port.to_string())
