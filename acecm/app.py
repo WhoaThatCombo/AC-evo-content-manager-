@@ -286,9 +286,27 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _peer_local(self):
+    def _peer_ip(self):
+        """Who actually connected.
+
+        ⚠ Behind the native shell every request arrives from 127.0.0.1, so a
+        LAN client would pass as "this machine" and skip the token check. The
+        shell says who really connected in X-ACECM-Peer, and is believed only
+        with the per-launch secret it handed us (ACECM_PROXY_SECRET) - a
+        local program cannot spoof a peer without it.
+        """
         ip = (self.client_address or ("",))[0]
-        return ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        secret = os.environ.get("ACECM_PROXY_SECRET") or ""
+        if secret and ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            import hmac
+            got = self.headers.get("X-ACECM-Proxy") or ""
+            peer = (self.headers.get("X-ACECM-Peer") or "").strip()
+            if peer and hmac.compare_digest(got.encode(), secret.encode()):
+                return peer
+        return ip
+
+    def _peer_local(self):
+        return self._peer_ip() in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
     def _admin_ok(self, q=None):
         """May this request use the admin routes?
@@ -1796,6 +1814,54 @@ def _quietly(fn):
         logs.LOG.info("warm-up skipped: %s", ex)
 
 
+def _watch_parent():
+    """Exit with the native shell that started us.
+
+    The shell kills us on a normal close; this covers it crashing or being
+    killed, which would otherwise leave a hidden backend holding the data.
+    """
+    try:
+        pid = int(os.environ.get("ACECM_PARENT_PID") or 0)
+    except ValueError:
+        pid = 0
+    if not pid:
+        return
+
+    def gone():
+        logs.LOG.info("native shell %s is gone - exiting", pid)
+        # same cleanup as a normal quit: os._exit does not stop our helpers
+        for name in ("backend", "telemetry"):
+            try:
+                __import__("acecm." + name, fromlist=["stop"]).stop()
+            except Exception:                      # noqa: BLE001
+                pass
+        os._exit(0)
+
+    if sys.platform == "win32":
+        # ⚠ WAIT on a handle opened now, do not poll "can I open it": a dead
+        # process stays openable while anyone (WebView2's helpers) holds a
+        # handle to it, and a polled pid can be reused by another program.
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        h = k32.OpenProcess(0x00100000, False, pid)        # SYNCHRONIZE
+        if not h:
+            gone()                                          # already gone
+
+        def wait():
+            k32.WaitForSingleObject(h, 0xFFFFFFFF)          # INFINITE
+            gone()
+        threading.Thread(target=wait, name="parent-watch", daemon=True).start()
+        return
+
+    def loop():
+        while os.getppid() == pid:
+            time.sleep(2)
+        gone()
+    threading.Thread(target=loop, name="parent-watch", daemon=True).start()
+
+
 def serve():
     """Bind and start the HTTP server on a background thread; return its URL.
 
@@ -1855,6 +1921,7 @@ def serve():
     _watch_lobby()
     _watch_hud()
     hotkey.watch()
+    _watch_parent()
     port = config.CFG["ui_port"]
     # ⚠ 127.0.0.1 made the window work and made content sharing a lie.
     # Get content probes this HTTP port on the game server's IP. Bound

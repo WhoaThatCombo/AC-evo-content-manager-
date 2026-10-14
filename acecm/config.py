@@ -38,6 +38,11 @@ else:
     ROOT = os.path.dirname(HERE)
     WEB = os.path.join(HERE, "web")
     BUNDLED_TOOLS = os.path.join(ROOT, "tools")
+# The native shell runs this package FROM SOURCE as its hidden backend, but
+# must use the installed app's settings and data (%LOCALAPPDATA%\ACECM), not
+# the repo folder a source run would otherwise pick.
+if os.environ.get("ACECM_ROOT"):
+    ROOT = os.environ["ACECM_ROOT"]
 # ⚠ ACECM_DATA pins the data directory. Windows MSIX/Store virtualization can
 # redirect %LOCALAPPDATA% into a per-package LocalCache, so the same build
 # launched two different ways can use two different folders and look like it
@@ -159,7 +164,21 @@ def _load():
     return cfg
 
 
-CFG = _load()
+def _env_overrides(cfg):
+    """Process-only settings from the environment, never written to disk.
+
+    The native (Rust) shell runs this Python backend hidden behind it while
+    the port is in progress: the shell owns the public port and the window,
+    and this copy serves on a private loopback port it is handed here.
+    """
+    if os.environ.get("ACECM_UI_PORT"):
+        cfg["ui_port"] = int(os.environ["ACECM_UI_PORT"])
+    if os.environ.get("ACECM_LISTEN"):
+        cfg["listen"] = os.environ["ACECM_LISTEN"]
+    return cfg
+
+
+CFG = _env_overrides(_load())
 
 
 def save(patch):
@@ -174,7 +193,7 @@ def save(patch):
         cfg[k] = v
     path = config_path()
     json.dump(cfg, open(path, "w", encoding="utf-8"), indent=2)
-    CFG.update(cfg)
+    CFG.update(_env_overrides(dict(cfg)))
     return public_cfg()
 
 

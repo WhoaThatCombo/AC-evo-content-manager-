@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ACECM",
+  "version": "1.0.21",
+  "identifier": "com.whoathatcombo.acecm",
+  "build": { "frontendDist": "../acecm/web" },
+  "app": { "windows": [], "security": { "csp": null } },
+  "bundle": { "active": false, "icon": ["icons/icon.ico"] }
+}
