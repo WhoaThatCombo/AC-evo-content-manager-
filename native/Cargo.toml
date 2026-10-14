@@ -24,6 +24,12 @@ regex-lite = "0.1"
 prost = "0.13"
 sha1_smol = "1"
 base64 = "0.22"
+memchr = "2"
+rsa = "0.9"
+rand = "0.8"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+x509-parser = "0.16"
+time = "0.3"
 flate2 = "1"
 prost-types = "0.13"
 prost-reflect = { version = "0.14", features = ["serde"] }

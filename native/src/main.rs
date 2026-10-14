@@ -96,6 +96,8 @@ fn main() {
     let side_exit = side.clone();
     app.run(move |handle, ev| {
         if let RunEvent::Exit = ev {
+            // the shell owns the lobby proxy: it goes with us
+            let _ = acecm::backend::stop();
             if let Some(mut s) = side_exit.lock().unwrap().take() {
                 s.stop();
             }

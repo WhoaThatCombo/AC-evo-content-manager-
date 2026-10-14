@@ -154,7 +154,31 @@ def port_open(port, host="127.0.0.1"):
         s.close()
 
 
+_NATIVE_URL = os.environ.get("ACECM_NATIVE_URL") or ""
+
+
+def _native(path, body=None, timeout=60):
+    """Ask the Rust shell, which OWNS the proxy process while it runs.
+
+    ⚠ One owner: a proxy this process started would be invisible to the
+    shell's state and stop, and two would fight over port 448.
+    """
+    import urllib.request
+    req = urllib.request.Request(
+        _NATIVE_URL + path, method="POST" if body is not None else "GET",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json",
+                 "X-ACECM-Proxy": os.environ.get("ACECM_PROXY_SECRET") or ""})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except Exception as ex:                        # noqa: BLE001
+        return {"ok": False, "error": f"the native shell did not answer: {ex}"}
+
+
 def state():
+    if _NATIVE_URL:
+        return _native("/api/_native/backend/state", timeout=20)
     # Create the keypair up front rather than reporting "have_cert: false" and
     # making the user wonder what is broken. Cheap after the first time.
     try:
@@ -585,6 +609,8 @@ def restore_redirect():
 
 
 def start(mode="proxy"):
+    if _NATIVE_URL:
+        return _native("/api/_native/backend/start", {"mode": mode})
     if mode not in MODES:
         return {"ok": False, "error": f"unknown mode {mode}"}
     script = _tool(MODES[mode])
@@ -814,6 +840,8 @@ def _orphan_on_backend_port():
 
 
 def stop():
+    if _NATIVE_URL:
+        return _native("/api/_native/backend/stop", {}, timeout=20)
     for mode, p in list(_procs.items()):
         if p.poll() is None:
             p.terminate()

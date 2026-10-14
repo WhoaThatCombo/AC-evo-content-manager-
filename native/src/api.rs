@@ -144,6 +144,12 @@ async fn native_internal(peer: IpAddr, req: Request, path: &str) -> Response {
             blocking(move || crate::serverproc::stop(&id)).await
         }
         "/api/_native/server/state" => crate::serverproc::start_state(),
+        "/api/_native/backend/start" => {
+            let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("proxy").to_string();
+            blocking(move || crate::backend::start(&mode)).await
+        }
+        "/api/_native/backend/stop" => blocking(crate::backend::stop).await,
+        "/api/_native/backend/state" => blocking(crate::backend::state).await,
         _ => json!({"ok": false, "error": "not found"}),
     };
     json_resp(200, &v)
@@ -169,11 +175,13 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/assists" | "/api/drive/fav" | "/api/tracks/installed"
             | "/api/trackdeploy" | "/api/tracks/missing" | "/api/splines"
             | "/api/share/auto" | "/api/browser/local" | "/api/lobby"
-            | "/api/profiles" | "/api/server/status" | "/api/server/log"),
+            | "/api/profiles" | "/api/server/status" | "/api/server/log"
+            | "/api/backend" | "/api/backend/log" | "/api/join/state" | "/api/browser/why"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
-            | "/api/profiles/save" | "/api/profiles/delete" | "/api/server/start" | "/api/server/stop"),
+            | "/api/profiles/save" | "/api/profiles/delete" | "/api/server/start" | "/api/server/stop"
+            | "/api/backend/start" | "/api/backend/stop" | "/api/backend/redirect" | "/api/join"),
         _ => false,
     }
 }
@@ -414,6 +422,27 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (true, "/api/server/stop") => {
             let id = bs("id");
             json_resp(200, &blocking(move || crate::serverproc::stop(&id)).await)
+        }
+        (false, "/api/backend") => json_resp(200, &blocking(crate::backend::state).await),
+        (false, "/api/backend/log") => {
+            let mode = q_get(&query, "mode").unwrap_or_else(|| "proxy".into());
+            json_resp(200, &crate::backend::log(&mode, 80))
+        }
+        (false, "/api/join/state") => json_resp(200, &blocking(crate::backend::join_state).await),
+        (false, "/api/browser/why") => json_resp(200, &blocking(crate::backend::browser_chain).await),
+        (true, "/api/backend/start") => {
+            let mode = { let m = bs("mode"); if m.is_empty() { "proxy".to_string() } else { m } };
+            json_resp(200, &blocking(move || crate::backend::start(&mode)).await)
+        }
+        (true, "/api/backend/stop") => json_resp(200, &blocking(crate::backend::stop).await),
+        (true, "/api/backend/redirect") => {
+            let restore = bs("action").to_lowercase() == "restore";
+            json_resp(200, &blocking(move || if restore { crate::backend::restore_redirect() } else { crate::backend::apply_redirect() }).await)
+        }
+        (true, "/api/join") => {
+            let id = body.get("id").cloned().unwrap_or(Value::Null);
+            let shape = { let s = bs("shape"); if s.is_empty() { "bare".to_string() } else { s } };
+            json_resp(200, &blocking(move || crate::backend::join(&id, &shape, Value::Null, Value::Null, "")).await)
         }
         (true, "/api/config") => match config::save(&body) {
             Ok(v) => json_resp(200, &v),
