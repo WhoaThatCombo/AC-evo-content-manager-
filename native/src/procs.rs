@@ -227,3 +227,54 @@ mod tests {
         assert!(!alive(0));
     }
 }
+
+/// Full command line of `pid`, or "" - read from the process itself
+/// (ProcessCommandLineInformation), no powershell spawn. Works for any
+/// process this user can query.
+#[cfg(windows)]
+pub fn cmdline(pid: u32) -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationProcess(h: *mut core::ffi::c_void, class: u32, info: *mut core::ffi::c_void,
+                                     len: u32, ret: *mut u32) -> i32;
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return String::new();
+        }
+        let mut need = 0u32;
+        NtQueryInformationProcess(h, 60, std::ptr::null_mut(), 0, &mut need);
+        let mut out = String::new();
+        if need > 0 {
+            let mut buf = vec![0u8; need as usize + 16];
+            if NtQueryInformationProcess(h, 60, buf.as_mut_ptr() as _, buf.len() as u32, &mut need) >= 0 {
+                // UNICODE_STRING { u16 Length, u16 MaximumLength, PWSTR Buffer }
+                let len = u16::from_le_bytes([buf[0], buf[1]]) as usize / 2;
+                let ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap()) as *const u16;
+                if !ptr.is_null() && len > 0 {
+                    out = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+                }
+            }
+        }
+        CloseHandle(h);
+        out
+    }
+}
+
+#[cfg(all(test, windows))]
+mod cmdline_tests {
+    #[test]
+    fn reads_a_child_command_line() {
+        let mut c = std::process::Command::new("ping");
+        c.args(["-n", "30", "127.0.0.1"]);
+        super::hide(&mut c);
+        let mut child = c.spawn().unwrap();
+        let line = super::cmdline(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(line.contains("-n 30 127.0.0.1"), "{line}");
+    }
+}

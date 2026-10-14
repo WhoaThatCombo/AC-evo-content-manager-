@@ -23,6 +23,8 @@ getrandom = "0.3"
 regex-lite = "0.1"
 prost = "0.13"
 sha1_smol = "1"
+base64 = "0.22"
+flate2 = "1"
 prost-types = "0.13"
 prost-reflect = { version = "0.14", features = ["serde"] }
 

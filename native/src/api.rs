@@ -115,7 +115,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/gamesettings" | "/api/gamesettings/read" | "/api/gamesettings/backups"
             | "/api/assists" | "/api/drive/fav" | "/api/tracks/installed"
             | "/api/trackdeploy" | "/api/tracks/missing" | "/api/splines"
-            | "/api/share/auto" | "/api/browser/local"),
+            | "/api/share/auto" | "/api/browser/local" | "/api/lobby"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"),
@@ -275,6 +275,9 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                        "tracks_dir": crate::trackimport::tracks_dir()})
             }).await)
         }
+        (false, "/api/lobby") => json_resp(200, &blocking(|| json!({
+            "path": crate::lobby::path().to_string_lossy(), "lobby": crate::lobby::read(),
+            "lan_ip": crate::misc::lan_ipv4()})).await),
         (false, "/api/splines") => json_resp(200, &blocking(crate::splines::status).await),
         (true, "/api/splines/ship") => {
             let (all, f, l) = (bb("all"), bs("folder"), bs("layout"));
