@@ -112,7 +112,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/version" | "/api/logs" | "/api/logs/files"
             | "/api/mods" | "/api/mods/audit" | "/api/cars/map" | "/api/viewer/cars"
             | "/api/cars" | "/api/tracks"
-            | "/api/gamesettings" | "/api/gamesettings/read" | "/api/gamesettings/backups"),
+            | "/api/gamesettings" | "/api/gamesettings/read" | "/api/gamesettings/backups"
+            | "/api/assists" | "/api/drive/fav" | "/api/tracks/installed"),
         Method::POST => matches!(path, "/api/config"),
         _ => false,
     }
@@ -206,6 +207,9 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let f = q_get(&query, "file").unwrap_or_default();
             json_resp(200, &blocking(move || crate::gamesettings::backups(&f)).await)
         }
+        (false, "/api/assists") => json_resp(200, &blocking(crate::assists::read).await),
+        (false, "/api/drive/fav") => json_resp(200, &blocking(crate::misc::favourites).await),
+        (false, "/api/tracks/installed") => json_resp(200, &blocking(crate::misc::tracks_installed).await),
         (false, "/api/mods/audit") => json_resp(200, &blocking(crate::mods::audit).await),
         (false, "/api/cars/map") => {
             let refresh = q_flag(&query, "refresh");

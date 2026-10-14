@@ -29,12 +29,18 @@ ROUTES = [
     "/api/viewer/cars?refresh=1",
     "/api/cars",
     "/api/tracks",
+    "/api/gamesettings",
+    "/api/assists",
+    "/api/drive/fav",
+    "/api/tracks/installed",
 ]
 # values that legitimately differ between two calls
 VOLATILE = {"took_ms", "ms", "found_at", "at", "age", "now", "built"}
 # known, correct differences: the hidden backend reports ITS private port
 # (env overrides); the shell reports the public one, which is the real answer
-EXPECTED = {"/api/config": {"ui_port", "listen"}}
+EXPECTED = {"/api/config": {"ui_port", "listen"},
+            # whichever side asks first after a mods-folder change rescans
+            "/api/viewer/cars": {"cached", "unreadable"}}
 
 
 def get(base, route, force):

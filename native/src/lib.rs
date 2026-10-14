@@ -2,6 +2,7 @@
 //! app binary and the dev tools in src/bin share one implementation.
 
 pub mod api;
+pub mod assists;
 pub mod auth;
 pub mod carsmap;
 pub mod config;
@@ -11,6 +12,7 @@ pub mod gamesettings;
 pub mod kspkg;
 pub mod livery;
 pub mod logs;
+pub mod misc;
 pub mod mods;
 pub mod paths;
 pub mod pb;

@@ -54,6 +54,37 @@ WebView2 window ──► Rust shell :8092 (public)
 Sizes today: acecm/ 27.8k lines Python, runtime tools 4.4k, web UI 8.8k
 (stays), 163 API routes.
 
+## Progress (2026-10-14)
+
+Answered in Rust, each equal to the Python answer (`tools/diff_api.py`,
+`tools/diff_thumbs.py`):
+
+* UI files (theme + cache-tag injection), `/live`
+* `GET/POST /api/config`, `/api/detect`, `/api/auth`, `/api/version`
+* `/api/logs`, `/api/logs/files`
+* `/api/mods`, `/api/mods/audit`, `/api/cars/map`, `/api/viewer/cars`
+* `/api/cars`, `/api/tracks` (133 cars / 68 tracks)
+* `/api/thumb/car`, `/api/thumb/track` - cached pictures; a request that
+  would render/decode one still goes to the backend (221 rows identical)
+* `/api/gamesettings`, `/read`, `/backups` (180 settings files identical)
+* `/api/assists`, `/api/drive/fav`, `/api/tracks/installed`
+
+Core libraries ported: kspkg reader (59 ms vs 2.05 s on the 69 GB
+content.kspkg), protobuf schema extraction + prost-reflect pool, garage
+(livery) reader, Windows process/port helpers, Steam detection.
+
+⚠ Shared state rules while both run:
+* config.json: Python re-reads on mtime change (`config.refresh`).
+* Caches shared by file (paths.json, preset_map.json, viewer/index.json,
+  track_map.json, protos/): same format and stamps on both sides. The
+  backend DELETES some on a content change (`forget_lists`), so Rust treats
+  a missing file as a miss even with a warm memory copy.
+* Anything owned by a running process in Python memory (servers, drive job,
+  proxy, telemetry) moves as a WHOLE subsystem, never route by route.
+
+Next: servers (profiles + start/stop + status), then the lobby proxy and
+drive/join, then events (needs both), install/share/registry, telemetry.
+
 ## Build
 
 ```
