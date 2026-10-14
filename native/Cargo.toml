@@ -17,9 +17,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "proces
 reqwest = { version = "0.12", default-features = false, features = ["stream"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 http-body-util = "0.1"
 getrandom = "0.3"
+regex-lite = "0.1"
 
 [profile.release]
 opt-level = "s"

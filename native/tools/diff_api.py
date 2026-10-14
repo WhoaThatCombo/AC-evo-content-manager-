@@ -21,9 +21,13 @@ ROUTES = [
     "/api/logs?lines=50&file=native_backend.log",
     "/api/logs?file=..%5C..%5Cconfig.json",
     "/api/logs/files",
+    "/api/mods",
+    "/api/mods?side=client",
+    "/api/mods/audit",
+    "/api/cars/map",
 ]
 # values that legitimately differ between two calls
-VOLATILE = {"took_ms", "ms", "found_at", "at", "age", "now"}
+VOLATILE = {"took_ms", "ms", "found_at", "at", "age", "now", "built"}
 # known, correct differences: the hidden backend reports ITS private port
 # (env overrides); the shell reports the public one, which is the real answer
 EXPECTED = {"/api/config": {"ui_port", "listen"}}

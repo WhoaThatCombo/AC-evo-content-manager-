@@ -55,11 +55,17 @@ fn pct(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Run file-system work off the async threads.
+async fn blocking<F: FnOnce() -> Value + Send + 'static>(f: F) -> Value {
+    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| json!({"error": e.to_string()}))
+}
+
 /// Is this route ported? (method, path) - checked before reading the body.
 fn ported(m: &Method, path: &str) -> bool {
     match *m {
         Method::GET => matches!(path, "/api/config" | "/api/detect" | "/api/auth"
-            | "/api/version" | "/api/logs" | "/api/logs/files"),
+            | "/api/version" | "/api/logs" | "/api/logs/files"
+            | "/api/mods" | "/api/mods/audit" | "/api/cars/map"),
         Method::POST => matches!(path, "/api/config"),
         _ => false,
     }
@@ -125,6 +131,22 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             json_resp(200, &crate::logs::tail(n, &f))
         }
         (false, "/api/logs/files") => json_resp(200, &crate::logs::files()),
+        (false, "/api/mods") => {
+            let side = q_get(&query, "side").unwrap_or_else(|| "server".into());
+            json_resp(200, &blocking(move || crate::mods::installed(&side)).await)
+        }
+        (false, "/api/mods/audit") => json_resp(200, &blocking(crate::mods::audit).await),
+        (false, "/api/cars/map") => {
+            let refresh = q_flag(&query, "refresh");
+            let t = blocking(move || crate::carsmap::table(refresh)).await;
+            let n = t.get("presets").and_then(|p| p.as_object()).map(|m| m.len()).unwrap_or(0);
+            json_resp(200, &json!({
+                "presets": t.get("presets").cloned().unwrap_or(Value::Null),
+                "models": t.get("models").cloned().unwrap_or(Value::Null),
+                "count": n,
+                "error": t.get("error").cloned().unwrap_or(Value::Null),
+            }))
+        }
         (true, "/api/config") => match config::save(&body) {
             Ok(v) => json_resp(200, &v),
             Err(e) => json_resp(500, &json!({"error": format!("OSError: {e}")})),

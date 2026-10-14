@@ -3,10 +3,12 @@
 
 pub mod api;
 pub mod auth;
+pub mod carsmap;
 pub mod config;
 pub mod detect;
 pub mod kspkg;
 pub mod logs;
+pub mod mods;
 pub mod paths;
 pub mod procs;
 pub mod proxy;
