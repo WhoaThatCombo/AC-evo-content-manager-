@@ -25,6 +25,8 @@ ROUTES = [
     "/api/mods?side=client",
     "/api/mods/audit",
     "/api/cars/map",
+    "/api/viewer/cars",
+    "/api/viewer/cars?refresh=1",
 ]
 # values that legitimately differ between two calls
 VOLATILE = {"took_ms", "ms", "found_at", "at", "age", "now", "built"}

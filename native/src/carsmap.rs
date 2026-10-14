@@ -183,8 +183,11 @@ pub fn table(refresh: bool) -> Value {
     }
     let k = key(&path);
     if !refresh {
+        // ⚠ the backend's forget_lists() DELETES preset_map.json when content
+        // changes (an install adds mod names). Our memory copy must not
+        // outlive that, so a missing file is a miss even with a warm key.
         if let Some((mk, v)) = MEM.lock().unwrap().as_ref() {
-            if *mk == k {
+            if *mk == k && cache_path().is_file() {
                 return v.clone();
             }
         }

@@ -13,4 +13,5 @@ pub mod paths;
 pub mod procs;
 pub mod proxy;
 pub mod sidecar;
+pub mod viewer;
 pub mod web;
