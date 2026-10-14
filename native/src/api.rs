@@ -65,7 +65,8 @@ fn ported(m: &Method, path: &str) -> bool {
     match *m {
         Method::GET => matches!(path, "/api/config" | "/api/detect" | "/api/auth"
             | "/api/version" | "/api/logs" | "/api/logs/files"
-            | "/api/mods" | "/api/mods/audit" | "/api/cars/map" | "/api/viewer/cars"),
+            | "/api/mods" | "/api/mods/audit" | "/api/cars/map" | "/api/viewer/cars"
+            | "/api/cars" | "/api/tracks"),
         Method::POST => matches!(path, "/api/config"),
         _ => false,
     }
@@ -139,6 +140,8 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let refresh = q_flag(&query, "refresh");
             json_resp(200, &blocking(move || crate::viewer::index(refresh)).await)
         }
+        (false, "/api/cars") => json_resp(200, &blocking(crate::content::cars).await),
+        (false, "/api/tracks") => json_resp(200, &blocking(crate::content::tracks).await),
         (false, "/api/mods/audit") => json_resp(200, &blocking(crate::mods::audit).await),
         (false, "/api/cars/map") => {
             let refresh = q_flag(&query, "refresh");
