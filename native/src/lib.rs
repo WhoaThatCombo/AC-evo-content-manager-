@@ -23,5 +23,6 @@ pub mod proxy;
 pub mod sidecar;
 pub mod thumbs;
 pub mod trackimport;
+pub mod tracktables;
 pub mod viewer;
 pub mod web;
