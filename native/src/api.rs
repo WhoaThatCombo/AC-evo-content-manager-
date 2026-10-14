@@ -55,6 +55,51 @@ fn pct(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+fn png(path: &std::path::Path) -> Response {
+    match std::fs::read(path) {
+        // cheap to regenerate, and a stale render after a repaint confuses
+        Ok(b) => ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "max-age=300")], b)
+            .into_response(),
+        Err(_) => json_resp(404, &json!({"error": "no image"})),
+    }
+}
+
+/// List-row pictures. ⚠ Partial: a request that would MAKE one (render a
+/// car, decode a cover) is handed back to the backend that owns that job.
+async fn thumb(peer: IpAddr, req: Request, path: &str, query: &str) -> Result<Response, Request> {
+    let cfg = config::load();
+    let h = req.headers().clone();
+    if !auth::admin_ok(&cfg, &peer, &h, query) {
+        let (c, v) = auth::deny_remote(&cfg);
+        return Ok(json_resp(c, &v));
+    }
+    if !auth::browser_ok(false, &peer, &h, query) {
+        let (c, v) = auth::deny_browser();
+        return Ok(json_resp(c, &v));
+    }
+    if path == "/api/thumb/car" {
+        if q_flag(query, "big") || q_flag(query, "make") || q_flag(query, "force") {
+            return Err(req);
+        }
+        let id = q_get(query, "id").unwrap_or_default();
+        let preset = q_get(query, "preset").unwrap_or_default();
+        let hit = tokio::task::spawn_blocking(move || crate::thumbs::list_car(&id, &preset))
+            .await.ok().flatten();
+        return Ok(match hit {
+            Some(p) => png(&p),
+            None => json_resp(404, &json!({"error": "no image"})),
+        });
+    }
+    let folder = q_get(query, "folder").unwrap_or_default();
+    let p = tokio::task::spawn_blocking(move || {
+        crate::thumbs::track_path(&crate::thumbs::resolve_folder(&folder))
+    }).await.ok();
+    match p {
+        Some(p) if p.is_file() => Ok(png(&p)),
+        _ => Err(req), // not cached yet: the backend extracts or decodes it
+    }
+}
+
 /// Run file-system work off the async threads.
 async fn blocking<F: FnOnce() -> Value + Send + 'static>(f: F) -> Value {
     tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| json!({"error": e.to_string()}))
@@ -82,6 +127,9 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         && req.headers().contains_key("x-acecm-force-python")
     {
         return Err(req);
+    }
+    if req.method() == Method::GET && (path == "/api/thumb/car" || path == "/api/thumb/track") {
+        return thumb(peer, req, &path, &query).await;
     }
     if !ported(req.method(), &path) {
         return Err(req);
