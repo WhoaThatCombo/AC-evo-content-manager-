@@ -5,6 +5,7 @@ edition = "2021"
 description = "Assetto Corsa EVO Content Manager - native shell"
 license = "GPL-3.0-or-later"
 publish = false
+default-run = "acecm"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

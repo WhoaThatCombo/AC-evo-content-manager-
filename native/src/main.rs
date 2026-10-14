@@ -5,18 +5,10 @@
 //! not ported yet (see sidecar.rs, proxy.rs, native/PORTING.md).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod api;
-mod auth;
-mod config;
-mod detect;
-mod logs;
-mod paths;
-mod procs;
-mod proxy;
-mod sidecar;
-mod web;
 
 use std::sync::{Arc, Mutex};
+
+use acecm::{paths, proxy, sidecar};
 use std::time::Duration;
 
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
