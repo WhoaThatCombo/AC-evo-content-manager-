@@ -194,6 +194,7 @@ def _backup(kspkg):
     return {"backup": bak, "made": True}
 
 
+@kspkg_write.locked
 def deploy(pkg_dir):
     """Install a track package into the running server's content.kspkg."""
     v = validate(pkg_dir)
@@ -402,6 +403,7 @@ def read_track_folder(src_dir, folder=None):
             "files": files, "containers": containers}
 
 
+@kspkg_write.locked
 def deploy_native(pkg_dir, dry_run=False, folder=None, display_name=None):
     """Install a track at its OWN paths - no stock track is overwritten.
 
@@ -590,6 +592,7 @@ def _display_name_for(folder):
     return name
 
 
+@kspkg_write.locked
 def fix_track_naming(dry_run=False):
     """Consolidate every folder onto ONE display name on BOTH archives.
 
@@ -667,6 +670,7 @@ def fix_track_naming(dry_run=False):
             "failed": [r for r in results if not r["ok"]]}
 
 
+@kspkg_write.locked
 def redeclare_tracks(dry_run=False):
     """Re-register every loose custom track that a content update wiped.
 
@@ -739,6 +743,7 @@ def redeclare_tracks(dry_run=False):
             "already_registered": len(client_track_folders()) - len(missing)}
 
 
+@kspkg_write.locked
 def redeclare_client_tracks(dry_run=False):
     """The client-side twin of redeclare_tracks().
 
@@ -875,6 +880,7 @@ def restore_imported(only=None, progress=None):
             "checked": len(want)}
 
 
+@kspkg_write.locked
 def register_client_track(folder, meta=None):
     """Write this track into the CLIENT's tracks.table + containers table.
 
@@ -956,6 +962,7 @@ def register_client_track(folder, meta=None):
             "layout": layout, "modes": modes, "written": written}
 
 
+@kspkg_write.locked
 def unregister_client_track(folder, display_name=""):
     """Take a track back out of the CLIENT's tracks.table + containers table.
 
@@ -1021,6 +1028,7 @@ def unregister_client_track(folder, display_name=""):
             "written": written}
 
 
+@kspkg_write.locked
 def restore():
     """Put the pre-deploy archive back."""
     kspkg = server_kspkg()

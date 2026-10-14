@@ -113,8 +113,11 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/mods" | "/api/mods/audit" | "/api/cars/map" | "/api/viewer/cars"
             | "/api/cars" | "/api/tracks"
             | "/api/gamesettings" | "/api/gamesettings/read" | "/api/gamesettings/backups"
-            | "/api/assists" | "/api/drive/fav" | "/api/tracks/installed"),
-        Method::POST => matches!(path, "/api/config"),
+            | "/api/assists" | "/api/drive/fav" | "/api/tracks/installed"
+            | "/api/trackdeploy" | "/api/tracks/missing" | "/api/splines"),
+        Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
+            | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
+            | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"),
         _ => false,
     }
 }
@@ -148,12 +151,22 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         let (c, v) = auth::deny_browser();
         return Ok(json_resp(c, &v));
     }
+    // ⚠ The body is read ONCE and kept, so a route that turns out to need
+    // the backend (decided from the body) can still be passed on intact.
+    let (parts, rbody) = req.into_parts();
+    let bytes = if write { to_bytes(rbody, 16 << 20).await.unwrap_or_default() } else { Default::default() };
     let body: Value = if write {
-        let bytes = to_bytes(req.into_body(), 16 << 20).await.unwrap_or_default();
         serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}))
     } else {
-        drop(req);
         Value::Null
+    };
+    let bs = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let bb = |k: &str| match body.get(k) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Null) | None => false,
+        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(_) => true,
     };
     let out = match (write, path.as_str()) {
         (false, "/api/config") => json_resp(200, &config::public_cfg(&cfg)),
@@ -221,6 +234,46 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                 "count": n,
                 "error": t.get("error").cloned().unwrap_or(Value::Null),
             }))
+        }
+        (false, "/api/trackdeploy") => {
+            let dir = q_get(&query, "dir");
+            json_resp(200, &blocking(move || {
+                let mut v = crate::trackdeploy::state();
+                if let (Some(a), Value::Object(b)) = (v.as_object_mut(), crate::trackdeploy::packages(dir.as_deref())) {
+                    a.extend(b);
+                }
+                v["imported"] = json!(crate::trackimport::importable());
+                v
+            }).await)
+        }
+        (false, "/api/tracks/missing") => json_resp(200, &blocking(|| {
+            let m = crate::trackdeploy::missing_from_client();
+            json!({"ok": true, "count": m.len(), "missing": m})
+        }).await),
+        (false, "/api/splines") => json_resp(200, &blocking(crate::splines::status).await),
+        (true, "/api/splines/ship") => {
+            let (all, f, l) = (bb("all"), bs("folder"), bs("layout"));
+            json_resp(200, &blocking(move || if all { crate::splines::ship("", "") } else { crate::splines::ship(&f, &l) }).await)
+        }
+        (true, "/api/trackdeploy/deploy") => {
+            // native deploy of an imported track folder is ours; a slot-borrow
+            // package (manifest.json) or the legacy injector is the backend's
+            let p = bs("path");
+            let native = bb("native");
+            if !native || p.is_empty() || std::path::Path::new(&p).join("manifest.json").is_file() {
+                return Err(Request::from_parts(parts, Body::from(bytes)));
+            }
+            let dry = bb("dry_run");
+            json_resp(200, &blocking(move || crate::trackdeploy::deploy_native(std::path::Path::new(&p), dry, None, None)).await)
+        }
+        (true, "/api/trackdeploy/restore") => json_resp(200, &blocking(crate::trackdeploy::restore).await),
+        (true, "/api/trackdeploy/redeclare") => {
+            let dry = bb("dry_run");
+            json_resp(200, &blocking(move || crate::trackdeploy::redeclare_tracks(dry)).await)
+        }
+        (true, "/api/trackdeploy/redeclare_client") => {
+            let dry = bb("dry_run");
+            json_resp(200, &blocking(move || crate::trackdeploy::redeclare_client_tracks(dry)).await)
         }
         (true, "/api/config") => match config::save(&body) {
             Ok(v) => json_resp(200, &v),

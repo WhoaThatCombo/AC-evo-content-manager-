@@ -158,6 +158,7 @@ fn apply(records: &mut Vec<Rec>, changes: &[(String, Vec<u8>)], mut cursor: u64,
 /// Copy `src` to `dst`, adding or replacing entries. Nothing in the data
 /// region moves; payloads go where the table used to begin.
 pub fn write_archive(src: &Path, dst: &Path, changes: &[(String, Vec<u8>)]) -> Result<Value, String> {
+    let _lock = crate::archlock::lock()?;
     if !is_encrypted(src).map_err(|e| e.to_string())? {
         return Err(format!("{} is not an encrypted archive - refusing to write", src.display()));
     }
@@ -180,6 +181,7 @@ pub fn write_archive(src: &Path, dst: &Path, changes: &[(String, Vec<u8>)]) -> R
 /// previous 64 MiB tail is saved as <archive>.bak_tables first, and put back
 /// if anything fails.
 pub fn write_inplace(archive: &Path, changes: &[(String, Vec<u8>)]) -> Result<Value, String> {
+    let _lock = crate::archlock::lock()?;
     if !is_encrypted(archive).map_err(|e| e.to_string())? {
         return Err(format!("{} is not an encrypted archive - refusing to write", archive.display()));
     }

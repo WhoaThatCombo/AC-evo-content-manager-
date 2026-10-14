@@ -40,10 +40,58 @@ phase 0 - never at the file offset. Table records are 256-byte aligned, so they
 are phase 0 too. Getting this wrong yields a readback showing neither the old
 nor the new content.
 """
+import contextlib
+import functools
 import os
 import struct
+import sys
 
 from . import kspkg
+
+# ⚠ ONE writer at a time, across PROCESSES. While ACECM is being ported to
+# Rust, the native shell and this backend can both write content.kspkg (a
+# deploy clicked in one while the other deploys at server start). Two
+# writers on one archive corrupt it, and a read-edit-write of the track
+# tables interleaved with another loses a row - so every archive edit holds
+# this named mutex for its whole duration. The Rust side takes the same name
+# (native/src/archlock.rs). A Windows mutex is recursive for its owner, so
+# nested locked calls on one thread are fine.
+_MUTEX_NAME = "Local\\ACECM_archive_write"
+
+
+@contextlib.contextmanager
+def archive_lock(timeout_s=600):
+    if sys.platform != "win32":
+        yield
+        return
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    k32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    h = k32.CreateMutexW(None, False, _MUTEX_NAME)
+    if not h:
+        yield
+        return
+    r = k32.WaitForSingleObject(h, int(timeout_s * 1000))
+    if r not in (0, 0x80):          # WAIT_OBJECT_0, WAIT_ABANDONED
+        k32.CloseHandle(h)
+        raise TimeoutError("another ACECM process is writing the archive")
+    try:
+        yield
+    finally:
+        k32.ReleaseMutex(h)
+        k32.CloseHandle(h)
+
+
+def locked(fn):
+    @functools.wraps(fn)
+    def wrap(*a, **kw):
+        with archive_lock():
+            return fn(*a, **kw)
+    return wrap
 
 M64 = (1 << 64) - 1
 FNV_BASIS = 0xcbf29ce484222325
@@ -122,6 +170,7 @@ def repair_headers(records):
     return fixed
 
 
+@locked
 def write_inplace(archive, changes):
     """Replace or add entries by rewriting only the 64 MiB index tail.
 
@@ -181,6 +230,7 @@ def write_inplace(archive, changes):
             "backup": bak}
 
 
+@locked
 def write_archive(src, dst, changes, progress=None):
     """Copy `src` to `dst`, adding or replacing entries.
 
