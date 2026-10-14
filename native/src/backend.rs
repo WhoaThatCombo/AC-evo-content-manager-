@@ -680,3 +680,172 @@ pub fn join(server_id: &Value, shape: &str, tcp: Value, udp: Value, password: &s
         None => json!({"ok": false, "error": "no http client"}),
     }
 }
+
+// ------------------------------------------------- the public server list --
+fn list_cache() -> PathBuf {
+    paths::data().join("server_list.json")
+}
+
+/// captured_at of the saved list, or 0 (cheap: the stamp is near the top).
+pub fn cached_at(path: &Path) -> u64 {
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(path) else { return 0 };
+    let mut head = vec![0u8; 4096];
+    let n = f.take(4096).read(&mut head).unwrap_or(0);
+    let head = String::from_utf8_lossy(&head[..n]);
+    let Some(i) = head.find("\"captured_at\"") else { return 0 };
+    let rest = &head[i + 13..];
+    let digits: String = rest.trim_start_matches([':', ' ']).chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().unwrap_or(0)
+}
+
+pub struct LobbyState {
+    pub running: bool,
+    pub last_try: Option<Instant>,
+    pub last: Value,
+}
+
+pub static LOBBY: Mutex<LobbyState> = Mutex::new(LobbyState { running: false, last_try: None, last: Value::Null });
+static LOBBY_DONE: std::sync::Condvar = std::sync::Condvar::new();
+const LOBBY_STALE: u64 = 300;
+const LOBBY_RETRY: u64 = 60;
+
+/// Pull the public list from the Kunos lobby without the game (single
+/// flight: a second caller waits for the first fetch). ⚠ Never while the
+/// game runs - the proxy captures it then, and a second "EVO" on the
+/// account is not worth it.
+pub fn lobby_fetch(wait: bool, timeout_s: u64) -> Value {
+    if procs::game_running() {
+        return json!({"ok": false, "error": "the game is running", "fallback": true});
+    }
+    {
+        let mut g = LOBBY.lock().unwrap();
+        if g.running {
+            if !wait {
+                return json!({"ok": true, "busy": true});
+            }
+            let (g2, _) = LOBBY_DONE.wait_timeout_while(g, Duration::from_secs(timeout_s), |s| s.running).unwrap();
+            return if g2.last.is_null() { json!({"ok": false, "error": "timed out"}) } else { g2.last.clone() };
+        }
+        g.running = true;
+        g.last_try = Some(Instant::now());
+    }
+    let mut res = lobby_fetch_run(timeout_s);
+    if res.get("at").is_none() {
+        res["at"] = json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+    }
+    let mut g = LOBBY.lock().unwrap();
+    g.last = res.clone();
+    g.running = false;
+    LOBBY_DONE.notify_all();
+    res
+}
+
+fn lobby_fetch_run(timeout_s: u64) -> Value {
+    let exe = game_exe();
+    let game_dir = if exe.is_empty() { detect::find("game_dir", false) }
+                   else { Path::new(&exe).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default() };
+    if game_dir.is_empty() || !Path::new(&game_dir).join("steam_api64.dll").is_file() {
+        return json!({"ok": false, "fallback": true, "error": "AC EVO's install folder was not found"});
+    }
+    if !protos::has("MultiplayerServerListResponseServerList") {
+        protos::extract(false);
+    }
+    if !protos::has("MultiplayerServerListResponseServerList") {
+        return json!({"ok": false, "fallback": true, "error": "the game's message schemas are missing"});
+    }
+    let t = Instant::now();
+    let mut c = std::process::Command::new(std::env::current_exe().unwrap_or_default());
+    c.args(["--tool", "lobby_fetch", "--out", &list_cache().to_string_lossy(), "--game-dir", &game_dir])
+        .env("ACECM_PROTOS", protos::cache_dir()).current_dir(paths::data())
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    procs::hide(&mut c);
+    let child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => return json!({"ok": false, "fallback": true, "error": e.to_string()}),
+    };
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let _ = tx.send(child.wait_with_output()); });
+    let out = match rx.recv_timeout(Duration::from_secs(timeout_s)) {
+        Ok(Ok(o)) => o,
+        _ => { procs::kill(pid); return json!({"ok": false, "fallback": true, "error": "the lobby fetch timed out"}) }
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut res = text.lines().rev().find_map(|l| { let l = l.trim(); if l.starts_with('{') { serde_json::from_str::<Value>(l).ok() } else { None } })
+        .unwrap_or_else(|| {
+            let tail: String = format!("{}{}", text, String::from_utf8_lossy(&out.stderr)).trim().chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
+            json!({"ok": false, "error": if tail.is_empty() { format!("exit {:?}", out.status.code()) } else { tail }})
+        });
+    res["spawn_ms"] = json!(t.elapsed().as_millis() as u64);
+    if res["ok"] != true {
+        res["fallback"] = json!(true);
+    }
+    res
+}
+
+/// Refresh in the background when the saved list is stale. Never blocks.
+pub fn lobby_prefetch(max_age: u64) -> bool {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if now.saturating_sub(cached_at(&list_cache())) < max_age {
+        return false;
+    }
+    {
+        let g = LOBBY.lock().unwrap();
+        if g.running || g.last_try.map(|t| t.elapsed().as_secs() < LOBBY_RETRY).unwrap_or(false) {
+            return false;
+        }
+    }
+    if procs::game_running() {
+        return false;
+    }
+    std::thread::spawn(|| lobby_fetch(false, 30));
+    true
+}
+
+pub fn lobby_prefetch_default() -> bool {
+    lobby_prefetch(LOBBY_STALE)
+}
+
+/// Every public EVO server: whichever copy is NEWER, the proxy's capture or
+/// the saved list (a 9:00 capture must not hide - or overwrite - a 9:30
+/// direct fetch).
+pub fn server_list() -> Value {
+    let cache = list_cache();
+    if !procs::tcp_listen_pids(8093).is_empty() {
+        let got = reqwest::blocking::Client::builder().timeout(Duration::from_millis(1500)).build().ok()
+            .and_then(|c| c.get(format!("{CONTROL}/servers")).send().ok())
+            .and_then(|r| r.text().ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        if let Some(Value::Object(mut g)) = got {
+            let live = g.get("servers").and_then(|s| s.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+            let at = g.get("captured_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            if live && at >= cached_at(&cache) {
+                let mut out = serde_json::Map::new();
+                out.insert("ok".into(), json!(true));
+                out.extend(std::mem::take(&mut g));
+                let v = Value::Object(out);
+                let _ = std::fs::write(&cache, profiles::py_dumps(&v));
+                return v;
+            }
+        }
+    }
+    match std::fs::read(&cache).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+        Some(Value::Object(mut got)) => {
+            let direct = got.get("source").and_then(|v| v.as_str()) == Some("lobby");
+            let mtime = std::fs::metadata(&cache).ok().and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            let at = got.get("captured_at").and_then(|v| v.as_u64()).filter(|x| *x != 0).unwrap_or(mtime);
+            got.insert("ok".into(), json!(true));
+            got.insert("cached".into(), json!(!direct));
+            got.insert("captured_at".into(), json!(at));
+            got.insert("note".into(), json!(if direct { "fetched from the lobby directly" } else {
+                "from the last time the in-game browser was open - player counts and pings will be stale, but it is enough to see what content a server needs" }));
+            if LOBBY.lock().unwrap().running {
+                got.insert("refreshing".into(), json!(true));
+            }
+            Value::Object(got)
+        }
+        _ => json!({"ok": false, "error": "FileNotFoundError",
+                    "hint": "start the proxy backend, then open Multiplayer in-game once so the list passes through - after that it is remembered and usable with the game closed"}),
+    }
+}

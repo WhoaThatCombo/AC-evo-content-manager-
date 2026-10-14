@@ -18,6 +18,7 @@ pub mod kspkg_write;
 pub mod livery;
 pub mod lobbyproxy;
 pub mod lobby;
+pub mod lobbyfetch;
 pub mod logs;
 pub mod misc;
 pub mod mods;

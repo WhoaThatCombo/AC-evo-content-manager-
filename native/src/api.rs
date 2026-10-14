@@ -150,6 +150,16 @@ async fn native_internal(peer: IpAddr, req: Request, path: &str) -> Response {
         }
         "/api/_native/backend/stop" => blocking(crate::backend::stop).await,
         "/api/_native/backend/state" => blocking(crate::backend::state).await,
+        "/api/_native/lobby/fetch" => {
+            let wait = body.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
+            let t = body.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
+            blocking(move || crate::backend::lobby_fetch(wait, t)).await
+        }
+        "/api/_native/lobby/prefetch" => {
+            let age = body.get("max_age").and_then(|v| v.as_u64()).unwrap_or(300);
+            json!(crate::backend::lobby_prefetch(age))
+        }
+        "/api/_native/lobby/servers" => blocking(crate::backend::server_list).await,
         _ => json!({"ok": false, "error": "not found"}),
     };
     json_resp(200, &v)
@@ -176,7 +186,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/trackdeploy" | "/api/tracks/missing" | "/api/splines"
             | "/api/share/auto" | "/api/browser/local" | "/api/lobby"
             | "/api/profiles" | "/api/server/status" | "/api/server/log"
-            | "/api/backend" | "/api/backend/log" | "/api/join/state" | "/api/browser/why"),
+            | "/api/backend" | "/api/backend/log" | "/api/join/state" | "/api/browser/why"
+            | "/api/browser"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -428,6 +439,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let mode = q_get(&query, "mode").unwrap_or_else(|| "proxy".into());
             json_resp(200, &crate::backend::log(&mode, 80))
         }
+        (false, "/api/browser") => json_resp(200, &blocking(crate::backend::server_list).await),
         (false, "/api/join/state") => json_resp(200, &blocking(crate::backend::join_state).await),
         (false, "/api/browser/why") => json_resp(200, &blocking(crate::backend::browser_chain).await),
         (true, "/api/backend/start") => {

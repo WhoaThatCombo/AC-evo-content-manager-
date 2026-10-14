@@ -892,6 +892,12 @@ def join_state():
 
 
 def server_list():
+    if _NATIVE_URL:
+        return _native("/api/_native/lobby/servers", timeout=20)
+    return _server_list_local()
+
+
+def _server_list_local():
     """Every public EVO server: whichever copy is NEWER, the proxy's or ours.
 
     Two things fill this. The proxy captures the list whenever the game asks
@@ -977,6 +983,15 @@ LOBBY_RETRY = 60        # after a failed try, wait this long before another
 
 
 def lobby_fetch(wait=True, timeout=30):
+    # ⚠ one Steam session at a time: with the shell up IT runs the fetch
+    if _NATIVE_URL:
+        return _native("/api/_native/lobby/fetch",
+                       {"wait": bool(wait), "timeout": int(timeout)},
+                       timeout=timeout + 15)
+    return _lobby_fetch_local(wait, timeout)
+
+
+def _lobby_fetch_local(wait=True, timeout=30):
     """Pull the public list from the Kunos lobby without starting the game.
 
     Runs tools/lobby_fetch.py as a separate process (see its docstring for
@@ -1061,6 +1076,13 @@ def _lobby_fetch_run(timeout):
 
 
 def lobby_prefetch(max_age=LOBBY_STALE):
+    if _NATIVE_URL:
+        return _native("/api/_native/lobby/prefetch", {"max_age": max_age},
+                       timeout=5) is True
+    return _lobby_prefetch_local(max_age)
+
+
+def _lobby_prefetch_local(max_age=LOBBY_STALE):
     """Refresh in the background if the saved list is stale. Never blocks."""
     cache = os.path.join(config.DATA, "server_list.json")
     now = time.time()
