@@ -511,7 +511,7 @@ def _watch_memory(pid, limit_gb=None):
                 "KILLED runaway server pid %s: %.1f GB exceeded the %.0f GB "
                 "limit. Usual cause: started on a port already in use, which "
                 "makes it spin retrying its sockets and leak.",
-                pid, int(out)/(1<<30), limit/(1<<30))
+                pid, ws/(1<<30), limit/(1<<30))
             return
 
 
