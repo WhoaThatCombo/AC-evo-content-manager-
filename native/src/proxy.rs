@@ -4,6 +4,7 @@
 //! and big downloads flow as they arrive.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -39,11 +40,34 @@ fn copy_headers(from: &HeaderMap, drop_ours: bool) -> HeaderMap {
     out
 }
 
+// 0 = starting, 1 = ready, 2 = never came up
+static BACKEND: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_backend_ready(ok: bool) {
+    BACKEND.store(if ok { 1 } else { 2 }, Ordering::SeqCst);
+}
+
+/// Hold a request that needs the backend until it is up (it is still
+/// importing for the first second or two after launch).
+async fn wait_backend() -> bool {
+    for _ in 0..1800 {
+        match BACKEND.load(Ordering::SeqCst) {
+            1 => return true,
+            2 => return false,
+            _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    }
+    false
+}
+
 async fn pass(
     State(be): State<Arc<Backend>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Response {
+    if !wait_backend().await {
+        return (StatusCode::BAD_GATEWAY, "ACECM backend did not start").into_response();
+    }
     let (parts, body) = req.into_parts();
     let pq = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let url = format!("{}{}", be.base, pq);
@@ -89,7 +113,10 @@ async fn dispatch(
     if get && !path.starts_with("/api/") {
         return crate::web::serve(path);
     }
-    pass(state, peer, req).await
+    match crate::api::handle(peer.0.ip(), req).await {
+        Ok(resp) => resp,
+        Err(req) => pass(state, peer, req).await,
+    }
 }
 
 pub fn router(be: Arc<Backend>) -> Router {

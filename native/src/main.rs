@@ -5,6 +5,10 @@
 //! not ported yet (see sidecar.rs, proxy.rs, native/PORTING.md).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod api;
+mod auth;
+mod config;
+mod detect;
 mod paths;
 mod proxy;
 mod sidecar;
@@ -33,6 +37,12 @@ fn message_box(msg: &str) {
     }
 }
 
+fn message_box_any(msg: &str) {
+    eprintln!("{msg}");
+    #[cfg(windows)]
+    message_box(msg);
+}
+
 fn main() {
     let listen = paths::listen();
     // ⚠ Bind the public port FIRST: if another ACECM already has it, say so
@@ -43,12 +53,19 @@ fn main() {
             listen.port)));
     std_listener.set_nonblocking(true).ok();
 
-    let mut side = sidecar::Sidecar::start()
+    let side = sidecar::Sidecar::start()
         .unwrap_or_else(|e| fail(&format!("could not start the ACECM backend: {e}")));
-    if !side.wait_ready(Duration::from_secs(60)) {
-        side.stop();
-        fail("the ACECM backend did not start - see data\\native_backend.log");
-    }
+    // ⚠ Do NOT wait for it here. The window, the page and every ported
+    // route are ready at once; only a request that needs the backend waits
+    // (proxy::wait_backend) - that is the startup the user sees.
+    let addr = side.addr;
+    std::thread::spawn(move || {
+        let ok = sidecar::probe(addr, Duration::from_secs(90));
+        proxy::set_backend_ready(ok);
+        if !ok {
+            message_box_any("the ACECM backend did not start - see data\\native_backend.log");
+        }
+    });
     let backend = Arc::new(proxy::Backend {
         base: format!("http://{}", side.addr),
         secret: side.secret.clone(),

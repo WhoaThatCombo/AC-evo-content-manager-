@@ -179,6 +179,29 @@ def _env_overrides(cfg):
 
 
 CFG = _env_overrides(_load())
+_CFG_MTIME = [0.0]
+
+
+def refresh():
+    """Re-read config.json if something else changed it.
+
+    ⚠ While the Rust shell is being ported in, it SAVES settings too (it
+    answers /api/config itself). This process only read the file at start,
+    so without this it would keep acting on the old values. One stat per
+    request; a reload only when the mtime moves.
+    """
+    try:
+        m = os.path.getmtime(config_path())
+    except OSError:
+        return
+    if _CFG_MTIME[0] == 0.0:
+        _CFG_MTIME[0] = m
+        return
+    if m != _CFG_MTIME[0]:
+        _CFG_MTIME[0] = m
+        fresh = _env_overrides(_load())
+        CFG.clear()
+        CFG.update(fresh)
 
 
 def save(patch):
@@ -194,6 +217,10 @@ def save(patch):
     path = config_path()
     json.dump(cfg, open(path, "w", encoding="utf-8"), indent=2)
     CFG.update(_env_overrides(dict(cfg)))
+    try:
+        _CFG_MTIME[0] = os.path.getmtime(path)     # our own write, not news
+    except OSError:
+        pass
     return public_cfg()
 
 

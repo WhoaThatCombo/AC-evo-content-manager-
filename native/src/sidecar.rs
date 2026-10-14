@@ -82,7 +82,23 @@ impl Sidecar {
         })
     }
 
+}
+
+/// Block until something accepts connections on `addr` (or give up).
+pub fn probe(addr: SocketAddr, limit: Duration) -> bool {
+    let until = Instant::now() + limit;
+    while Instant::now() < until {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+impl Sidecar {
     /// Block until the backend accepts connections (or gives up).
+    #[allow(dead_code)]
     pub fn wait_ready(&mut self, limit: Duration) -> bool {
         let until = Instant::now() + limit;
         while Instant::now() < until {

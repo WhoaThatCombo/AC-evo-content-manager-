@@ -421,6 +421,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------------- GET --
     def do_GET(self):
+        config.refresh()
         path, _, qs = self.path.partition("?")
         q = urllib.parse.parse_qs(qs)
         # ⚠ Static files are served to anyone. The page has to LOAD before it
@@ -835,6 +836,7 @@ class Handler(BaseHTTPRequestHandler):
             events.kick()
 
     def _do_post(self):
+        config.refresh()
         path, _, qs = self.path.partition("?")
         if not self._admin_ok(urllib.parse.parse_qs(qs)):
             return self._deny_remote()
