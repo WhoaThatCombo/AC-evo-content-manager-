@@ -102,6 +102,13 @@ async fn thumb(peer: IpAddr, req: Request, path: &str, query: &str) -> Result<Re
 
 static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static BACKEND_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static QUIT: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+
+/// How the app quits (the window owner hands this in): Quit in the UI must
+/// close the SHELL, which then stops the backend and the helpers.
+pub fn set_quit(f: impl Fn() + Send + Sync + 'static) {
+    let _ = QUIT.set(Box::new(f));
+}
 
 pub fn set_secret(s: &str) {
     let _ = SECRET.set(s.to_string());
@@ -192,7 +199,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
             | "/api/profiles/save" | "/api/profiles/delete" | "/api/server/start" | "/api/server/stop"
-            | "/api/backend/start" | "/api/backend/stop" | "/api/backend/redirect" | "/api/join"),
+            | "/api/backend/start" | "/api/backend/stop" | "/api/backend/redirect" | "/api/join"
+            | "/api/app/quit"),
         _ => false,
     }
 }
@@ -438,6 +446,14 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (false, "/api/backend/log") => {
             let mode = q_get(&query, "mode").unwrap_or_else(|| "proxy".into());
             json_resp(200, &crate::backend::log(&mode, 80))
+        }
+        (true, "/api/app/quit") => {
+            // answer first, then go (the page shows "closed" on the reply)
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                if let Some(q) = QUIT.get() { q() }
+            });
+            json_resp(200, &json!({"ok": true, "quitting": true}))
         }
         (false, "/api/browser") => json_resp(200, &blocking(crate::backend::server_list).await),
         (false, "/api/join/state") => json_resp(200, &blocking(crate::backend::join_state).await),

@@ -92,6 +92,8 @@ fn main() {
                     .expect("listener");
                 proxy::serve(l, be).await;
             });
+            let h = app.handle().clone();
+            acecm::api::set_quit(move || h.exit(0));
             // a stale saved server list is refreshed behind the first page
             std::thread::spawn(|| { let _ = acecm::backend::lobby_prefetch_default(); });
             WebviewWindowBuilder::new(app, "main",
