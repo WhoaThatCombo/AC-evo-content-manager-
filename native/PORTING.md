@@ -114,12 +114,17 @@ the per-launch secret), so there is one owner of server processes.
 ⚠ Python writes its JSON files in text mode: CRLF. Rust matches
 (profiles::write_json_indent2) so a file does not flip format.
 
+⚠ DROPPED (user, 2026-10-14: unused for over a month): live telemetry -
+the server memory tracker, the live map (/api/telemetry*, /api/live*,
+/live) and leaderboard. Not ported; servers started by the shell no longer
+launch a tracker. Hide the Telemetry UI before the Python backend is
+removed.
+
 Still Python: Drive's options / public list (/api/drive GET,
 /api/drive/servers - they merge the third-party directory) and the pasted
 address lookup (/api/drive/direct, fav/add - contentsync.discover), events
 (the live feed; it reads the drive job + lobby state from the shell),
 install/packs/share serving, registry content serving, thumbs rendering,
-telemetry (the Rust server start still spawns tools/server_telemetry.py),
 gameui extras (pit button, mph HUD), updater/installer, Linux (launch under
 Proton is still the backend's).
 Next: events -> Rust (SSE), then install/packs/registry.

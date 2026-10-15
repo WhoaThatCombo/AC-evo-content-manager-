@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use serde_json::{json, Map, Value};
 
-use crate::{autoshare, content, damage, detect, lobby, paths, procs, profiles, servers, sidecar,
+use crate::{autoshare, content, damage, detect, lobby, paths, procs, profiles, servers,
             splines, trackdeploy, trackimport, tracktables};
 
 pub fn template() -> Map<String, Value> {
@@ -533,9 +533,6 @@ fn start_inner(mut profile: Value) -> Value {
     bind_pid(&id, json!({"pid": pid, "started": now_secs(), "http_port": http}));
     lobby::write(&profile);
     std::thread::spawn(move || watch_memory(pid));
-    if truthy(profile.get("telemetry")) {
-        start_telemetry(&srv);
-    }
     json!({"ok": true, "pid": pid})
 }
 
@@ -552,25 +549,6 @@ fn watch_memory(pid: u32) {
             return;
         }
     }
-}
-
-/// The tracker still lives in tools/server_telemetry.py until telemetry is
-/// ported; started the way the launcher did, attached as the server comes up.
-fn start_telemetry(srv: &str) {
-    let tool = paths::repo().join("tools").join("server_telemetry.py");
-    if !tool.is_file() {
-        return;
-    }
-    let dir = Path::new(srv).join("serverConfig");
-    let _ = std::fs::create_dir_all(&dir);
-    let Ok(log) = std::fs::File::create(dir.join("telemetry.log")) else { return };
-    let mut c = std::process::Command::new(sidecar::python());
-    c.args(["-u", &tool.to_string_lossy(), "--wait", "120", "--baseline-ai"])
-        .current_dir(srv).env("SERVER_DIR", srv)
-        .env("ACECM_PROTOS", crate::protos::cache_dir())
-        .stdout(log.try_clone().unwrap_or_else(|_| log.try_clone().unwrap())).stderr(log);
-    procs::hide(&mut c);
-    let _ = c.spawn();
 }
 
 /// CreateProcessW with a NEW HIDDEN console and stdout/stderr on `log`.
