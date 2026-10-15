@@ -450,6 +450,13 @@ pub fn unregister_track_into(pkg: &Path, folder: &str, display_name: &str, check
         Err(e) => return json!({"ok": false, "error": format!("table edit failed: {e}")}),
         _ => {}
     }
+    // ⚠ only a row that points at THIS folder: removing by name alone could
+    // take a stock track's rows out of the game
+    match tracktables::rows_for_folder(&tk, folder) {
+        Ok(rows) if rows.iter().any(|n| n.as_deref() == Some(display.as_str())) => {}
+        Ok(_) => return json!({"ok": false, "error": format!("\"{display}\" belongs to another track, not {folder} - nothing was removed")}),
+        Err(e) => return json!({"ok": false, "error": format!("table edit failed: {e}")}),
+    }
     let edit = tracktables::remove_track_row(&tk, &display)
         .and_then(|a| tracktables::remove_container_rows(&tc, &display).map(|b| (a, b)));
     let (new_tk, new_tc) = match edit {

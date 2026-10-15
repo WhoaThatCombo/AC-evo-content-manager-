@@ -86,6 +86,21 @@ fn row_name(v: &[u8]) -> Result<Option<String>, String> {
     Ok(name)
 }
 
+/// The base folder path (f2 -> f3) of one tracks.table row.
+fn row_base(v: &[u8]) -> Result<Option<String>, String> {
+    let mut base = None;
+    for g in walk(v)? {
+        if g.num == 2 && g.wire == 2 {
+            for h in walk(g.val.bytes())? {
+                if h.num == 3 && h.wire == 2 {
+                    base = Some(s(h.val.bytes()));
+                }
+            }
+        }
+    }
+    Ok(base)
+}
+
 pub fn registered_names(blob: &[u8]) -> Result<BTreeSet<String>, String> {
     let mut out = BTreeSet::new();
     for f in walk(unwrap(blob)?)? {
@@ -229,6 +244,13 @@ pub fn upsert_track_row(blob: &[u8], display_name: &str, folder: &str, template_
         if name.as_deref() != Some(display_name) {
             out.extend(emit(&f));
             continue;
+        }
+        // ⚠ the name is taken by ANOTHER folder (a stock track, say "Road
+        // Atlanta"): repointing it would replace that track for good
+        if let Some(b) = row_base(v)? {
+            if !b.is_empty() && !b.eq_ignore_ascii_case(&base) {
+                return Err(format!("\"{display_name}\" is already the name of another track ({b}) - choose a different name"));
+            }
         }
         out.extend(emit_bytes(f.num, &rewrite_track_row(v, display_name, &base, &scene, &trackf)?));
         found = true;
