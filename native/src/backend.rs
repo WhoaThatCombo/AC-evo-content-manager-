@@ -125,7 +125,7 @@ fn make_cert(cert: &Path, key: &Path) -> Result<(Vec<String>, Vec<String>, Strin
 }
 
 // ------------------------------------------------------------ exe patches --
-fn game_exe() -> String {
+pub fn game_exe() -> String {
     let cfg = config::load();
     let e = config::get_str(&cfg, "game_exe");
     if !e.is_empty() && Path::new(&e).is_file() {

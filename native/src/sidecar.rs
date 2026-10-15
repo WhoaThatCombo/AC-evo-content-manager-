@@ -49,6 +49,13 @@ fn secret() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Is a backend process (still) part of this run?
+pub fn running() -> bool {
+    RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Sidecar {
     pub fn start(public_port: u16) -> std::io::Result<Sidecar> {
         let port = free_port();
@@ -78,6 +85,7 @@ impl Sidecar {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let child = cmd.spawn()?;
+        RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(Sidecar {
             addr: SocketAddr::from(([127, 0, 0, 1], port)),
             secret,
@@ -120,6 +128,7 @@ impl Sidecar {
     /// helpers, which a bare kill would leave running - then kill it if it
     /// has not gone in a few seconds.
     pub fn stop(&mut self) {
+        RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
         if let Ok(None) = self.child.try_wait() {
             self.ask_quit();
             let until = Instant::now() + Duration::from_secs(5);

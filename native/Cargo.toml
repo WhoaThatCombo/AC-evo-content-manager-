@@ -31,6 +31,7 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"]
 x509-parser = "0.16"
 time = "0.3"
 libloading = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"

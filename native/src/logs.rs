@@ -66,3 +66,40 @@ pub fn files() -> Value {
         .collect();
     json!({"dir": show(&d), "files": out})
 }
+
+// ------------------------------------------------------------- writing --
+// ⚠ Same file and the SAME line format as the backend's logging, so one log
+// tells the whole story while both halves run. Opened per line, appended and
+// closed: the backend rotates acecm.log by renaming it, and a handle held
+// open here would make that rename fail.
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn write(level: &str, msg: &str) {
+    use std::io::Write;
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let line = format!("{stamp} {level:<7} {:<12} acecm: {msg}\n", "native");
+    let _g = WRITE.lock();
+    let p = log_dir().join("acecm.log");
+    // no backend to rotate it any more: do it here, the same way
+    if !crate::sidecar::running() {
+        if std::fs::metadata(&p).map(|m| m.len() >= 4 << 20).unwrap_or(false) {
+            let _ = std::fs::remove_file(log_dir().join("acecm.log.5"));
+            for i in (1..5).rev() {
+                let _ = std::fs::rename(log_dir().join(format!("acecm.log.{i}")), log_dir().join(format!("acecm.log.{}", i + 1)));
+            }
+            let _ = std::fs::rename(&p, log_dir().join("acecm.log.1"));
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = f.write_all(line.as_bytes());
+    }
+    eprint!("{line}");
+}
+
+pub fn info(msg: impl AsRef<str>) {
+    write("INFO", msg.as_ref());
+}
+
+pub fn warn(msg: impl AsRef<str>) {
+    write("WARNING", msg.as_ref());
+}

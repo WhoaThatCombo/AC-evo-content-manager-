@@ -526,6 +526,13 @@ def _write_gamemode(pick):
 
 
 def _ensure_backend():
+    # the shell owns the Drive job and the proxy: ask it
+    if backend._NATIVE_URL:
+        return backend._native("/api/_native/drive/ensure_backend", timeout=60)
+    return _ensure_backend_local()
+
+
+def _ensure_backend_local():
     """The client is rewritten to localhost:448. Without the proxy the
     garage cannot list/set cars (BackendDisconnected)."""
     st = backend.state()
@@ -2064,6 +2071,12 @@ def options():
 
 
 def status():
+    if backend._NATIVE_URL:
+        return backend._native("/api/_native/drive/status", timeout=10)
+    return _status_local()
+
+
+def _status_local():
     pick = _load_pick()
     exe = backend._game_exe()
     return {

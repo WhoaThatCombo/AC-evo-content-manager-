@@ -167,6 +167,9 @@ async fn native_internal(peer: IpAddr, req: Request, path: &str) -> Response {
             json!(crate::backend::lobby_prefetch(age))
         }
         "/api/_native/lobby/servers" => blocking(crate::backend::server_list).await,
+        "/api/_native/lobby/state" => json!({"running": crate::backend::LOBBY.lock().unwrap().running}),
+        "/api/_native/drive/status" => blocking(crate::drive::status).await,
+        "/api/_native/drive/ensure_backend" => blocking(crate::drive::ensure_backend).await,
         _ => json!({"ok": false, "error": "not found"}),
     };
     json_resp(200, &v)
@@ -194,13 +197,14 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/share/auto" | "/api/browser/local" | "/api/lobby"
             | "/api/profiles" | "/api/server/status" | "/api/server/log"
             | "/api/backend" | "/api/backend/log" | "/api/join/state" | "/api/browser/why"
-            | "/api/browser"),
+            | "/api/browser" | "/api/drive/status"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
             | "/api/profiles/save" | "/api/profiles/delete" | "/api/server/start" | "/api/server/stop"
             | "/api/backend/start" | "/api/backend/stop" | "/api/backend/redirect" | "/api/join"
-            | "/api/app/quit"),
+            | "/api/app/quit" | "/api/drive" | "/api/drive/cancel" | "/api/drive/capture"
+            | "/api/drive/list" | "/api/backend/ensure"),
         _ => false,
     }
 }
@@ -462,6 +466,18 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let mode = { let m = bs("mode"); if m.is_empty() { "proxy".to_string() } else { m } };
             json_resp(200, &blocking(move || crate::backend::start(&mode)).await)
         }
+        (false, "/api/drive/status") => json_resp(200, &blocking(crate::drive::status).await),
+        (true, "/api/drive") => {
+            let b = body.clone();
+            json_resp(200, &blocking(move || crate::drive::start(&b)).await)
+        }
+        (true, "/api/drive/cancel") => json_resp(200, &crate::drive::cancel()),
+        (true, "/api/drive/capture") => json_resp(200, &blocking(crate::drive::capture_list).await),
+        (true, "/api/drive/list") => {
+            let id = { let i = bs("id"); if i.is_empty() { bs("local_id") } else { i } };
+            json_resp(200, &blocking(move || crate::drive::publish_local(&id)).await)
+        }
+        (true, "/api/backend/ensure") => json_resp(200, &blocking(crate::drive::ensure_backend).await),
         (true, "/api/backend/stop") => json_resp(200, &blocking(crate::backend::stop).await),
         (true, "/api/backend/redirect") => {
             let restore = bs("action").to_lowercase() == "restore";

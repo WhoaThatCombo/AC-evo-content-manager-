@@ -257,7 +257,10 @@ def selected_track(timeout=10):
                      timeout=timeout, attempts=2)
     except Exception:
         return ""
-    val = str(js_value(r) or "").strip()
+    # ⚠ the VALUE, not str() of the {"ok", "value"} dict - that was never
+    # empty, so the no-track guard in drive.start could not fire
+    v = js_value(r) or {}
+    val = str((v.get("value") if v.get("ok") else "") or "").strip()
     return "" if val in ("/", "-", "none", "null", "undefined") else val
 
 

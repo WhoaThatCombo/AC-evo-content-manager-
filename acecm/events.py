@@ -69,7 +69,10 @@ def _lobby():
     """When the saved public list was taken, and whether a fetch is running."""
     return {"at": backend._cached_at(os.path.join(config.DATA,
                                                   "server_list.json")),
-            "running": bool(backend.LOBBY["running"])}
+            "running": bool(backend._native("/api/_native/lobby/state",
+                                            timeout=5).get("running")
+                            if backend._NATIVE_URL
+                            else backend.LOBBY["running"])}
 
 
 def _timed(name, fn, fallback):
