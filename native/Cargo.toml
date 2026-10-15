@@ -1,6 +1,6 @@
 [package]
 name = "acecm"
-version = "1.0.23"
+version = "1.0.24"
 edition = "2021"
 description = "Assetto Corsa EVO Content Manager - native shell"
 license = "GPL-3.0-or-later"
