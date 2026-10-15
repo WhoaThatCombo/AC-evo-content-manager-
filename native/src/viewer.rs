@@ -1,7 +1,7 @@
 //! Which cars have geometry, across the base game and every installed mod -
 //! ported from viewer.packages / viewer.index. Cached in
 //! <data>/viewer/index.json (shared with the backend, same stamp format).
-//! Extraction / the evoview launch stay in the backend for now.
+//! Also launches evoview on a car or a track.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -193,4 +193,120 @@ pub fn index(refresh: bool) -> Value {
     let _ = std::fs::write(&cache, serde_json::to_vec(&json!({"stamp": st, "cars": cars})).unwrap_or_default());
     mark(&mut cars);
     json!({"cars": cars, "cached": false, "unreadable": bad})
+}
+
+// ----------------------------------------------------------- the viewer --
+static JOBS: std::sync::Mutex<Option<std::collections::HashMap<String, Value>>> = std::sync::Mutex::new(None);
+
+fn set_job(id: &str, state: &str, detail: &str) {
+    JOBS.lock().unwrap().get_or_insert_with(Default::default).insert(id.to_string(), json!({"state": state, "detail": detail}));
+    crate::logs::info(format!("viewer {id}: {state} {detail}"));
+}
+
+pub fn job(id: &str) -> Value {
+    JOBS.lock().unwrap().get_or_insert_with(Default::default).get(id).cloned().unwrap_or(json!({"state": "idle", "detail": ""}))
+}
+
+/// evoview.exe: the setting, then beside us, then the checkout next door.
+pub fn viewer_exe() -> Option<String> {
+    let cfg = crate::config::load();
+    let c = crate::config::get_str(&cfg, "viewer_exe").trim().to_string();
+    if !c.is_empty() && Path::new(&c).is_file() {
+        return Some(c);
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        roots.push(d.join("tools"));
+        roots.push(d.clone());
+    }
+    let repo = paths::repo();
+    roots.push(repo.join("tools"));
+    roots.push(repo.join("viewer"));
+    roots.push(root());
+    if let Some(p) = repo.parent() {
+        roots.push(p.join("evoview").join("target").join("release"));
+    }
+    roots.into_iter().map(|r| r.join("evoview.exe")).find(|p| p.is_file()).map(|p| s(&p))
+}
+
+/// Which package holds this car: the base game, or a mod's own.
+pub fn package_for(car_id: &str) -> Option<String> {
+    for c in index(false).get("cars").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        if c.get("id").and_then(|v| v.as_str()) == Some(car_id) {
+            return c.get("pkg").and_then(|v| v.as_str()).filter(|p| !p.is_empty()).map(String::from).or_else(package);
+        }
+    }
+    package()
+}
+
+/// evoview is a console binary: its own console, hidden; cwd is our data folder.
+fn launch(args: &[String], env: &[(&str, &str)]) -> Result<(), String> {
+    let exe = viewer_exe().ok_or("evoview.exe not found. Put it in the tools folder next to ACECM, or set viewer_exe in Settings.")?;
+    let log = crate::logs::log_dir().join("evoview.log");
+    crate::procs::spawn_hidden_console(Path::new(&exe), args, &paths::data(), &log, env).map(|_| ())
+}
+
+/// Launch the viewer on a car, read straight out of its package.
+pub fn open_car(car_id: &str, paint: &str) -> Result<Value, String> {
+    viewer_exe().ok_or("evoview.exe not found. Put it in the tools folder next to ACECM, or set viewer_exe in Settings.")?;
+    let pkg = package_for(car_id).ok_or("game install not found")?;
+    let mut args = vec![pkg.clone(), "--car".into(), car_id.to_string()];
+    if let Some(base) = package() {
+        if std::path::absolute(&base).ok() != std::path::absolute(&pkg).ok() {
+            args.push("--base".into());
+            args.push(base);
+        }
+    }
+    let env: Vec<(&str, &str)> = if paint.is_empty() { vec![] } else { vec![("EVOVIEW_PAINT", paint)] };
+    launch(&args, &env)?;
+    set_job(car_id, "open", "");
+    Ok(json!({"ok": true, "package": pkg}))
+}
+
+/// Free-look on a track: a loose imported folder wins, else the archive.
+pub fn open_track(folder: &str) -> Result<Value, String> {
+    let folder = folder.trim();
+    if folder.is_empty() {
+        return Err("no track folder".into());
+    }
+    viewer_exe().ok_or("evoview.exe not found. Put it in the tools folder next to ACECM, or set viewer_exe in Settings.")?;
+    let loose = Path::new(&crate::trackimport::tracks_dir()).join(folder);
+    let pkg = package();
+    let (args, src) = if loose.is_dir() {
+        let mut a = vec![s(&loose), "--track".into()];
+        if let Some(p) = &pkg {
+            a.push("--base".into());
+            a.push(p.clone());
+        }
+        (a, s(&loose))
+    } else {
+        let p = pkg.ok_or("game install not found")?;
+        (vec![p.clone(), "--track".into(), folder.to_string()], p)
+    };
+    launch(&args, &[])?;
+    set_job(&format!("track:{folder}"), "open", "");
+    crate::logs::info(format!("viewer track {folder} from {src}"));
+    Ok(json!({"ok": true, "folder": folder, "source": src}))
+}
+
+pub fn start_open(car_id: &str, paint: &str) -> Value {
+    set_job(car_id, "starting", "");
+    let (c, p) = (car_id.to_string(), paint.to_string());
+    std::thread::spawn(move || {
+        if let Err(e) = open_car(&c, &p) {
+            set_job(&c, "error", &e);
+        }
+    });
+    json!({"ok": true})
+}
+
+pub fn start_open_track(folder: &str) -> Value {
+    set_job(&format!("track:{folder}"), "starting", "");
+    let f = folder.to_string();
+    std::thread::spawn(move || {
+        if let Err(e) = open_track(&f) {
+            set_job(&format!("track:{f}"), "error", &e);
+        }
+    });
+    json!({"ok": true})
 }

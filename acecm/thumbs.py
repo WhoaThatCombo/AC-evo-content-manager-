@@ -266,6 +266,14 @@ def _render_jobs():
 
 
 def ensure_renders():
+    # the shell renders: one job, never two fighting over the GPU
+    if os.environ.get("ACECM_NATIVE_URL"):
+        from . import backend
+        return backend._native("/api/_native/thumbs/ensure", timeout=10) is True
+    return _ensure_renders_local()
+
+
+def _ensure_renders_local():
     """Kick a background render pass when cars are missing their picture.
 
     ⚠ The list GET deliberately never renders - doing so spawned an evoview
@@ -297,6 +305,11 @@ def ensure_renders():
 
 
 def job():
+    if os.environ.get("ACECM_NATIVE_URL"):
+        from . import backend
+        r = backend._native("/api/_native/thumbs/status", timeout=5)
+        return {k: v for k, v in r.items()
+                if k not in ("have", "covers", "covers_have", "cover_job")}
     return dict(_JOB)
 
 
@@ -582,4 +595,8 @@ def build_covers(force=False):
 
 
 def cover_job():
+    if os.environ.get("ACECM_NATIVE_URL"):
+        from . import backend
+        return backend._native("/api/_native/thumbs/status",
+                               timeout=5).get("cover_job") or {}
     return dict(_COVER_JOB)

@@ -317,3 +317,97 @@ pub fn exit_with_parent() {
         }
     });
 }
+
+/// Quote one argument the way CommandLineToArgvW reads it back.
+pub fn win_quote(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '"']) {
+        return a.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut slashes = 0;
+    for c in a.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(slashes));
+                slashes = 0;
+                out.push(c);
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(slashes * 2));
+    out.push('"');
+    out
+}
+
+/// Start a CONSOLE program with its own console, hidden, output to `log`,
+/// with extra environment. (CREATE_NO_WINDOW breaks console CRT startup.)
+#[cfg(windows)]
+pub fn spawn_hidden_console(exe: &std::path::Path, args: &[String], cwd: &std::path::Path, log: &std::path::Path, env: &[(&str, &str)]) -> Result<u32, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE};
+    use windows_sys::Win32::System::Threading::{CreateProcessW, CREATE_NEW_CONSOLE, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+                                                PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOW};
+    let w = |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain(Some(0)).collect() };
+    let mut cmd = win_quote(&exe.to_string_lossy());
+    for a in args {
+        cmd.push(' ');
+        cmd.push_str(&win_quote(a));
+    }
+    let mut cmdw: Vec<u16> = cmd.encode_utf16().chain(Some(0)).collect();
+    // environment block: ours plus the extras, sorted, double-NUL ended
+    let mut vars: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !env.iter().any(|(e, _)| e.eq_ignore_ascii_case(k))).collect();
+    vars.extend(env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    vars.sort_by_key(|(k, _)| k.to_uppercase());
+    let mut block: Vec<u16> = Vec::new();
+    for (k, v) in &vars {
+        block.extend(format!("{k}={v}").encode_utf16());
+        block.push(0);
+    }
+    block.push(0);
+    unsafe {
+        let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: std::ptr::null_mut(), bInheritHandle: 1 };
+        let lp = w(log.as_os_str());
+        let h = CreateFileW(lp.as_ptr(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, std::ptr::null_mut());
+        if h == INVALID_HANDLE_VALUE {
+            return Err(format!("cannot open {}", log.display()));
+        }
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+        si.wShowWindow = 0;
+        si.hStdOutput = h;
+        si.hStdError = h;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let cw = w(cwd.as_os_str());
+        let exew = w(exe.as_os_str());
+        let ok = CreateProcessW(exew.as_ptr(), cmdw.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 1,
+                                CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
+                                block.as_ptr() as *const _, cw.as_ptr(), &si, &mut pi);
+        CloseHandle(h);
+        if ok == 0 {
+            return Err(format!("CreateProcessW failed ({})", std::io::Error::last_os_error()));
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        Ok(pi.dwProcessId)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn spawn_hidden_console(exe: &std::path::Path, args: &[String], cwd: &std::path::Path, log: &std::path::Path, env: &[(&str, &str)]) -> Result<u32, String> {
+    let f = std::fs::File::create(log).map_err(|e| e.to_string())?;
+    let mut c = std::process::Command::new(exe);
+    c.args(args).current_dir(cwd).stdout(f.try_clone().map_err(|e| e.to_string())?).stderr(f);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.spawn().map(|ch| ch.id()).map_err(|e| e.to_string())
+}

@@ -149,6 +149,10 @@ def invalidate():
 
 
 def status():
+    # the shell runs compression: its state is the real one
+    if os.environ.get("ACECM_NATIVE_URL"):
+        from . import backend
+        return backend._native("/api/_native/compress/status", timeout=5)
     with _lock:
         return {"ok": True, **_state}
 

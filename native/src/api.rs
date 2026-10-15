@@ -203,26 +203,28 @@ async fn thumb(peer: IpAddr, req: Request, path: &str, query: &str) -> Result<Re
         return Ok(json_resp(c, &v));
     }
     if path == "/api/thumb/car" {
-        if q_flag(query, "big") || q_flag(query, "make") || q_flag(query, "force") {
-            return Err(req);
-        }
+        let (big, make, force) = (q_flag(query, "big"), q_flag(query, "make"), q_flag(query, "force"));
         let id = q_get(query, "id").unwrap_or_default();
         let preset = q_get(query, "preset").unwrap_or_default();
-        let hit = tokio::task::spawn_blocking(move || crate::thumbs::list_car(&id, &preset))
-            .await.ok().flatten();
+        // ⚠ list rows only ever READ the cache; big (the car you opened) and
+        // make (the Drive card) render that one car
+        let hit = tokio::task::spawn_blocking(move || if big || make || force {
+            crate::thumbs::car_for_request(&id, &preset, big, make, force)
+        } else {
+            crate::thumbs::list_car(&id, &preset)
+        }).await.ok().flatten();
         return Ok(match hit {
             Some(p) => png(&p),
             None => json_resp(404, &json!({"error": "no image"})),
         });
     }
     let folder = q_get(query, "folder").unwrap_or_default();
-    let p = tokio::task::spawn_blocking(move || {
-        crate::thumbs::track_path(&crate::thumbs::resolve_folder(&folder))
-    }).await.ok();
-    match p {
-        Some(p) if p.is_file() => Ok(png(&p)),
-        _ => Err(req), // not cached yet: the backend extracts or decodes it
-    }
+    let _ = req;
+    let p = tokio::task::spawn_blocking(move || crate::thumbs::track_cover(&folder)).await.ok().flatten();
+    Ok(match p {
+        Some(p) if p.is_file() => png(&p),
+        _ => json_resp(404, &json!({"error": "no image"})),
+    })
 }
 
 static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -305,6 +307,9 @@ async fn native_internal(peer: IpAddr, req: Request, path: &str) -> Response {
             json!({"path": p})
         }
         "/api/_native/progress" => blocking(crate::jobs::progress).await,
+        "/api/_native/thumbs/ensure" => json!(crate::thumbs::ensure_renders()),
+        "/api/_native/thumbs/status" => crate::thumbs::status(),
+        "/api/_native/compress/status" => crate::compress::status(),
         "/api/_native/drive/status" => blocking(crate::drive::status).await,
         "/api/_native/drive/ensure_backend" => blocking(crate::drive::ensure_backend).await,
         _ => json!({"ok": false, "error": "not found"}),
@@ -339,7 +344,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/browser/status" | "/api/browser/discover" | "/api/browser/tag" | "/api/browser/needs"
             | "/api/browser/plan" | "/api/share" | "/api/progress" | "/api/drop/status" | "/api/mods/scan"
             | "/api/library" | "/api/library/clip" | "/api/library/export" | "/api/pack/preview"
-            | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"),
+            | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"
+            | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -355,7 +361,9 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/assists" | "/api/gamesettings/write" | "/api/gamesettings/restore"
             | "/api/gamesettings/import" | "/api/gamesettings/restore_backup"
             | "/api/registry/save" | "/api/registry/delete" | "/api/share/track"
-            | "/api/auth/rotate" | "/api/auth/remote" | "/api/penalties/set"),
+            | "/api/auth/rotate" | "/api/auth/remote" | "/api/penalties/set"
+            | "/api/thumbs/build" | "/api/thumbs/covers" | "/api/viewer/open" | "/api/viewer/open_track"
+            | "/api/compress/start"),
         _ => false,
     }
 }
@@ -658,6 +666,19 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                 }
             }
         }
+        (false, "/api/thumbs/status") => json_resp(200, &blocking(crate::thumbs::status).await),
+        (true, "/api/thumbs/build") => { let f = bb("force"); json_resp(200, &crate::thumbs::build_all(f)) }
+        (true, "/api/thumbs/covers") => { let f = bb("force"); json_resp(200, &crate::thumbs::build_covers(f)) }
+        (false, "/api/viewer/job") => json_resp(200, &crate::viewer::job(&q_get(&query, "id").unwrap_or_default())),
+        (false, "/api/viewer/status") => json_resp(200, &blocking(|| json!({"exe": crate::viewer::viewer_exe(), "package": crate::viewer::package()})).await),
+        (true, "/api/viewer/open") => { let (id, paint) = (bs("id"), bs("paint")); json_resp(200, &crate::viewer::start_open(&id, &paint)) }
+        (true, "/api/viewer/open_track") => {
+            let f = { let f = bs("folder"); if f.is_empty() { bs("id") } else { f } };
+            json_resp(200, &crate::viewer::start_open_track(&f))
+        }
+        (false, "/api/compress") => { let r = q_flag(&query, "refresh"); json_resp(200, &blocking(move || crate::compress::measure(r, false)).await) }
+        (false, "/api/compress/status") => json_resp(200, &crate::compress::status()),
+        (true, "/api/compress/start") => { let u = bb("undo"); json_resp(200, &blocking(move || crate::compress::start(u)).await) }
         (false, "/api/penalties") => json_resp(200, &blocking(crate::penalties::status).await),
         (true, "/api/penalties/set") => {
             let (side, off) = (bs("side"), bb("off"));
