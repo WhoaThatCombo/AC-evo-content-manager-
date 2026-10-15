@@ -585,7 +585,7 @@ pub fn state() -> Value {
         "running": running(),
         "have_cert": cert.exists() && key.exists(),
         "cert_covers_lan": cert_covers(),
-        "tools_dir": paths::repo().join("tools").to_string_lossy(),
+        "tools_dir": crate::bundle::tools_dir().to_string_lossy(),
         "lan_ip": lan, "our_ips": ours,
         "launch_backend": redirect_url(),
         "client_patched": probe.get("rdata_patched").cloned().unwrap_or(Value::Null),

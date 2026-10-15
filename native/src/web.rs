@@ -16,7 +16,7 @@ fn web_dir() -> PathBuf {
     if let Ok(w) = std::env::var("ACECM_WEB") {
         return PathBuf::from(w);
     }
-    paths::repo().join("acecm").join("web")
+    crate::bundle::web_dir()
 }
 
 fn mime(p: &Path) -> &'static str {

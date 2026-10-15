@@ -219,6 +219,7 @@ pub fn viewer_exe() -> Option<String> {
         roots.push(d.join("tools"));
         roots.push(d.clone());
     }
+    roots.push(crate::bundle::tools_dir());
     let repo = paths::repo();
     roots.push(repo.join("tools"));
     roots.push(repo.join("viewer"));

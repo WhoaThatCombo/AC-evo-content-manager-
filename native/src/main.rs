@@ -210,6 +210,8 @@ fn main() {
     };
     std_listener.set_nonblocking(true).ok();
     updater::consume_rollback();
+    // the UI, catalogs and viewer this exe carries (release builds)
+    acecm::bundle::ensure();
     // what app.serve() used to start (the backend skips it under the shell)
     acecm::startup::run(listen.port);
     // leaked Python onefile folders from before the native build

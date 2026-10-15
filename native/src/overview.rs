@@ -31,7 +31,7 @@ pub fn tools_dir() -> String {
     if !d.is_empty() && Path::new(&d).is_dir() {
         return d;
     }
-    crate::paths::repo().join("tools").to_string_lossy().into_owned()
+    crate::bundle::tools_dir().to_string_lossy().into_owned()
 }
 
 fn server_exe() -> String {

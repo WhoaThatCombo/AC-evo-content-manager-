@@ -26,7 +26,7 @@ fn re(p: &'static str) -> &'static Regex {
 /// cars.json / events_*.json: the server folder, else the bundled copy.
 pub fn catalog_path(name: &str) -> String {
     let n = Path::new(name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let bundled = paths::repo().join("tools");
+    let bundled = crate::bundle::tools_dir();
     for base in [PathBuf::from(detect::effective_server_dir()), bundled] {
         if base.as_os_str().is_empty() {
             continue;

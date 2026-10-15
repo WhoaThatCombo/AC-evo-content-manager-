@@ -8,6 +8,7 @@ pub mod assists;
 pub mod autoshare;
 pub mod backend;
 pub mod auth;
+pub mod bundle;
 pub mod carsmap;
 pub mod carspecs;
 pub mod compress;
