@@ -146,8 +146,15 @@ Ported in the last stretch:
 * The exe carries the UI, cars.json, the event catalogs and evoview.exe
   (build.rs + bundle.rs), unpacked once per build to data/bundle.
 
+Building a release: `python build.py --native [--out DIR]` checks that
+acecm/version.py, native/Cargo.toml and native/tauri.conf.json agree,
+validates tools/cars.json, runs `cargo build --release` (2 jobs) and writes
+DIR/ACECM.exe (default dist/), removing any stale .sha256/.sig/.zip beside
+it. Sign with tools/release_sign.py as before. The exe's version resource
+carries the GPL notice, and LICENSE.txt is in the bundle.
+
 Left:
-* Linux: Proton launch (proton.py), evdev pit button (_input_posix.py),
+* Linux (parked by the user, 2026-10-15): Proton launch (proton.py), evdev pit button (_input_posix.py),
   /proc helpers (_proc_posix.py) - the Rust side has stubs only.
 * Delete the Python backend + sidecar code once a release build has been
   used for real; switch build.py / release tooling to the native exe.

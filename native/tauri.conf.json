@@ -1,9 +1,23 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ACECM",
+  "productName": "Assetto Corsa EVO Content Manager",
   "version": "1.0.21",
   "identifier": "com.whoathatcombo.acecm",
-  "build": { "frontendDist": "../acecm/web" },
-  "app": { "windows": [], "security": { "csp": null } },
-  "bundle": { "active": false, "icon": ["icons/icon.ico"] }
+  "build": {
+    "frontendDist": "../acecm/web"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "publisher": "ACECM",
+    "copyright": "Copyright (C) 2026 ACECM contributors. Free software, licensed under the GNU GPL v3 or later. See LICENSE.txt in this application."
+  }
 }

@@ -29,6 +29,7 @@ AssettoCorsaEVO.exe
 
 # --- build output -------------------------------------------------------------
 dist/
+dist-native/
 build_tmp/
 *.spec
 ACECM.version

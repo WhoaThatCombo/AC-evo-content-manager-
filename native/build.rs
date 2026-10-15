@@ -25,6 +25,15 @@ fn bundle() {
     }
     walk(&web, &web, &mut files);
     println!("cargo:rerun-if-changed={}", web.display());
+    // the licence the version resource points at ("LICENSE.txt in this
+    // application")
+    let lic = repo.join("LICENSE.txt");
+    println!("cargo:rerun-if-changed={}", lic.display());
+    if lic.is_file() {
+        files.push(("LICENSE.txt".into(), lic));
+    } else {
+        println!("cargo:warning=bundle: LICENSE.txt is missing");
+    }
     for name in ["cars.json", "events_practice.json", "events_race_weekend.json", "evoview.exe"] {
         let p = repo.join("tools").join(name);
         println!("cargo:rerun-if-changed={}", p.display());

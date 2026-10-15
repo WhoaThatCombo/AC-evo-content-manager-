@@ -603,7 +603,71 @@ def _signtool():
     return sorted(found)[-1] if found else None
 
 
+def _native_versions():
+    """(acecm/version.py, native/Cargo.toml, native/tauri.conf.json)."""
+    import json
+    import re
+    sys.path.insert(0, HERE)
+    from acecm.version import VERSION
+    cargo = open(os.path.join(HERE, "native", "Cargo.toml"), encoding="utf-8").read()
+    m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo)
+    conf = json.load(open(os.path.join(HERE, "native", "tauri.conf.json"),
+                          encoding="utf-8"))
+    return VERSION, (m.group(1) if m else ""), conf.get("version", "")
+
+
+def build_native(out_dir=None):
+    """The Rust + Tauri build (native/): one exe with the UI, catalogs and
+    viewer inside it, no Python. Same output name as the PyInstaller build
+    (dist/ACECM.exe), so publish_release.py and the updater are unchanged.
+
+    ⚠ The three version numbers must agree. The updater compares the
+    release tag with the version COMPILED INTO the exe (Cargo.toml); an exe
+    that still says the old number offers itself as an update forever.
+    """
+    py, cargo, conf = _native_versions()
+    if not (py == cargo == conf):
+        print(f"version mismatch: acecm/version.py={py} native/Cargo.toml={cargo} "
+              f"native/tauri.conf.json={conf} - set all three to the release")
+        return 1
+    if check_catalogue():
+        return 1
+    native = os.path.join(HERE, "native")
+    env = dict(os.environ)
+    # ⚠ never saturate the build machine: two compile jobs
+    env.setdefault("CARGO_BUILD_JOBS", "2")
+    print(f"cargo build --release (v{cargo}) ...")
+    r = subprocess.run(["cargo", "build", "--release"], cwd=native, env=env)
+    if r.returncode:
+        return r.returncode
+    meta = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"],
+                          cwd=native, capture_output=True, text=True, env=env)
+    import json
+    target = json.loads(meta.stdout)["target_directory"]
+    built = os.path.join(target, "release", "acecm.exe" if sys.platform == "win32" else "acecm")
+    out_dir = out_dir or DIST
+    os.makedirs(out_dir, exist_ok=True)
+    exe = os.path.join(out_dir, "ACECM.exe" if sys.platform == "win32" else "ACECM")
+    # ⚠ the checksum, signature and zip beside it belong to the PREVIOUS exe:
+    # left there, they would ship with this one and every update would fail
+    # verification
+    for stale in (exe + ".sha256", exe + ".sig", os.path.join(out_dir, "ACECM.zip")):
+        if os.path.isfile(stale):
+            os.remove(stale)
+            print(f"  removed stale {os.path.basename(stale)}")
+    shutil.copy2(built, exe)
+    mb = os.path.getsize(exe) / 1024 / 1024
+    print(f"\nOK  {exe}  ({mb:.1f} MB, native)")
+    if sys.platform == "win32":
+        sign(exe)
+    return 0
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--clean", action="store_true")
-    sys.exit(build(ap.parse_args().clean))
+    ap.add_argument("--native", action="store_true",
+                    help="build the Rust + Tauri app (native/) instead of PyInstaller")
+    ap.add_argument("--out", default=None, help="output folder (default dist/)")
+    a = ap.parse_args()
+    sys.exit(build_native(a.out) if a.native else build(a.clean))
