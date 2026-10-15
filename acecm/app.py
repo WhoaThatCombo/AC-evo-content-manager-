@@ -1877,56 +1877,59 @@ def serve():
     """
     logs.setup()
     from . import version
-    version.consume_rollback()
-    _rescan_content()
-    # ⚠ Off the request path, in the background. Sizing every shared entry
-    # walks thousands of files; doing it inside the first /api/registry/list
-    # meant a joiner's 4s probe timed out and the host looked like it was not
-    # running ACECM until they had retried enough times.
-    threading.Thread(target=registry.warm_public_list, daemon=True).start()
-    # public server list: a stale saved copy is refreshed from the lobby in
-    # the background, so the Play page opens on a fresh list (~2.5 s, no game)
-    try:
-        backend.lobby_prefetch()
-    except Exception as ex:                        # noqa: BLE001
-        logs.LOG.warning("lobby prefetch at startup: %s", ex)
-    # ⚠ Warm the EvoForge directory the same way, for the same reason. Since
-    # it became non-blocking (so a slow host cannot stall the Drive list past
-    # the point the browser gives up), the FIRST call returns whatever is
-    # cached - nothing, on a fresh start - and fills in afterwards. Without
-    # this, opening Drive straight after launching showed no directory
-    # servers at all, and only a second visit had them.
-    threading.Thread(
-        target=lambda: _quietly(lambda: evoreg.fetch(force=True)),
-        daemon=True).start()
-    # Reclaim leaked onefile extraction folders (see installer.sweep_bundles).
-    # Background: it walks %TEMP% and can delete gigabytes, and nothing on the
-    # first page depends on it.
-    def _sweep():
+    # ⚠ Under the native shell (ACECM_NATIVE_URL) the shell does all of this
+    # itself (native/src/startup.rs) - running both doubled every job.
+    if not os.environ.get("ACECM_NATIVE_URL"):
+        version.consume_rollback()
+        _rescan_content()
+        # ⚠ Off the request path, in the background. Sizing every shared entry
+        # walks thousands of files; doing it inside the first /api/registry/list
+        # meant a joiner's 4s probe timed out and the host looked like it was not
+        # running ACECM until they had retried enough times.
+        threading.Thread(target=registry.warm_public_list, daemon=True).start()
+        # public server list: a stale saved copy is refreshed from the lobby in
+        # the background, so the Play page opens on a fresh list (~2.5 s, no game)
         try:
-            from . import installer as _inst
-            _inst.sweep_bundles()
+            backend.lobby_prefetch()
+        except Exception as ex:                        # noqa: BLE001
+            logs.LOG.warning("lobby prefetch at startup: %s", ex)
+        # ⚠ Warm the EvoForge directory the same way, for the same reason. Since
+        # it became non-blocking (so a slow host cannot stall the Drive list past
+        # the point the browser gives up), the FIRST call returns whatever is
+        # cached - nothing, on a fresh start - and fills in afterwards. Without
+        # this, opening Drive straight after launching showed no directory
+        # servers at all, and only a second visit had them.
+        threading.Thread(
+            target=lambda: _quietly(lambda: evoreg.fetch(force=True)),
+            daemon=True).start()
+        # Reclaim leaked onefile extraction folders (see installer.sweep_bundles).
+        # Background: it walks %TEMP% and can delete gigabytes, and nothing on the
+        # first page depends on it.
+        def _sweep():
+            try:
+                from . import installer as _inst
+                _inst.sweep_bundles()
+            except Exception as ex:
+                logs.LOG.warning("bundle sweep: %s", ex)
+        threading.Thread(target=_sweep, daemon=True).start()
+        # entries written before autofill existed carry no address and a default
+        # port; one pass at startup settles them
+        try:
+            registry.backfill()
         except Exception as ex:
-            logs.LOG.warning("bundle sweep: %s", ex)
-    threading.Thread(target=_sweep, daemon=True).start()
-    # entries written before autofill existed carry no address and a default
-    # port; one pass at startup settles them
-    try:
-        registry.backfill()
-    except Exception as ex:
-        logs.LOG.warning("registry backfill: %s", ex)
-    # Drop leftover "(hosted here)" rows from old track deploys, then publish
-    # only what the saved profiles actually need.
-    try:
-        from . import autoshare
-        profs = servers.load()
-        autoshare.prune(profs)
-        for p in profs:
-            autoshare.publish(p)
-    except Exception as ex:
-        logs.LOG.warning("autoshare at start: %s", ex)
-    _watch_lobby()
-    _watch_hud()
+            logs.LOG.warning("registry backfill: %s", ex)
+        # Drop leftover "(hosted here)" rows from old track deploys, then publish
+        # only what the saved profiles actually need.
+        try:
+            from . import autoshare
+            profs = servers.load()
+            autoshare.prune(profs)
+            for p in profs:
+                autoshare.publish(p)
+        except Exception as ex:
+            logs.LOG.warning("autoshare at start: %s", ex)
+        _watch_lobby()
+        _watch_hud()
     # ⚠ the shell watches the pit button when it runs: two watchers would
     # send every press twice
     if not os.environ.get("ACECM_NATIVE_URL"):
@@ -1994,7 +1997,8 @@ def serve():
         lan = netutil.lan_ipv4() or ""
     except Exception:
         pass
-    _allow_share_port(port)
+    if not os.environ.get("ACECM_NATIVE_URL"):
+        _allow_share_port(port)
     print(f"Assetto Corsa EVO Content Manager\n  {url}")
     if lan:
         print(f"  share     : http://{lan}:{port}  (TCP {port} must be reachable)")
@@ -2071,7 +2075,8 @@ def main(mode="window", okflag=None, relaunch=False):
     # later window close is not mistaken for a failed update.
     from . import version
     version.confirm_update(okflag)
-    _autostart_proxy()
+    if not os.environ.get("ACECM_NATIVE_URL"):
+        _autostart_proxy()
     try:
         if mode == "window":
             from . import ui

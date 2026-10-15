@@ -42,6 +42,7 @@ pub mod patching;
 pub mod installer;
 pub mod overview;
 pub mod updater;
+pub mod startup;
 pub mod paths;
 pub mod pb;
 pub mod procs;

@@ -209,6 +209,8 @@ fn main() {
     };
     std_listener.set_nonblocking(true).ok();
     updater::consume_rollback();
+    // what app.serve() used to start (the backend skips it under the shell)
+    acecm::startup::run(listen.port);
     // leaked Python onefile folders from before the native build
     std::thread::spawn(|| { let _ = installer::sweep_bundles(); });
 
