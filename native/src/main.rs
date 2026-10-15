@@ -3,7 +3,12 @@
 //! Phase 1 of the Rust port: this process owns the window and the public
 //! HTTP port, and runs the Python backend hidden behind it for every route
 //! not ported yet (see sidecar.rs, proxy.rs, native/PORTING.md).
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// ⚠ A windowed program in EVERY build, debug included. As a console
+// program, each copy the update/restart scripts started (`start ...`) and
+// each launch from Explorer opened a terminal window next to the app. The
+// switches that print (--install, --update-check, --headless) attach to the
+// console they were started from; helpers write to redirected log files.
+#![windows_subsystem = "windows"]
 
 
 use std::sync::{Arc, Mutex};
