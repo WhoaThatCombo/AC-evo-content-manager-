@@ -14,6 +14,14 @@ use serde_json::{json, Value};
 
 use crate::{auth, config, detect};
 
+/// app._base(): links in manifests point back at whatever host the joiner
+/// reached us on.
+fn base_url(h: &axum::http::HeaderMap) -> String {
+    let host = h.get(header::HOST).and_then(|v| v.to_str().ok()).map(String::from)
+        .unwrap_or_else(|| format!("127.0.0.1:{}", config::load().get("ui_port").and_then(|v| v.as_i64()).unwrap_or(8092)));
+    format!("http://{host}")
+}
+
 pub fn json_resp(code: u16, v: &Value) -> Response {
     (
         StatusCode::from_u16(code).unwrap_or(StatusCode::OK),
@@ -53,6 +61,58 @@ fn pct(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Stream a file, honouring `Range: bytes=a-b` the way app._serve_content
+/// does (a bad or unsatisfiable range is answered with the whole file).
+/// ⚠ Ranges are what let a joiner pull one big file over several parallel
+/// connections - one TCP stream on a real internet path is capped far
+/// below either end's link.
+async fn serve_file(path: &std::path::Path, range: &str, ctype: &'static str, filename: &str, sha: &str) -> Response {
+    use futures_util::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let Ok(mut f) = tokio::fs::File::open(path).await else {
+        return json_resp(404, &json!({"error": "not a declared content file"}));
+    };
+    let size = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let (mut start, mut end, mut status) = (0u64, size.saturating_sub(1), 200u16);
+    if let Some(r) = range.strip_prefix("bytes=") {
+        let parsed = r.split_once('-').and_then(|(a, b)| {
+            let a = if a.is_empty() { Some(0) } else { a.trim().parse::<i64>().ok() };
+            let b = if b.is_empty() { Some(size as i64 - 1) } else { b.trim().parse::<i64>().ok() };
+            Some((a?, b?.min(size as i64 - 1)))
+        });
+        match parsed {
+            Some((a, b)) if 0 <= a && a <= b && (b as u64) < size => { start = a as u64; end = b as u64; status = 206; }
+            _ => { start = 0; end = size.saturating_sub(1); }
+        }
+    }
+    let length = if size == 0 { 0 } else { end - start + 1 };
+    if f.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return json_resp(500, &json!({"error": "seek failed"}));
+    }
+    let stream = futures_util::stream::unfold((f, length), |(mut f, left)| async move {
+        if left == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; (left.min(1 << 22)) as usize];
+        match f.read(&mut buf).await {
+            Ok(0) | Err(_) => None,
+            Ok(n) => { buf.truncate(n); Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)), (f, left - n as u64))) }
+        }
+    }).boxed();
+    let mut b = Response::builder().status(status)
+        .header(header::CONTENT_TYPE, ctype)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, length.to_string());
+    if status == 206 {
+        b = b.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
+    }
+    if !sha.is_empty() {
+        b = b.header("X-ACECM-SHA256", sha);
+    }
+    b.header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
+        .body(Body::from_stream(stream)).unwrap_or_else(|_| json_resp(500, &json!({"error": "bad response"})))
 }
 
 fn png(path: &std::path::Path) -> Response {
@@ -173,6 +233,12 @@ async fn native_internal(peer: IpAddr, req: Request, path: &str) -> Response {
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
             blocking(move || crate::launch::launch_game(&extra)).await
         }
+        "/api/_native/registry/forget" => { crate::registry::forget_public_sizes(); json!({"ok": true}) }
+        "/api/_native/registry/pack" => {
+            let folder = body.get("folder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let p = blocking(move || json!(crate::registry::ensure_track_pack(&folder).map(|p| p.to_string_lossy().into_owned()))).await;
+            json!({"path": p})
+        }
         "/api/_native/drive/status" => blocking(crate::drive::status).await,
         "/api/_native/drive/ensure_backend" => blocking(crate::drive::ensure_backend).await,
         _ => json!({"ok": false, "error": "not found"}),
@@ -202,7 +268,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/share/auto" | "/api/browser/local" | "/api/lobby"
             | "/api/profiles" | "/api/server/status" | "/api/server/log"
             | "/api/backend" | "/api/backend/log" | "/api/join/state" | "/api/browser/why"
-            | "/api/browser" | "/api/drive/status"),
+            | "/api/browser" | "/api/drive/status"
+            | "/api/registry/list" | "/api/registry/manifest" | "/api/registry/file" | "/api/registry/pack"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -470,6 +537,43 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (true, "/api/backend/start") => {
             let mode = { let m = bs("mode"); if m.is_empty() { "proxy".to_string() } else { m } };
             json_resp(200, &blocking(move || crate::backend::start(&mode)).await)
+        }
+        (false, "/api/registry/list") => {
+            let base = base_url(&h);
+            json_resp(200, &blocking(move || crate::registry::public_list(&base)).await)
+        }
+        (false, "/api/registry/manifest") => {
+            let (base, id) = (base_url(&h), q_get(&query, "id").unwrap_or_default());
+            json_resp(200, &blocking(move || crate::registry::manifest(&id, &base, true)).await)
+        }
+        (false, "/api/registry/file") => {
+            let (id, rel) = (q_get(&query, "id").unwrap_or_default(), q_get(&query, "path").unwrap_or_default());
+            let full = tokio::task::spawn_blocking(move || crate::registry::resolve(&id, &rel)).await.ok().flatten();
+            match full.filter(|p| p.is_file()) {
+                Some(p) => {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let rng = h.get(header::RANGE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    serve_file(&p, &rng, "application/octet-stream", &name, "").await
+                }
+                None => json_resp(404, &json!({"error": "not a declared content file"})),
+            }
+        }
+        (false, "/api/registry/pack") => {
+            let (id, folder) = (q_get(&query, "id").unwrap_or_default(), q_get(&query, "track").unwrap_or_default().trim().to_string());
+            let (i2, f2) = (id.clone(), folder.clone());
+            if !tokio::task::spawn_blocking(move || crate::registry::shares_track(&i2, &f2)).await.unwrap_or(false) {
+                json_resp(404, &json!({"error": "track is not shared on that entry"}))
+            } else {
+                let f2 = folder.clone();
+                match tokio::task::spawn_blocking(move || crate::registry::ensure_track_pack(&f2)).await.ok().flatten().filter(|p| p.is_file()) {
+                    None => json_resp(404, &json!({"error": "no files for that track"})),
+                    Some(p) => {
+                        let sha = crate::registry::track_pack_sha(&folder);
+                        let rng = h.get(header::RANGE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        serve_file(&p, &rng, "application/x-tar", &format!("{folder}.tar"), &sha).await
+                    }
+                }
+            }
         }
         (false, "/api/drive/status") => json_resp(200, &blocking(crate::drive::status).await),
         (true, "/api/drive") => {

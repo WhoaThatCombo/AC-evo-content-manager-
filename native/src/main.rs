@@ -94,6 +94,9 @@ fn main() {
             });
             let h = app.handle().clone();
             acecm::api::set_quit(move || h.exit(0));
+            // share sizes are computed before the first joiner's probe (it
+            // gives up at 4 s)
+            std::thread::spawn(|| { let _ = acecm::registry::public_list(""); });
             // a stale saved server list is refreshed behind the first page
             std::thread::spawn(|| { let _ = acecm::backend::lobby_prefetch_default(); });
             WebviewWindowBuilder::new(app, "main",

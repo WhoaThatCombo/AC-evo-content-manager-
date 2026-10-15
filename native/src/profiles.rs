@@ -165,3 +165,10 @@ fn py_compact(v: &Value, out: &mut String) {
         other => py_dump(other, 0, out),
     }
 }
+
+/// json.dumps(v, indent=2) as a string (LF newlines, as Python returns it).
+pub fn py_dumps_indent2(v: &Value) -> String {
+    let mut s = String::new();
+    py_dump(v, 0, &mut s);
+    s
+}

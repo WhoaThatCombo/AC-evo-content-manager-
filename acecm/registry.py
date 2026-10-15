@@ -334,7 +334,22 @@ def _pack_lock(folder):
         return lk
 
 
+def _native_url():
+    return os.environ.get("ACECM_NATIVE_URL") or ""
+
+
 def ensure_track_pack(folder):
+    # ⚠ ONE builder: the shell serves packs, and two processes rebuilding the
+    # same tar could leave its .sha256 describing the other one's bytes
+    if _native_url():
+        from . import backend
+        r = backend._native("/api/_native/registry/pack", {"folder": folder},
+                            timeout=1800)
+        return r.get("path") or None
+    return _ensure_track_pack_local(folder)
+
+
+def _ensure_track_pack_local(folder):
     """One uncompressed tar of a track folder, rebuilt only when files change.
 
     3653 tiny files over a new TCP connection each cannot use a gigabit
@@ -491,6 +506,10 @@ def _public_sizes(entries, base_url):
 def forget_public_sizes():
     """Drop the size cache - call when content on this host changes."""
     _SIZES.update(key=None, at=0.0, bytes={})
+    # the shell serves the public list: its cache is the one that matters
+    if _native_url():
+        from . import backend
+        backend._native("/api/_native/registry/forget", {}, timeout=5)
 
 
 def warm_public_list(base_url=""):

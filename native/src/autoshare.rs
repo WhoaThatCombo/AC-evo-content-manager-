@@ -138,6 +138,7 @@ pub fn prune(profiles_: &[Value]) -> Vec<String> {
     }
     if !drop.is_empty() {
         let _ = registry::save(&keep);
+        registry::forget_public_sizes();
     }
     drop.iter().map(|e| sv(e, "id")).collect()
 }
