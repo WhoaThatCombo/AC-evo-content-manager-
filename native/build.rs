@@ -34,13 +34,20 @@ fn bundle() {
             println!("cargo:warning=bundle: tools/{name} is missing");
         }
     }
-    let mut src = String::from("pub static FILES: &[(&str, &[u8])] = &[\n");
-    for (rel, p) in &files {
-        src += &format!("    ({rel:?}, include_bytes!({:?})),\n", p.to_string_lossy());
+    // deflated: the viewer alone shrinks 8.0 -> 3.0 MB, the UI ~4x
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let mut src = String::from("/// (path, deflated bytes, original size)\npub static FILES: &[(&str, &[u8], usize)] = &[\n");
+    for (i, (rel, p)) in files.iter().enumerate() {
+        use std::io::Write;
+        let raw = std::fs::read(p).unwrap();
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&raw).unwrap();
+        let blob = out_dir.join(format!("bundle_{i}.deflate"));
+        std::fs::write(&blob, z.finish().unwrap()).unwrap();
+        src += &format!("    ({rel:?}, include_bytes!({:?}), {}),\n", blob.to_string_lossy(), raw.len());
     }
     src += "];\n";
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("bundle_files.rs");
-    std::fs::write(out, src).unwrap();
+    std::fs::write(out_dir.join("bundle_files.rs"), src).unwrap();
 }
 
 fn main() {

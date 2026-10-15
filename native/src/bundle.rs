@@ -22,12 +22,19 @@ pub fn dir() -> PathBuf {
 /// A digest of everything embedded: unpacking is skipped while it matches.
 fn stamp() -> String {
     let mut h = sha2::Sha256::new();
-    for (rel, data) in FILES {
+    for (rel, packed, size) in FILES {
         h.update(rel.as_bytes());
-        h.update((data.len() as u64).to_le_bytes());
-        h.update(data);
+        h.update((*size as u64).to_le_bytes());
+        h.update(packed);
     }
     h.finalize().iter().take(12).map(|b| format!("{b:02x}")).collect()
+}
+
+fn inflate(packed: &[u8], size: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::with_capacity(size);
+    let _ = flate2::read::DeflateDecoder::new(packed).read_to_end(&mut out);
+    out
 }
 
 /// Unpack the embedded files if this build has not already. ⚠ Each file is
@@ -45,7 +52,13 @@ pub fn ensure() {
         return;
     }
     let mut failed = 0;
-    for (rel, data) in FILES {
+    for (rel, packed, size) in FILES {
+        let data = &inflate(packed, *size);
+        if data.len() != *size {
+            crate::logs::warn(format!("bundle: {rel} did not unpack ({} of {size} bytes)", data.len()));
+            failed += 1;
+            continue;
+        }
         let p = d.join(rel);
         if let Some(parent) = p.parent() {
             let _ = std::fs::create_dir_all(parent);
