@@ -497,6 +497,8 @@ pub fn start(mode: &str) -> Value {
         .env("PORT", port.to_string())
         .env("BACKEND_LISTEN", { let l = config::get_str(&cfg, "backend_listen"); if l.is_empty() { "127.0.0.1".into() } else { l } })
         .env("PYTHONUNBUFFERED", "1")
+        // it goes with us, even when we are killed rather than closed
+        .env("ACECM_PARENT_PID", std::process::id().to_string())
         .stdout(log.try_clone().unwrap()).stderr(log);
     if !lan.is_empty() {
         c.env("SERVER_IP", &lan).env("LAN_IP", &lan);

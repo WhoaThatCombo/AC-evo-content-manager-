@@ -610,6 +610,7 @@ async fn control(sh: Arc<Shared>, port: u16) {
 
 /// `acecm --tool acevo_proxy`
 pub fn run() -> i32 {
+    crate::procs::exit_with_parent();
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build().expect("runtime");
     rt.block_on(async {
         let port: u16 = env("PORT", "448").parse().unwrap_or(448);

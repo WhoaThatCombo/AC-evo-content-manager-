@@ -2,6 +2,7 @@
 //! app binary and the dev tools in src/bin share one implementation.
 
 pub mod api;
+pub mod aispline;
 pub mod archive;
 pub mod archlock;
 pub mod assists;

@@ -278,3 +278,42 @@ mod cmdline_tests {
         assert!(line.contains("-n 30 127.0.0.1"), "{line}");
     }
 }
+
+/// Block until process `pid` has exited (true), or we cannot watch it.
+/// ⚠ A handle is opened and WAITED on: "is the pid alive" lies for a dead
+/// process whose handle something still holds.
+#[cfg(windows)]
+pub fn wait_exit(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE};
+    let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if h.is_null() {
+        return false;
+    }
+    unsafe {
+        WaitForSingleObject(h, INFINITE);
+        CloseHandle(h);
+    }
+    true
+}
+
+#[cfg(not(windows))]
+pub fn wait_exit(pid: u32) -> bool {
+    while alive(pid) {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    true
+}
+
+/// Helper processes the shell starts go with it: exit as soon as the
+/// process named in ACECM_PARENT_PID is gone (a hard-killed shell must not
+/// leave a proxy holding its ports).
+pub fn exit_with_parent() {
+    let Some(pid) = std::env::var("ACECM_PARENT_PID").ok().and_then(|p| p.parse::<u32>().ok()) else { return };
+    std::thread::spawn(move || {
+        if wait_exit(pid) {
+            println!("parent {pid} has exited - stopping");
+            std::process::exit(0);
+        }
+    });
+}
