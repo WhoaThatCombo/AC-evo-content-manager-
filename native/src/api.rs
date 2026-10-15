@@ -338,7 +338,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/registry/list" | "/api/registry/manifest" | "/api/registry/file" | "/api/registry/pack"
             | "/api/browser/status" | "/api/browser/discover" | "/api/browser/tag" | "/api/browser/needs"
             | "/api/browser/plan" | "/api/share" | "/api/progress" | "/api/drop/status" | "/api/mods/scan"
-            | "/api/library" | "/api/library/clip" | "/api/library/export" | "/api/pack/preview"),
+            | "/api/library" | "/api/library/clip" | "/api/library/export" | "/api/pack/preview"
+            | "/api/registry" | "/api/gamesettings/export" | "/api/models"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -350,7 +351,11 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/push/plan" | "/api/push/server_build" | "/api/server_build" | "/api/mods/install"
             | "/api/drop" | "/api/drop/part" | "/api/library/remove" | "/api/library/export" | "/api/mods/fix"
             | "/api/mods/remove" | "/api/mods/sync" | "/api/pack/build" | "/api/drive/direct"
-            | "/api/drive/fav/add" | "/api/drive/fav/remove"),
+            | "/api/drive/fav/add" | "/api/drive/fav/remove"
+            | "/api/assists" | "/api/gamesettings/write" | "/api/gamesettings/restore"
+            | "/api/gamesettings/import" | "/api/gamesettings/restore_backup"
+            | "/api/registry/save" | "/api/registry/delete" | "/api/share/track"
+            | "/api/auth/rotate" | "/api/auth/remote"),
         _ => false,
     }
 }
@@ -651,6 +656,48 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                         serve_file(&p, &rng, "application/x-tar", &format!("{folder}.tar"), &sha).await
                     }
                 }
+            }
+        }
+        (false, "/api/registry") => json_resp(200, &json!({"servers": crate::registry::load(), "template": crate::registry::template()})),
+        (false, "/api/gamesettings/export") => {
+            let only: Vec<String> = query.split('&').filter_map(|kv| kv.split_once('=')).filter(|(k, _)| *k == "file")
+                .map(|(_, v)| q_get(&format!("x={v}"), "x").unwrap_or_default()).filter(|v| !v.is_empty()).collect();
+            json_resp(200, &blocking(move || crate::gamesettings::export_bundle(if only.is_empty() { None } else { Some(&only) })).await)
+        }
+        (false, "/api/models") => json_resp(200, &blocking(crate::content::models_seen).await),
+        (true, "/api/assists") => { let b = body.clone(); json_resp(200, &blocking(move || crate::assists::write(&b)).await) }
+        (true, "/api/gamesettings/write") => {
+            let (f, v) = (bs("file"), body.get("values").filter(|v| !v.is_null()).cloned().unwrap_or(json!({})));
+            json_resp(200, &blocking(move || crate::gamesettings::write(&f, &v)).await)
+        }
+        (true, "/api/gamesettings/restore") => { let f = bs("file"); json_resp(200, &blocking(move || crate::gamesettings::restore(&f)).await) }
+        (true, "/api/gamesettings/restore_backup") => {
+            let (f, n) = (bs("file"), bs("name"));
+            json_resp(200, &blocking(move || crate::gamesettings::restore_backup(&f, &n)).await)
+        }
+        (true, "/api/gamesettings/import") => {
+            let bundle = body.get("bundle").filter(|v| !v.is_null()).cloned().unwrap_or(json!({}));
+            let only: Option<Vec<String>> = body.get("only").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            let dev = bb("include_devices");
+            json_resp(200, &blocking(move || crate::gamesettings::import_bundle(&bundle, only.as_deref(), dev)).await)
+        }
+        (true, "/api/registry/save") => { let b = body.clone(); json_resp(200, &blocking(move || crate::registry::upsert(&b)).await) }
+        (true, "/api/registry/delete") => { let i = bs("id"); json_resp(200, &blocking(move || { crate::registry::remove(&i); json!({"ok": true}) }).await) }
+        (true, "/api/share/track") => {
+            let folder = { let f = bs("folder"); if f.is_empty() { bs("name") } else { f } };
+            let (share, label) = (bb("share"), bs("label"));
+            json_resp(200, &blocking(move || crate::autoshare::set_track(&folder, share, &label)).await)
+        }
+        (true, "/api/auth/rotate") => {
+            if !auth::is_loopback(&peer) { let (c, v) = auth::deny_remote(&cfg); json_resp(c, &v) }
+            else { json_resp(200, &json!({"ok": true, "token": auth::rotate()})) }
+        }
+        (true, "/api/auth/remote") => {
+            if !auth::is_loopback(&peer) { let (c, v) = auth::deny_remote(&cfg); json_resp(c, &v) }
+            else {
+                let on = bb("on");
+                let _ = config::save(&json!({"remote_admin": on}));
+                json_resp(200, &json!({"ok": true, "remote_admin": on, "token": if on { auth::token_create() } else { String::new() }}))
             }
         }
         (false, "/api/browser/status") => json_resp(200, &crate::jobs::status()),

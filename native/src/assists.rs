@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use prost_reflect::{DynamicMessage, Value as PV};
+use prost_reflect::{DynamicMessage, ReflectMessage, Value as PV};
 use serde_json::{json, Value};
 
 use crate::protos;
@@ -72,4 +72,95 @@ pub fn read() -> Value {
     let sc = (num(&p, "stability_control") * 100.0).round_ties_even() as i64;
     let dmg = ((num(&p, "damage_rate") + 1.0) * 100.0).round_ties_even() as i64;
     json!({"ok": true, "dir": ds, "toggles": toggles, "stability_control": sc, "damage_pct": dmg})
+}
+
+/// Set a numeric field whatever its declared kind (enum, int or float).
+fn set_num(m: &mut DynamicMessage, name: &str, v: f64) -> bool {
+    use prost_reflect::Kind;
+    let Some(fd) = m.descriptor().get_field_by_name(name) else { return false };
+    let pv = match fd.kind() {
+        Kind::Enum(_) => PV::EnumNumber(v as i32),
+        Kind::Int32 | Kind::Sint32 | Kind::Sfixed32 => PV::I32(v as i32),
+        Kind::Uint32 | Kind::Fixed32 => PV::U32(v as u32),
+        Kind::Int64 | Kind::Sint64 | Kind::Sfixed64 => PV::I64(v as i64),
+        Kind::Uint64 | Kind::Fixed64 => PV::U64(v as u64),
+        Kind::Float => PV::F32(v as f32),
+        Kind::Double => PV::F64(v),
+        Kind::Bool => PV::Bool(v != 0.0),
+        _ => return false,
+    };
+    m.set_field(&fd, pv);
+    true
+}
+
+fn py_float(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse().ok(),
+        Value::Bool(b) => Some(*b as i32 as f64),
+        _ => None,
+    }
+}
+
+/// Apply only the keys present in `values`; everything else is preserved.
+/// ⚠ Changing anything makes it a CUSTOM preset, as the game's own page does.
+pub fn write(values: &Value) -> Value {
+    use prost::Message;
+    let d = dir_path();
+    if !d.is_dir() {
+        return json!({"ok": false, "error": "no AssistSettings folder - run the game once"});
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut changed: Vec<String> = Vec::new();
+    let custom = d.join("AssistPresetListType_CUSTOM.racingsettingsassistpreset");
+    let current = d.join("current.assistpresetsave");
+    for (path, wrap) in [(custom, false), (current, true)] {
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let raw = std::fs::read(&path).unwrap_or_default();
+        let mut msg = match protos::decode(if wrap { "AssistPresetSave" } else { MSG }, &raw) {
+            Ok(m) => m,
+            Err(e) => return json!({"ok": false, "error": format!("unreadable {name}: {e}")}),
+        };
+        {
+            let p: &mut DynamicMessage = if wrap {
+                match msg.get_field_by_name_mut("preset") { Some(PV::Message(m)) => m, _ => continue }
+            } else { &mut msg };
+            for (fname, _label, inv) in TOGGLES {
+                if let Some(v) = values.get(*fname) {
+                    let s = match v { Value::String(s) => s.to_lowercase(), Value::Bool(b) => if *b { "true".into() } else { "false".into() }, v => v.to_string() };
+                    let n = match flip(&s, *inv).as_str() { "off" => Some(0.0), "on" => Some(1.0), "free" => Some(2.0), _ => None };
+                    if let Some(n) = n {
+                        set_num(p, fname, n);
+                        changed.push(fname.to_string());
+                    }
+                }
+            }
+            if let Some(v) = values.get("stability_control").and_then(py_float) {
+                set_num(p, "stability_control", (v / 100.0).clamp(0.0, 1.0));
+                changed.push("stability_control".into());
+            }
+            if let Some(v) = values.get("damage_pct").and_then(py_float) {
+                set_num(p, "damage_rate", v.clamp(0.0, 100.0) / 100.0 - 1.0);
+                changed.push("damage_pct".into());
+            }
+            set_num(p, "type", 4.0);
+        }
+        let blob = msg.encode_to_vec();
+        let _ = std::fs::copy(&path, format!("{}.{stamp}.bak", path.display()));
+        if let Err(e) = std::fs::write(&path, blob) {
+            return json!({"ok": false, "error": e.to_string()});
+        }
+    }
+    if changed.is_empty() {
+        return json!({"ok": false, "error": "nothing to change"});
+    }
+    changed.sort();
+    changed.dedup();
+    crate::logs::info(format!("assists updated: {}", changed.join(", ")));
+    let mut r = read();
+    r["saved"] = json!(changed);
+    r
 }

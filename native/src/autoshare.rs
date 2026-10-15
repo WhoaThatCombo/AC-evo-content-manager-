@@ -92,6 +92,57 @@ fn auto_entry(profile: &Value) -> Option<Value> {
 }
 
 /// Make the share list match this profile.
+/// Share or unshare one track, including one a server is hosting.
+/// Unsharing a hosted track is remembered on the profile
+/// (`unshared_tracks`) so the next save/start does not publish it again.
+pub fn set_track(folder: &str, share: bool, label: &str) -> Value {
+    let folder = folder.trim();
+    if folder.is_empty() {
+        return json!({"ok": false, "error": "no track"});
+    }
+    let mut items = crate::profiles::load();
+    for p in items.iter_mut() {
+        let skip: Vec<String> = p.get("unshared_tracks").and_then(|v| v.as_array()).map(|a| a.iter()
+            .filter_map(|t| t.as_str().filter(|s| !s.is_empty()).map(String::from)).collect()).unwrap_or_default();
+        let uses = track_folder(p) == folder;
+        if share {
+            p["unshared_tracks"] = json!(skip.iter().filter(|t| t.as_str() != folder).collect::<Vec<_>>());
+        } else if uses && !skip.iter().any(|t| t == folder) {
+            let mut s = skip.clone();
+            s.push(folder.to_string());
+            p["unshared_tracks"] = json!(s);
+        }
+    }
+    let _ = crate::profiles::save_all(&items);
+    for p in &items {
+        publish(p);
+    }
+    if share {
+        let already = registry::load().iter().any(|e| e.get("required_tracks").and_then(|v| v.as_array())
+            .map(|a| a.iter().any(|t| t.as_str() == Some(folder))).unwrap_or(false));
+        if !already {
+            let l = if label.is_empty() { folder } else { label };
+            registry::upsert(&json!({"name": format!("{l} (track)"), "description": format!("Track {folder} shared by this host"),
+                                     "required_tracks": [folder], "public": true}));
+        }
+    } else {
+        let mut kept = Vec::new();
+        for e in registry::load() {
+            let tracks: Vec<Value> = e.get("required_tracks").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+                .into_iter().filter(|t| t.as_str() != Some(folder)).collect();
+            let mods = e.get("required_mods").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+            if !tracks.is_empty() || mods {
+                let mut e2 = e.clone();
+                e2["required_tracks"] = json!(tracks);
+                kept.push(e2);
+            }
+        }
+        let _ = registry::save(&kept);
+    }
+    registry::forget_public_sizes();
+    json!({"ok": true, "shared": share, "folder": folder})
+}
+
 pub fn publish(profile: &Value) -> Value {
     let want = share_needs(profile);
     let existing = auto_entry(profile);

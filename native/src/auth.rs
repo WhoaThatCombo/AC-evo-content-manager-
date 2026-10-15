@@ -33,9 +33,33 @@ fn token_file() -> std::path::PathBuf {
     paths::data().join("admin_token.txt")
 }
 
-/// The stored admin token; never created here (the backend owns that).
+/// The stored admin token (no new one is made by reading it).
 pub fn token() -> String {
     std::fs::read_to_string(token_file()).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// The admin token, made on first use (secrets.token_urlsafe(24)). Kept in
+/// a file so config.json stays something a user can paste into a report.
+pub fn token_create() -> String {
+    let got = token();
+    if !got.is_empty() {
+        return got;
+    }
+    use base64::Engine;
+    let mut b = [0u8; 24];
+    let _ = getrandom::fill(&mut b);
+    let new = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let _ = std::fs::create_dir_all(paths::data());
+    if let Err(e) = std::fs::write(token_file(), format!("{new}\n")) {
+        crate::logs::warn(format!("could not save the admin token: {e}"));
+    }
+    new
+}
+
+/// Throw the current token away and issue another.
+pub fn rotate() -> String {
+    let _ = std::fs::remove_file(token_file());
+    token_create()
 }
 
 pub fn enabled(cfg: &Map<String, Value>) -> bool {

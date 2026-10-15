@@ -130,6 +130,24 @@ pub fn forget_lists() {
     crate::carsmap::forget();
 }
 
+/// Real car model names harvested from the server log ("on car <model>,").
+/// The two id spaces are NOT mapped to each other here.
+pub fn models_seen() -> Value {
+    let log = crate::serverproc::server_log("");
+    let Ok(b) = std::fs::read(&log) else { return json!({"models": [], "note": "no server log yet"}) };
+    let txt = String::from_utf8_lossy(&b);
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, _) in txt.match_indices("on car ") {
+        let rest = &txt[i + 7..];
+        let name: String = rest.chars().take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_').collect();
+        if !name.is_empty() && rest[name.len()..].starts_with(',') {
+            seen.insert(name);
+        }
+    }
+    let total = seen.len();
+    json!({"models": seen.into_iter().map(|m| json!({"id": m, "label": pretty(&m)})).collect::<Vec<_>>(), "total": total})
+}
+
 pub fn cars() -> Value {
     cached(0)
 }

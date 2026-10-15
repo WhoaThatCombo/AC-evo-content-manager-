@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use prost_reflect::SerializeOptions;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::{config, detect, procs, protos};
 
@@ -189,4 +189,158 @@ pub fn backups(rel: &str) -> Value {
         }
     }
     json!({"ok": true, "file": rel, "backups": out})
+}
+
+fn game_running() -> bool {
+    crate::procs::game_running()
+}
+
+fn stamp() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+fn copy2(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::copy(src, dst)?;
+    if let Ok(t) = std::fs::metadata(src).and_then(|m| m.modified()) {
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(dst) {
+            let _ = f.set_modified(t);
+        }
+    }
+    Ok(())
+}
+
+/// Encode JSON back into the settings file, with a backup (the first one
+/// kept as .bak_acecm, every edit also timestamped).
+pub fn write(rel: &str, values: &Value) -> Value {
+    use prost::Message;
+    let Some(path) = safe_path(rel) else { return json!({"ok": false, "error": "bad settings path"}) };
+    let idx = index();
+    let Some(name) = message_for(&idx, &path).filter(|m| protos::has(m)) else {
+        return json!({"ok": false, "error": "no schema"});
+    };
+    if game_running() {
+        return json!({"ok": false, "error": "close the game first - it rewrites these files on exit and would overwrite your changes"});
+    }
+    let Some(desc) = protos::find(&name) else { return json!({"ok": false, "error": "no schema"}) };
+    let opts = prost_reflect::DeserializeOptions::new().deny_unknown_fields(true);
+    let obj = match prost_reflect::DynamicMessage::deserialize_with_options(desc, values.clone(), &opts) {
+        Ok(m) => m,
+        Err(e) => return json!({"ok": false, "error": format!("invalid values: {e}")}),
+    };
+    let blob = obj.encode_to_vec();
+    let bak = PathBuf::from(format!("{}.bak_acecm", path.display()));
+    if path.exists() && !bak.exists() {
+        let _ = copy2(&path, &bak);
+    }
+    let hist = PathBuf::from(format!("{}.{}.bak", path.display(), stamp()));
+    if path.exists() {
+        let _ = copy2(&path, &hist);
+    }
+    if let Err(e) = std::fs::write(&path, &blob) {
+        return json!({"ok": false, "error": e.to_string()});
+    }
+    let base = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    json!({"ok": true, "file": rel, "bytes": blob.len(), "backup": base(&bak), "history": base(&hist)})
+}
+
+pub const BUNDLE_KIND: &str = "acecm.gamesettings";
+
+/// Decoded settings as one shareable JSON document (values, not bytes, so
+/// it can be reviewed and re-encoded against the receiver's schema).
+pub fn export_bundle(files: Option<&[String]>) -> Value {
+    let mut picked = Map::new();
+    let mut skipped = Map::new();
+    for info in discover()["files"].as_array().cloned().unwrap_or_default() {
+        let rel = info.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if let Some(f) = files {
+            if !f.contains(&rel) {
+                continue;
+            }
+        }
+        if info.get("decodable") != Some(&json!(true)) {
+            if files.is_some() {
+                skipped.insert(rel, json!("no schema for this file"));
+            }
+            continue;
+        }
+        let r = read(&rel);
+        if r.get("ok") == Some(&json!(true)) {
+            picked.insert(rel, json!({"message": r["message"], "values": r["values"]}));
+        } else {
+            skipped.insert(rel, r.get("error").cloned().unwrap_or(json!("could not read")));
+        }
+    }
+    json!({"kind": BUNDLE_KIND, "bundle_version": 1, "created": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+           "acecm": env!("CARGO_PKG_VERSION"), "files": picked, "skipped": skipped,
+           "note": "device bindings only make sense on identical hardware"})
+}
+
+fn is_device_file(rel: &str) -> bool {
+    let low = rel.to_lowercase();
+    low.contains("device") || low.contains("input_devices")
+}
+
+/// Apply a bundle from export_bundle; every file backed up first.
+pub fn import_bundle(bundle: &Value, only: Option<&[String]>, include_devices: bool) -> Value {
+    if bundle.get("kind").and_then(|v| v.as_str()) != Some(BUNDLE_KIND) {
+        return json!({"ok": false, "error": "that is not an ACECM game-settings bundle"});
+    }
+    if game_running() {
+        return json!({"ok": false, "error": "close the game first - it rewrites these files on exit and would overwrite whatever we import"});
+    }
+    let (mut applied, mut failed, mut skipped) = (Vec::new(), Map::new(), Map::new());
+    for (rel, entry) in bundle.get("files").and_then(|v| v.as_object()).cloned().unwrap_or_default() {
+        if let Some(o) = only {
+            if !o.is_empty() && !o.contains(&rel) {
+                continue;
+            }
+        }
+        if is_device_file(&rel) && !include_devices {
+            skipped.insert(rel, json!("device bindings are tied to specific hardware - tick 'include device bindings' to apply anyway"));
+            continue;
+        }
+        // ⚠ re-encoded against THIS machine's schema
+        let r = write(&rel, entry.get("values").filter(|v| !v.is_null()).unwrap_or(&json!({})));
+        if r.get("ok") == Some(&json!(true)) {
+            applied.push(rel);
+        } else {
+            failed.insert(rel, r.get("error").cloned().unwrap_or(Value::Null));
+        }
+    }
+    json!({"ok": failed.is_empty(), "applied": applied, "failed": failed, "skipped": skipped})
+}
+
+/// Put a specific timestamped backup back (keeping the current state too).
+pub fn restore_backup(rel: &str, name: &str) -> Value {
+    let Some(path) = safe_path(rel) else { return json!({"ok": false, "error": "bad settings path"}) };
+    let bn = Path::new(&name.replace('\\', "/")).file_name().map(|n| n.to_owned()).unwrap_or_default();
+    let src = path.parent().map(|p| p.join(&bn)).unwrap_or_default();
+    if bn.is_empty() || !src.is_file() {
+        return json!({"ok": false, "error": "no such backup"});
+    }
+    if game_running() {
+        return json!({"ok": false, "error": "close the game first"});
+    }
+    if path.exists() {
+        let _ = copy2(&path, &PathBuf::from(format!("{}.{}.bak", path.display(), stamp())));
+    }
+    if let Err(e) = copy2(&src, &path) {
+        return json!({"ok": false, "error": e.to_string()});
+    }
+    json!({"ok": true, "restored": rel, "from": bn.to_string_lossy()})
+}
+
+pub fn restore(rel: &str) -> Value {
+    let Some(path) = safe_path(rel) else { return json!({"ok": false, "error": "bad settings path"}) };
+    let bak = PathBuf::from(format!("{}.bak_acecm", path.display()));
+    if !bak.is_file() {
+        return json!({"ok": false, "error": "no ACECM backup for this file"});
+    }
+    if game_running() {
+        return json!({"ok": false, "error": "close the game first"});
+    }
+    if let Err(e) = copy2(&bak, &path) {
+        return json!({"ok": false, "error": e.to_string()});
+    }
+    json!({"ok": true, "restored": rel})
 }
