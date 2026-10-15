@@ -378,7 +378,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"
             | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"
             | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"
-            | "/api/events" | "/api/events/snapshot" | "/api/livery"),
+            | "/api/events" | "/api/events/snapshot" | "/api/livery" | "/api/car/specs"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -699,6 +699,10 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                     }
                 }
             }
+        }
+        (false, "/api/car/specs") => {
+            let (pid, mid) = (q_get(&query, "preset").unwrap_or_default(), q_get(&query, "id").unwrap_or_default());
+            json_resp(200, &blocking(move || json!({"ok": true, "specs": if !pid.is_empty() { crate::carspecs::for_preset(&pid) } else { crate::carspecs::for_model(&mid) }})).await)
         }
         (false, "/api/livery") => {
             let model = q_get(&query, "model").unwrap_or_default();

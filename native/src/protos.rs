@@ -227,3 +227,97 @@ pub fn state() -> Value {
     json!({"dir": cache_dir().to_string_lossy(), "descriptors": descs(&cache_dir()).len(),
            "messages": p.all_messages().count(), "files": p.files().count()})
 }
+
+/// Decode like the game's own (upb) parser would READ it: a field whose wire
+/// type does not match the schema is set aside instead of failing the whole
+/// message. ⚠ READ-ONLY uses only - the set-aside fields are dropped, so a
+/// message decoded this way must never be written back.
+pub fn decode_lenient(name: &str, raw: &[u8]) -> Result<DynamicMessage, String> {
+    let d = find(name).ok_or_else(|| format!("the game's message schemas are not available ({name})"))?;
+    match DynamicMessage::decode(d.clone(), raw) {
+        Ok(m) => Ok(m),
+        Err(_) => DynamicMessage::decode(d.clone(), sanitize(&d, raw, 0).as_slice()).map_err(|e| e.to_string()),
+    }
+}
+
+fn lv_varint(b: &[u8], mut i: usize) -> Option<(u64, usize)> {
+    let (mut r, mut s) = (0u64, 0u32);
+    loop {
+        let x = *b.get(i)?;
+        i += 1;
+        r |= ((x & 0x7f) as u64) << s;
+        if x & 0x80 == 0 {
+            return Some((r, i));
+        }
+        s += 7;
+        if s > 63 {
+            return None;
+        }
+    }
+}
+
+fn put_varint(mut n: u64, out: &mut Vec<u8>) {
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n != 0 { out.push(b | 0x80) } else { out.push(b); return; }
+    }
+}
+
+/// The wire type a field's declared kind is written with (2 is also fine
+/// for a packed repeated scalar).
+fn wire_of(k: &prost_reflect::Kind) -> u8 {
+    use prost_reflect::Kind::*;
+    match k {
+        Double | Fixed64 | Sfixed64 => 1,
+        Float | Fixed32 | Sfixed32 => 5,
+        String | Bytes | Message(_) => 2,
+        _ => 0,
+    }
+}
+
+fn sanitize(desc: &prost_reflect::MessageDescriptor, b: &[u8], depth: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        let Some((tag, ni)) = lv_varint(b, i) else { break };
+        i = ni;
+        let (num, wt) = ((tag >> 3) as u32, (tag & 7) as u8);
+        let end = match wt {
+            0 => match lv_varint(b, i) { Some((_, e)) => e, None => break },
+            1 => i + 8,
+            5 => i + 4,
+            2 => match lv_varint(b, i) { Some((l, e)) => e + l as usize, None => break },
+            _ => break, // groups: stop rather than guess
+        };
+        if end > b.len() {
+            break;
+        }
+        match desc.get_field(num) {
+            None => out.extend_from_slice(&b[start..end]), // unknown: kept
+            Some(fd) => {
+                let want = wire_of(&fd.kind());
+                let packed_ok = wt == 2 && fd.is_list() && want != 2;
+                if wt == want || packed_ok {
+                    if let (2, prost_reflect::Kind::Message(m)) = (wt, fd.kind()) {
+                        if depth < 32 {
+                            let (_, body_at) = lv_varint(b, i).unwrap();
+                            let inner = sanitize(&m, &b[body_at..end], depth + 1);
+                            put_varint(tag, &mut out);
+                            put_varint(inner.len() as u64, &mut out);
+                            out.extend_from_slice(&inner);
+                        } else {
+                            out.extend_from_slice(&b[start..end]);
+                        }
+                    } else {
+                        out.extend_from_slice(&b[start..end]);
+                    }
+                }
+                // else: wire type disagrees with the schema - set aside
+            }
+        }
+        i = end;
+    }
+    out
+}

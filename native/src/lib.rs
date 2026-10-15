@@ -9,6 +9,7 @@ pub mod autoshare;
 pub mod backend;
 pub mod auth;
 pub mod carsmap;
+pub mod carspecs;
 pub mod compress;
 pub mod config;
 pub mod contentsync;
