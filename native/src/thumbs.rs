@@ -180,8 +180,51 @@ pub fn resolve_folder(folder: &str) -> String {
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-const SIZE: &str = "900x600";
-const BIG: &str = "1440x960";
+const SIZE: (u32, u32) = (900, 600);
+const BIG: (u32, u32) = (1440, 960);
+/// ⚠ Pictures are drawn at twice their size and halved. Many MOD cars ship
+/// broken small mip levels: drawn small, the livery samples those and the car
+/// came out plain white with grey noise (RX-8, RS6...), while the viewer -
+/// car filling the window, large mips - looked right. Drawn big, the GPU
+/// stays on the good levels; halving also anti-aliases every car.
+const SUPERSAMPLE: u32 = 2;
+
+/// Halve an RGBA image by 2x2 averaging, to RGB.
+fn halve(px: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let (ow, oh) = (w / 2, h / 2);
+    let mut out = vec![0u8; (ow * oh * 3) as usize];
+    for y in 0..oh {
+        for x in 0..ow {
+            for c in 0..3 {
+                let at = |dx: u32, dy: u32| px[(((y * 2 + dy) * w + x * 2 + dx) * 4 + c) as usize] as u32;
+                out[((y * ow + x) * 3 + c) as usize] = ((at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1) + 2) / 4) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Read the supersampled render at `src`, write it halved to `dst`.
+fn downsample(src: &Path, dst: &Path) -> Result<(), String> {
+    let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(src).map_err(|e| e.to_string())?));
+    let mut rd = dec.read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; rd.output_buffer_size()];
+    let info = rd.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return Err(format!("unexpected render format {:?} {:?}", info.color_type, info.bit_depth));
+    }
+    let rgb = halve(&buf[..info.buffer_size()], info.width, info.height);
+    let tmp = dst.with_extension("png.part");
+    {
+        let file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), info.width / 2, info.height / 2);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut wr = enc.write_header().map_err(|e| e.to_string())?;
+        wr.write_image_data(&rgb).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, dst).map_err(|e| e.to_string())
+}
 
 static JOB: Mutex<Option<Map<String, Value>>> = Mutex::new(None);
 static COVER_JOB: Mutex<Option<Map<String, Value>>> = Mutex::new(None);
@@ -254,9 +297,11 @@ fn render_car_now(car_id: &str, big: bool, visual: &str, paint: &str, out: &Path
     let out = out.to_path_buf();
     let exe = crate::viewer::viewer_exe()?;
     let pkg = crate::viewer::package_for(car_id)?;
+    let (w, h) = if big { BIG } else { SIZE };
+    let raw = out.with_extension("x2.png");
     let mut c = std::process::Command::new(&exe);
-    c.arg(&pkg).args(["--car", car_id, "--shot"]).arg(&out)
-        .args(["--size", if big { BIG } else { SIZE }, "--yaw", "2.35", "--pitch", "0.17", "--zoom", "1.35"]);
+    c.arg(&pkg).args(["--car", car_id, "--shot"]).arg(&raw)
+        .args(["--size", &format!("{}x{}", w * SUPERSAMPLE, h * SUPERSAMPLE), "--yaw", "2.35", "--pitch", "0.17", "--zoom", "1.35"]);
     // a mod package holds only its own car; the base game supplies tyres
     if let Some(base) = crate::viewer::package() {
         if std::path::absolute(&base).ok() != std::path::absolute(&pkg).ok() {
@@ -285,10 +330,17 @@ fn render_car_now(car_id: &str, big: bool, visual: &str, paint: &str, out: &Path
             return None;
         }
     };
-    if !o.status.success() || !out.is_file() {
+    if !o.status.success() || !raw.is_file() {
+        let _ = std::fs::remove_file(&raw);
         let t = if o.stdout.is_empty() { String::from_utf8_lossy(&o.stderr).into_owned() } else { String::from_utf8_lossy(&o.stdout).into_owned() };
         let tail: String = t.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
         crate::logs::warn(format!("thumb {car_id}: exit {:?} {tail}", o.status.code()));
+        return None;
+    }
+    let r = downsample(&raw, &out);
+    let _ = std::fs::remove_file(&raw);
+    if let Err(e) = r {
+        crate::logs::warn(format!("thumb {car_id}: {e}"));
         return None;
     }
     Some(out)
@@ -337,7 +389,7 @@ pub fn build_all(force: bool) -> Value {
 
 /// Bump when render_car's framing (size, yaw, pitch, zoom) changes: every
 /// picture is then redrawn on the next pass.
-const RECIPE: &str = "v1 900x600 1440x960 yaw2.35 pitch0.17 zoom1.35";
+const RECIPE: &str = "v2 900x600 1440x960 yaw2.35 pitch0.17 zoom1.35 ss2";
 
 fn records_path() -> PathBuf {
     dir("cars").join("sources.json")
