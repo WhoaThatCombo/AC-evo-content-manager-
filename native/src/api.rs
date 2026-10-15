@@ -180,6 +180,37 @@ async fn drop_part(req: Request, query: &str) -> Response {
     json_resp(200, &json!({"ok": true, "name": shown, "bytes": wrote, "size": if size != 0 { size } else { wrote }}))
 }
 
+/// Server-Sent Events: the live snapshot, pushed when it changes, and
+/// resent every 5 s regardless (the page's watchdog treats a silent stream
+/// as dead; comment pings never reach its onmessage).
+fn events_stream() -> Response {
+    use futures_util::StreamExt;
+    struct S { first: bool, last: String, beat: std::time::Instant }
+    let st = S { first: true, last: String::new(), beat: std::time::Instant::now() };
+    let stream = futures_util::stream::unfold(st, |mut st| async move {
+        if st.first {
+            st.first = false;
+            return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"retry: 2000\n\n")), st));
+        }
+        loop {
+            let s = tokio::task::spawn_blocking(|| crate::events::snapshot(false)).await.ok()?;
+            let k = crate::events::key(&s);
+            if k != st.last || st.beat.elapsed().as_secs_f64() > 5.0 {
+                st.last = k;
+                st.beat = std::time::Instant::now();
+                let msg = format!("data: {}\n\n", s);
+                return Some((Ok(axum::body::Bytes::from(msg)), st));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }).boxed();
+    Response::builder().status(200)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONNECTION, "close")
+        .body(Body::from_stream(stream)).unwrap_or_else(|_| json_resp(500, &json!({"error": "bad response"})))
+}
+
 fn png(path: &std::path::Path) -> Response {
     match std::fs::read(path) {
         // cheap to regenerate, and a stale render after a repaint confuses
@@ -346,7 +377,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/library" | "/api/library/clip" | "/api/library/export" | "/api/pack/preview"
             | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"
             | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"
-            | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"),
+            | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"
+            | "/api/events" | "/api/events/snapshot"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -667,6 +699,8 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                 }
             }
         }
+        (false, "/api/events/snapshot") => { let f = q_flag(&query, "fresh"); json_resp(200, &blocking(move || crate::events::snapshot(f)).await) }
+        (false, "/api/events") => events_stream(),
         (false, "/api/drive") => json_resp(200, &blocking(|| {
             // fills in any car with no picture yet, in the background
             crate::thumbs::ensure_renders();
@@ -876,10 +910,12 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (false, "/api/drive/status") => json_resp(200, &blocking(crate::drive::status).await),
         (true, "/api/drive") => {
             let b = body.clone();
-            json_resp(200, &blocking(move || crate::drive::start(&b)).await)
+            let r = blocking(move || crate::drive::start(&b)).await;
+            crate::events::kick();
+            json_resp(200, &r)
         }
-        (true, "/api/drive/cancel") => json_resp(200, &crate::drive::cancel()),
-        (true, "/api/drive/capture") => json_resp(200, &blocking(crate::drive::capture_list).await),
+        (true, "/api/drive/cancel") => { let r = crate::drive::cancel(); crate::events::kick(); json_resp(200, &r) }
+        (true, "/api/drive/capture") => { let r = blocking(crate::drive::capture_list).await; crate::events::kick(); json_resp(200, &r) }
         (true, "/api/drive/list") => {
             let id = { let i = bs("id"); if i.is_empty() { bs("local_id") } else { i } };
             json_resp(200, &blocking(move || crate::drive::publish_local(&id)).await)
