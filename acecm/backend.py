@@ -1550,6 +1550,14 @@ def loading_report_flag(path=""):
 
 
 def launch_game(extra_args=None):
+    # one launcher: with the shell up IT starts the game
+    if _NATIVE_URL:
+        return _native("/api/_native/game/launch",
+                       {"extra_args": list(extra_args or [])}, timeout=120)
+    return _launch_game_local(extra_args)
+
+
+def _launch_game_local(extra_args=None):
     """Start the client, rewriting rdata first so Steam cannot skip us.
 
     Steam Launch Options never reach this process (the game logs

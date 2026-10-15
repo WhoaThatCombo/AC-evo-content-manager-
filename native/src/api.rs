@@ -168,6 +168,11 @@ async fn native_internal(peer: IpAddr, req: Request, path: &str) -> Response {
         }
         "/api/_native/lobby/servers" => blocking(crate::backend::server_list).await,
         "/api/_native/lobby/state" => json!({"running": crate::backend::LOBBY.lock().unwrap().running}),
+        "/api/_native/game/launch" => {
+            let extra: Vec<String> = body.get("extra_args").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            blocking(move || crate::launch::launch_game(&extra)).await
+        }
         "/api/_native/drive/status" => blocking(crate::drive::status).await,
         "/api/_native/drive/ensure_backend" => blocking(crate::drive::ensure_backend).await,
         _ => json!({"ok": false, "error": "not found"}),
@@ -204,7 +209,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/profiles/save" | "/api/profiles/delete" | "/api/server/start" | "/api/server/stop"
             | "/api/backend/start" | "/api/backend/stop" | "/api/backend/redirect" | "/api/join"
             | "/api/app/quit" | "/api/drive" | "/api/drive/cancel" | "/api/drive/capture"
-            | "/api/drive/list" | "/api/backend/ensure"),
+            | "/api/drive/list" | "/api/backend/ensure" | "/api/game/launch"),
         _ => false,
     }
 }
@@ -477,6 +482,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let id = { let i = bs("id"); if i.is_empty() { bs("local_id") } else { i } };
             json_resp(200, &blocking(move || crate::drive::publish_local(&id)).await)
         }
+        (true, "/api/game/launch") => json_resp(200, &blocking(|| crate::launch::launch_game(&[])).await),
         (true, "/api/backend/ensure") => json_resp(200, &blocking(crate::drive::ensure_backend).await),
         (true, "/api/backend/stop") => json_resp(200, &blocking(crate::backend::stop).await),
         (true, "/api/backend/redirect") => {
