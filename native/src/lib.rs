@@ -23,6 +23,7 @@ pub mod evoshare;
 pub mod gamesettings;
 pub mod gameui;
 pub mod gameui_js;
+pub mod hotkey;
 pub mod install;
 pub mod jobs;
 pub mod kspkg;

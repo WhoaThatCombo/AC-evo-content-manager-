@@ -1927,7 +1927,10 @@ def serve():
         logs.LOG.warning("autoshare at start: %s", ex)
     _watch_lobby()
     _watch_hud()
-    hotkey.watch()
+    # ⚠ the shell watches the pit button when it runs: two watchers would
+    # send every press twice
+    if not os.environ.get("ACECM_NATIVE_URL"):
+        hotkey.watch()
     _watch_parent()
     port = config.CFG["ui_port"]
     # ⚠ 127.0.0.1 made the window work and made content sharing a lie.

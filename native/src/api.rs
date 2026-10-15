@@ -378,7 +378,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"
             | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"
             | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"
-            | "/api/events" | "/api/events/snapshot" | "/api/livery" | "/api/car/specs"),
+            | "/api/events" | "/api/events/snapshot" | "/api/livery" | "/api/car/specs" | "/api/pit/devices"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -397,7 +397,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/auth/rotate" | "/api/auth/remote" | "/api/penalties/set"
             | "/api/thumbs/build" | "/api/thumbs/covers" | "/api/viewer/open" | "/api/viewer/open_track"
             | "/api/compress/start" | "/api/evoshare/start" | "/api/evoshare/cancel"
-            | "/api/livery/apply" | "/api/livery/populate"),
+            | "/api/livery/apply" | "/api/livery/populate"
+            | "/api/pit/go" | "/api/pit/capture" | "/api/pit/bind" | "/api/hud/mph"),
         _ => false,
     }
 }
@@ -699,6 +700,20 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                     }
                 }
             }
+        }
+        (false, "/api/pit/devices") => json_resp(200, &blocking(|| json!({"ok": true, "devices": crate::hotkey::devices()})).await),
+        (true, "/api/pit/go") => json_resp(200, &blocking(crate::gameui::back_to_pit).await),
+        (true, "/api/hud/mph") => { let on = bb("on"); json_resp(200, &blocking(move || crate::gameui::set_mph(on)).await) }
+        (true, "/api/pit/capture") => {
+            // blocks while the user presses something - the UI waits this long
+            let secs = body.get("seconds").and_then(|v| v.as_f64()).filter(|s| *s != 0.0).unwrap_or(6.0);
+            json_resp(200, &blocking(move || crate::hotkey::capture(secs)).await)
+        }
+        (true, "/api/pit/bind") => {
+            let id = match body.get("id") { None | Some(Value::Null) => json!(""), Some(v) => v.clone() };
+            let mask = body.get("mask").and_then(|v| v.as_i64()).unwrap_or(0);
+            let r = config::save(&json!({"pit_btn_kind": bs("kind"), "pit_btn_id": id, "pit_btn_mask": mask, "pit_btn_label": bs("label")}));
+            json_resp(200, &r.unwrap_or_else(|e| json!({"ok": false, "error": e.to_string()})))
         }
         (false, "/api/car/specs") => {
             let (pid, mid) = (q_get(&query, "preset").unwrap_or_default(), q_get(&query, "id").unwrap_or_default());
