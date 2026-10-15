@@ -82,6 +82,21 @@ Core libraries ported: kspkg reader (59 ms vs 2.05 s on the 69 GB
 content.kspkg), protobuf schema extraction + prost-reflect pool, garage
 (livery) reader, Windows process/port helpers, Steam detection.
 
+* **Lobby proxy + backend control - owned by Rust**: `/api/backend*`,
+  `/api/join*`, `/api/browser/why`; the proxy runs as `acecm --tool
+  acevo_proxy` (verified live against Kunos, capture identical).
+* **Public list**: `/api/browser`; the direct lobby fetch is `acecm --tool
+  lobby_fetch` (Steam ticket via the game's steam_api64.dll, ~3 s); the
+  backend's lobby_fetch/prefetch/server_list delegate (one Steam session).
+* **Drive - owned by Rust**: `POST /api/drive`, `/api/drive/status`,
+  `/cancel`, `/capture`, `/list`, `/api/backend/ensure`, `/api/game/launch`.
+  gameui.rs is the inspector client (scripts generated verbatim from
+  gameui.py into gameui_js.rs). GameModeSave writes byte-identical
+  (`src/bin/drive_write_test.rs`). Verified live: single player to the pit
+  menu, join of our own server confirmed by its client count, Refresh list.
+* `/api/app/quit` closes the shell (which stops the backend + helpers).
+* The shell writes acecm.log (same line format, thread "native").
+
 ⚠ Shared state rules while both run:
 * config.json: Python re-reads on mtime change (`config.refresh`).
 * Caches shared by file (paths.json, preset_map.json, viewer/index.json,
@@ -99,10 +114,15 @@ the per-launch secret), so there is one owner of server processes.
 ⚠ Python writes its JSON files in text mode: CRLF. Rust matches
 (profiles::write_json_indent2) so a file does not flip format.
 
-Still Python: the lobby proxy + backend control, drive/join + game UI
-automation, events (the live feed), install/packs/share serving, registry
-content serving, thumbs rendering, telemetry, updater/installer, Linux.
-Next: the lobby proxy (backend.py + tools/acevo_proxy.py), then drive.
+Still Python: Drive's options / public list (/api/drive GET,
+/api/drive/servers - they merge the third-party directory) and the pasted
+address lookup (/api/drive/direct, fav/add - contentsync.discover), events
+(the live feed; it reads the drive job + lobby state from the shell),
+install/packs/share serving, registry content serving, thumbs rendering,
+telemetry (the Rust server start still spawns tools/server_telemetry.py),
+gameui extras (pit button, mph HUD), updater/installer, Linux (launch under
+Proton is still the backend's).
+Next: events -> Rust (SSE), then install/packs/registry.
 
 ## Build
 
