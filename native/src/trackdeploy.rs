@@ -410,7 +410,10 @@ pub fn register_track_into(pkg: &Path, folder: &str, meta: &Value, check_game: b
     };
     let check = kspkg_write::verify(pkg);
     if !table_write_ok(&check) {
-        return json!({"ok": false, "error": "client archive failed verification after the table write", "detail": check});
+        // ⚠ put the old tables back: the bad ones were left on disk
+        let undone = kspkg_write::undo_inplace(pkg, &written);
+        return json!({"ok": false, "error": "client archive failed verification after the table write", "detail": check,
+                      "rolled_back": undone.is_ok(), "rollback_error": undone.err()});
     }
     forget_track_map();
     json!({"ok": true, "folder": folder, "display_name": display, "layout": layout,
@@ -459,7 +462,9 @@ pub fn unregister_track_into(pkg: &Path, folder: &str, display_name: &str, check
         Err(e) => return json!({"ok": false, "error": e}),
     };
     if !table_write_ok(&kspkg_write::verify(pkg)) {
-        return json!({"ok": false, "error": "client archive failed verification after the table write"});
+        let undone = kspkg_write::undo_inplace(pkg, &written);
+        return json!({"ok": false, "error": "client archive failed verification after the table write",
+                      "rolled_back": undone.is_ok(), "rollback_error": undone.err()});
     }
     forget_track_map();
     json!({"ok": true, "folder": folder, "display_name": display, "written": written})

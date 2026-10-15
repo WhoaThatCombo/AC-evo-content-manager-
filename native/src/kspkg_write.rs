@@ -228,7 +228,8 @@ pub fn write_inplace(archive: &Path, changes: &[(String, Vec<u8>)]) -> Result<Va
         Ok((added, replaced, n)) => {
             let size = std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
             Ok(json!({"added": added, "replaced": replaced, "repaired": repaired,
-                      "records": n, "size": size, "backup": bak}))
+                      "records": n, "size": size, "backup": bak,
+                      "undo": {"start": start, "len": orig}}))
         }
         Err(e) => {
             if let Ok(mut f) = OpenOptions::new().write(true).open(archive) {
@@ -239,6 +240,24 @@ pub fn write_inplace(archive: &Path, changes: &[(String, Vec<u8>)]) -> Result<Va
             Err(e)
         }
     }
+}
+
+/// Put back what write_inplace() replaced, from its .bak_tables copy (when
+/// the result does not verify). `written` is write_inplace's answer.
+pub fn undo_inplace(archive: &Path, written: &Value) -> Result<(), String> {
+    let _lock = crate::archlock::lock()?;
+    let start = written.pointer("/undo/start").and_then(|v| v.as_u64()).ok_or("nothing to undo")?;
+    let len = written.pointer("/undo/len").and_then(|v| v.as_u64()).ok_or("nothing to undo")?;
+    let bak = written.get("backup").and_then(|v| v.as_str()).ok_or("nothing to undo")?;
+    let tail = std::fs::read(bak).map_err(|e| format!("cannot read {bak}: {e}"))?;
+    if start + tail.len() as u64 != len {
+        return Err("the saved table does not fit this archive any more".into());
+    }
+    let mut f = OpenOptions::new().write(true).open(archive).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    f.write_all(&tail).map_err(|e| e.to_string())?;
+    f.set_len(len).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Structural check: sorted, unique, complete headers.

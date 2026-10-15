@@ -244,11 +244,13 @@ pub fn set_damage(pct: f64) -> Value {
     };
     let ver = kspkg_write::verify(&a);
     if ver["ok"] != true {
-        return json!({"ok": false, "error": format!("archive failed verification: {ver}")});
+        let undone = kspkg_write::undo_inplace(&a, &res);
+        return json!({"ok": false, "error": format!("archive failed verification: {ver}"), "rolled_back": undone.is_ok()});
     }
     for (path, blob) in &changes {
         if read(&a, path).as_deref() != Some(blob.as_slice()) {
-            return json!({"ok": false, "error": format!("readback of {path} does not match")});
+            let undone = kspkg_write::undo_inplace(&a, &res);
+            return json!({"ok": false, "error": format!("readback of {path} does not match"), "rolled_back": undone.is_ok()});
         }
     }
     let mut s = status();
