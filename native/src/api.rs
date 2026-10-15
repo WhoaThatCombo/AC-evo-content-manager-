@@ -339,7 +339,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/browser/status" | "/api/browser/discover" | "/api/browser/tag" | "/api/browser/needs"
             | "/api/browser/plan" | "/api/share" | "/api/progress" | "/api/drop/status" | "/api/mods/scan"
             | "/api/library" | "/api/library/clip" | "/api/library/export" | "/api/pack/preview"
-            | "/api/registry" | "/api/gamesettings/export" | "/api/models"),
+            | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -355,7 +355,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/assists" | "/api/gamesettings/write" | "/api/gamesettings/restore"
             | "/api/gamesettings/import" | "/api/gamesettings/restore_backup"
             | "/api/registry/save" | "/api/registry/delete" | "/api/share/track"
-            | "/api/auth/rotate" | "/api/auth/remote"),
+            | "/api/auth/rotate" | "/api/auth/remote" | "/api/penalties/set"),
         _ => false,
     }
 }
@@ -657,6 +657,11 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                     }
                 }
             }
+        }
+        (false, "/api/penalties") => json_resp(200, &blocking(crate::penalties::status).await),
+        (true, "/api/penalties/set") => {
+            let (side, off) = (bs("side"), bb("off"));
+            json_resp(200, &blocking(move || crate::penalties::set_penalties(&side, off)).await)
         }
         (false, "/api/registry") => json_resp(200, &json!({"servers": crate::registry::load(), "template": crate::registry::template()})),
         (false, "/api/gamesettings/export") => {
