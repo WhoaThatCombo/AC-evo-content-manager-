@@ -216,6 +216,9 @@ def _mod_files(name):
     machine six mods are client-side and one is on the server - so sharing
     those found no files and published an empty manifest.
     """
+    # ⚠ names are edited by hand and imported: "..\\..\\x" must not become a path
+    if not name or install._safe_base(name) != name:
+        return []
     dirs = []
     for fn in (install.mods_dir, install.client_mods_dir):
         try:
@@ -246,6 +249,10 @@ def _track_files(folder):
     Paths are `tracks/<folder>/<rel>`, which installs straight to the client's
     tracks folder - see contentsync.destination.
     """
+    # ⚠ a name like "..\\..\\.." or "C:\\Windows" served whole folders of the
+    # user's disk through the share routes, which need no password
+    if not folder or install._safe_folder(folder) != folder:
+        return []
     roots = [os.path.join(os.path.expanduser("~"), "Saved Games", "ACE",
                           "mods", "content", "tracks", folder),
              os.path.join(config.DATA, "track_packages", folder),
@@ -259,7 +266,11 @@ def _track_files(folder):
             for f in files:
                 p = os.path.join(base, f)
                 rel = os.path.relpath(p, root).replace("\\", "/")
-                out.append((f"tracks/{folder}/{rel}", p))
+                # only game content is offered (the Downloads fallback would
+                # otherwise share whatever else is in that folder)
+                from . import contentsync
+                if contentsync._content_allowed(rel):
+                    out.append((f"tracks/{folder}/{rel}", p))
         break
     return out
 

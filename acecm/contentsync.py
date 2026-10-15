@@ -573,7 +573,11 @@ def stale_files(man):
             folders.add(parts[1])
             keep.add("/".join(parts).lower())
     out = []
+    from . import install
     for folder in folders:
+        # only a plain track folder name from the host
+        if install._safe_folder(folder) != folder:
+            continue
         try:
             root = _under(tracks_dir(), folder)
         except ValueError:
@@ -612,7 +616,17 @@ def remove_stale(paths):
 
 
 def _under(root, *parts):
-    """Absolute path inside root, or ValueError if it would escape."""
+    """Absolute path inside root, or ValueError if it would escape.
+
+    ⚠ Every component must be a plain name: no "." / ".." (a manifest path
+    tracks/./x made the WHOLE tracks folder one track's folder, so every other
+    track's files counted as stale and were deleted), no ":" (NTFS alternate
+    data streams, drive letters) and no NUL. Names come from remote hosts.
+    """
+    for p in parts:
+        for c in str(p).replace("\\", "/").split("/"):
+            if c in (".", "..") or ":" in c or "\0" in c:
+                raise ValueError("bad path component")
     root = os.path.abspath(root)
     dest = os.path.abspath(os.path.join(root, *parts))
     try:
@@ -824,7 +838,9 @@ def fetch_track_pack(base, sid, folder, files, progress=None):
 
 def _register_downloaded_track(folder, dest_dir=None):
     """Put the downloaded track in the client's system tables."""
-    from . import tracks as trackmod
+    from . import install, tracks as trackmod
+    if not folder or install._safe_folder(folder) != folder:
+        return {"ok": False, "error": f"not a track folder name: {folder!r}"}
     dest_dir = dest_dir or os.path.join(tracks_dir(), folder)
     meta = {}
     side = os.path.join(dest_dir, "acecm_track.json")
@@ -855,6 +871,10 @@ def install_files(need, status, register=()):
         rel = (e.get("path") or "").replace("\\", "/")
         parts = rel.split("/")
         if len(parts) >= 3 and parts[0] == "tracks" and parts[1]:
+            from . import install
+            if install._safe_folder(parts[1]) != parts[1]:
+                logs.LOG.warning("skipping %s: not a track folder name", rel)
+                continue
             tracks[parts[1]].append(e)
         else:
             rest.append(e)

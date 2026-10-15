@@ -152,7 +152,14 @@ def plan_car(base, fname, name=""):
     d = install.client_mods_dir()
     if not d:
         return {"ok": False, "error": "no client mods folder"}
-    dest = os.path.join(d, fname)
+    # ⚠ fname is the SHARE's: "..\\..\\Startup\\x.cmd" wrote anywhere
+    if install._safe_base(fname) != fname or not fname.lower().endswith(".kspkg"):
+        return {"ok": False, "error": "not a car package name"}
+    from . import contentsync
+    try:
+        dest = contentsync._under(d, fname)
+    except ValueError as ex:
+        return {"ok": False, "error": str(ex)}
     base_name = fname[:-6] if fname.lower().endswith(".kspkg") else fname
     side = os.path.join(d, base_name + ".json")
     man = manifest(base)
