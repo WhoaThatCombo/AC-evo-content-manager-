@@ -630,8 +630,7 @@ fn seen_note(seen: &Value) -> String {
 pub fn browser_chain() -> Value {
     let st = state();
     let cu = st.get("client_url").cloned().unwrap_or(json!({}));
-    let captured = std::fs::read(paths::data().join("server_list.json")).ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    let captured = crate::jsoncache::read(&paths::data().join("server_list.json"))
         .and_then(|v| v.get("servers").and_then(|s| s.as_array()).map(|a| a.len())).unwrap_or(0);
     let exe = game_exe();
     let live = join_state();
@@ -829,11 +828,13 @@ pub fn server_list() -> Value {
                 out.extend(std::mem::take(&mut g));
                 let v = Value::Object(out);
                 let _ = std::fs::write(&cache, profiles::py_dumps(&v));
+                crate::jsoncache::forget(&cache);
                 return v;
             }
         }
     }
-    match std::fs::read(&cache).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+    // ⚠ 1.6 MB of JSON: parsed once per change, not once per Play-page open
+    match crate::jsoncache::read(&cache) {
         Some(Value::Object(mut got)) => {
             let direct = got.get("source").and_then(|v| v.as_str()) == Some("lobby");
             let mtime = std::fs::metadata(&cache).ok().and_then(|m| m.modified().ok())
