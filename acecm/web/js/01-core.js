@@ -176,6 +176,34 @@ function liveWatch(pick, running, onDone, onTick) {
   liveKick();
   return () => { ended = true; if (off) off(); };
 }
+/* ---- car pictures ------------------------------------------------------
+   ⚠ The webview keeps an image for the whole page under the same URL, so a
+   car the server REDREW (a picture pass, a garage paint change) kept its old
+   picture until the app restarted. Every car picture URL carries the
+   server's picture generation (picV), and pictures already on screen are
+   pointed at the new one when it moves - at most every 10 s during a pass,
+   so a list of 100 cars is not refetched once per car drawn. */
+let picGen = 0, picAt = 0;
+function picV() { return picGen ? '&v=' + picGen : ''; }
+function refreshCarPics() {
+  picAt = Date.now();
+  document.querySelectorAll('img[src*="api/thumb/car"]').forEach(img => {
+    const src = img.getAttribute('src') || '';
+    if (/[?&](force|t)=/.test(src)) return;  // already a one-off URL
+    img.addEventListener('load', () => { img.style.visibility = ''; }, { once: true });
+    img.setAttribute('src', src.replace(/&v=\d+/, '') + picV());
+  });
+}
+function watchPics(s) {
+  const g = s && s.pic_gen;
+  if (!g || g === picGen) return;
+  const first = !picGen;
+  picGen = g;
+  if (first) return;
+  const busy = s.thumbs && s.thumbs.state === 'running';
+  if (!busy || Date.now() - picAt > 10000) refreshCarPics();
+  else setTimeout(() => { if (Date.now() - picAt > 10000) refreshCarPics(); }, 11000);
+}
 function liveStart() {
   if (live.started) return;
   live.started = true;
@@ -199,6 +227,7 @@ function liveStart() {
   setInterval(liveTick, 1000);
   liveOn(paintActivity);
   liveOn(paintSideStat);
+  liveOn(watchPics);
   fetch('/api/version').then(r => r.json())
     .then(v => { live.version = v && v.version; }).catch(() => {});
   liveKick();

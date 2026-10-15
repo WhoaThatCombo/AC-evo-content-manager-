@@ -836,7 +836,7 @@ function editor(prof, trk, opts, extra) {
       img.style.cssText = 'width:100%;display:block;aspect-ratio:3/2;'
         + 'object-fit:cover;background:#0c0e11';
       img.src = 'api/thumb/car?id=' + encodeURIComponent(x.model || x.id)
-              + '&preset=' + encodeURIComponent(x.id);
+              + '&preset=' + encodeURIComponent(x.id) + picV();
       // a car with no render yet (server-only mods have no client package)
       // shows a blank tile rather than a broken image
       img.onerror = () => { img.style.visibility = 'hidden'; };

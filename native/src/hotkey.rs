@@ -54,10 +54,51 @@ mod win {
         }).as_ref()
     }
 
+    /// The attached HID devices, as one number: changes on any plug/unplug.
+    /// (GetRawInputDeviceList touches no registry - safe to call at 20 Hz.)
+    fn hid_signature() -> u64 {
+        use windows_sys::Win32::UI::Input::{GetRawInputDeviceList, RAWINPUTDEVICELIST};
+        let size = std::mem::size_of::<RAWINPUTDEVICELIST>() as u32;
+        let mut n = 0u32;
+        unsafe { GetRawInputDeviceList(std::ptr::null_mut(), &mut n, size) };
+        let mut list: Vec<RAWINPUTDEVICELIST> = Vec::with_capacity(n as usize + 8);
+        let mut cap = n + 8;
+        let got = unsafe { GetRawInputDeviceList(list.as_mut_ptr(), &mut cap, size) };
+        if got == u32::MAX {
+            return n as u64;
+        }
+        unsafe { list.set_len(got as usize) };
+        list.iter().fold(0xcbf29ce484222325u64, |h, d| (h ^ (d.hDevice as u64 ^ (d.dwType as u64) << 48)).wrapping_mul(0x100000001b3))
+    }
+
+    /// Ids that failed, and the device list they failed against.
+    struct Absent { sig: u64, at: std::time::Instant, ids: std::collections::HashSet<u32> }
+    static ABSENT: std::sync::Mutex<Option<Absent>> = std::sync::Mutex::new(None);
+
+    /// ⚠ joyGetPosEx on an id with nothing behind it (a wheel switched off)
+    /// re-enumerates every joystick and LEAKS the DirectInput calibration
+    /// registry keys it opened - ~12 handles a call here, 870k after an hour
+    /// of the pit-button watcher, and the whole app slowed down. So an id that
+    /// failed is not asked again until a device is plugged/unplugged (or a
+    /// minute passes, in case the list does not show the change).
     pub fn read_joy(id: u32) -> Option<u32> {
         let (_, f) = winmm()?;
+        let sig = hid_signature();
+        {
+            let mut g = ABSENT.lock().unwrap();
+            let a = g.get_or_insert_with(|| Absent { sig, at: std::time::Instant::now(), ids: Default::default() });
+            if a.sig != sig || a.at.elapsed().as_secs() >= 60 {
+                *a = Absent { sig, at: std::time::Instant::now(), ids: Default::default() };
+            }
+            if a.ids.contains(&id) {
+                return None;
+            }
+        }
         let mut info = JoyInfoEx { size: std::mem::size_of::<JoyInfoEx>() as u32, flags: 0x80, x: 0, y: 0, z: 0, r: 0, u: 0, v: 0, buttons: 0, button_number: 0, pov: 0, r1: 0, r2: 0 };
         if unsafe { f(id, &mut info) } != 0 {
+            if let Some(a) = ABSENT.lock().unwrap().as_mut() {
+                a.ids.insert(id);
+            }
             return None;
         }
         Some(info.buttons)

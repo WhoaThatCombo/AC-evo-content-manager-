@@ -119,7 +119,7 @@ fn build() -> Value {
     let covers = timed("covers", crate::thumbs::cover_job);
     let mut st = STATE.lock().unwrap();
     let snap = json!({"ok": true, "at": now(), "drive": d, "progress": progress, "compress": compress,
-        "evoshare": evoshare, "thumbs": thumbs, "covers": covers,
+        "evoshare": evoshare, "thumbs": thumbs, "covers": covers, "pic_gen": crate::thumbs::pic_gen(),
         "servers": if st.servers.is_null() { json!([]) } else { st.servers.clone() },
         "proxy": if st.proxy.is_null() { json!({}) } else { st.proxy.clone() },
         "lobby": if st.lobby.is_null() { json!({}) } else { st.lobby.clone() }});

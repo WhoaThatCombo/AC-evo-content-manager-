@@ -1311,7 +1311,7 @@ async function drivePage() {
             // ⚠ preset too: trims share a model folder, so id alone showed
             // the same picture for every trim and never your livery.
             img.src = 'api/thumb/car?id=' + encodeURIComponent(c.model || c.id)
-                    + '&preset=' + encodeURIComponent(c.id);
+                    + '&preset=' + encodeURIComponent(c.id) + picV();
             img.onerror = () => { img.style.visibility = 'hidden'; };
             r.append(img);
           }
@@ -1800,7 +1800,7 @@ async function drivePage() {
     paintHead(carHead,
       'api/thumb/car?make=1&id=' + encodeURIComponent((c && (c.model || c.id)) || '')
         + '&preset=' + encodeURIComponent((c && c.id) || '')
-        + (thumbBust ? '&t=' + thumbBust : ''),
+        + (thumbBust ? '&t=' + thumbBust : '') + picV(),
       c ? c.label : 'Pick a car',
       c ? c.id : '',
       () => { paintCars(); openPicker('Choose a car', carSearch, carList); });

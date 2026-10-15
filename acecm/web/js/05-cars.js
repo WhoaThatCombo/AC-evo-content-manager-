@@ -203,7 +203,7 @@ async function carGallery(p) {
         img.alt = '';   // blank, not a broken-image glyph + caption
         img.style.cssText = 'width:100%;display:block;aspect-ratio:3/2;'
           + 'object-fit:cover;background:#0c0e11';
-        img.src = 'api/thumb/car?id=' + encodeURIComponent(x.id);
+        img.src = 'api/thumb/car?id=' + encodeURIComponent(x.id) + picV();
         // no render yet -> leave the tile blank rather than show a broken image
         img.onerror = () => { img.style.visibility = 'hidden'; };
         const cap = el('div');
@@ -487,7 +487,7 @@ async function carsPage() {
     // car being looked at at full size, and the request may take a moment
     // the first time because evoview has to draw it.
     const shotUrl = (force) => 'api/thumb/car?big=1&id='
-      + encodeURIComponent(m.model) + (force ? '&force=1&t=' + Date.now() : '');
+      + encodeURIComponent(m.model) + (force ? '&force=1&t=' + Date.now() : picV());
     img.src = shotUrl(false);
     // ⚠ A car with no render must not leave a broken-image icon sitting in
     // the middle of the pane - say what is missing instead.

@@ -85,7 +85,7 @@ async function homePage() {
     const img = el('img');
     img.alt = car.label || '';
     img.src = 'api/thumb/car?id=' + encodeURIComponent(car.model || car.id)
-      + '&preset=' + encodeURIComponent(car.id);
+      + '&preset=' + encodeURIComponent(car.id) + picV();
     img.onerror = () => pic.remove();
     pic.append(img);
     hero.append(pic);

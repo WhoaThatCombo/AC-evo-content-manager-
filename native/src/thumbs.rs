@@ -67,18 +67,61 @@ fn garage_paints() -> Map<String, Value> {
 }
 
 /// (model, visual preset, EXT SKIN paint) for a mechanical preset id.
-pub fn preset_look(preset_id: &str) -> (String, String, String) {
-    let t = carsmap::table(false);
-    let mut model = t.get("presets").and_then(|p| p.get(preset_id)).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let visual = t.get("variants").and_then(|v| v.get(preset_id)).and_then(|v| v.get("visual"))
-        .and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if model.is_empty() {
-        // ⚠ a MOD's presets are not in the base game's table: its own
-        // manifest names the car. Without this the model was the preset id,
-        // no garage paint matched, and the render fell back to the bare model
-        model = crate::mods::car_models().get(preset_id).and_then(|v| v.as_str()).unwrap_or(preset_id).to_string();
+/// mods::car_models(), reused for a few seconds (it lists both mod folders:
+/// ~3 ms, and preset_look runs once per car in a picture check).
+fn mod_models() -> Map<String, Value> {
+    static M: Mutex<Option<(std::time::Instant, Map<String, Value>)>> = Mutex::new(None);
+    let mut g = M.lock().unwrap();
+    if let Some((at, m)) = g.as_ref() {
+        if at.elapsed().as_secs() < 3 {
+            return m.clone();
+        }
     }
-    let paint = garage_paints().get(&model).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let m = crate::mods::car_models();
+    *g = Some((std::time::Instant::now(), m.clone()));
+    m
+}
+
+/// Everything preset_look() reads, as plain maps, rebuilt every few
+/// seconds. ⚠ It used to clone the whole preset table, the mod map and the
+/// garage paints on EVERY call - ~2 ms each, once per car in a picture check.
+struct Looks {
+    model: HashMap<String, String>,
+    visual: HashMap<String, String>,
+    paint: HashMap<String, String>,
+}
+
+static LOOKS: Mutex<Option<(std::time::Instant, std::sync::Arc<Looks>)>> = Mutex::new(None);
+
+fn looks() -> std::sync::Arc<Looks> {
+    if let Some((at, l)) = LOOKS.lock().unwrap().as_ref() {
+        if at.elapsed().as_secs() < 3 {
+            return l.clone();
+        }
+    }
+    let t = carsmap::table(false);
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let mut model: HashMap<String, String> = t.get("presets").and_then(|p| p.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), s(v))).collect()).unwrap_or_default();
+    // ⚠ a MOD's presets are not in the base game's table: its own manifest
+    // names the car. Without this the model was the preset id, no garage
+    // paint matched, and the render fell back to the bare model
+    for (k, v) in mod_models() {
+        model.entry(k).or_insert_with(|| s(&v));
+    }
+    let visual = t.get("variants").and_then(|p| p.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.get("visual").map(s).unwrap_or_default())).collect()).unwrap_or_default();
+    let paint = garage_paints().iter().map(|(k, v)| (k.clone(), s(v))).collect();
+    let l = std::sync::Arc::new(Looks { model, visual, paint });
+    *LOOKS.lock().unwrap() = Some((std::time::Instant::now(), l.clone()));
+    l
+}
+
+pub fn preset_look(preset_id: &str) -> (String, String, String) {
+    let l = looks();
+    let model = l.model.get(preset_id).filter(|m| !m.is_empty()).cloned().unwrap_or_else(|| preset_id.to_string());
+    let visual = l.visual.get(preset_id).cloned().unwrap_or_default();
+    let paint = l.paint.get(&model).cloned().unwrap_or_default();
     (model, visual, paint)
 }
 
@@ -309,8 +352,26 @@ fn load_records() -> Map<String, Value> {
         .and_then(|v| v.as_object().cloned()).unwrap_or_default()).clone()
 }
 
+/// Goes up whenever a car picture is drawn; the UI puts it in picture URLs.
+/// ⚠ The webview keeps an image for the whole page under the same URL
+/// (max-age does not matter), so a car redrawn by a pass or a garage paint
+/// change kept its OLD picture on the Drive card for as long as the app ran.
+/// Starts at the launch time so a restarted app never repeats a value.
+static PIC_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn pic_gen() -> u64 {
+    use std::sync::atomic::Ordering::SeqCst;
+    if PIC_GEN.load(SeqCst) == 0 {
+        let t = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1);
+        let _ = PIC_GEN.compare_exchange(0, t, SeqCst, SeqCst);
+    }
+    PIC_GEN.load(SeqCst)
+}
+
 /// Remember what `p` was drawn from (None: forget it), and save.
 fn set_record(p: &Path, v: Option<Value>) {
+    pic_gen();
+    PIC_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     load_records();
     let mut g = RECORDS.lock().unwrap();
     let m = g.get_or_insert_with(Map::new);
@@ -433,6 +494,16 @@ fn renderer_id() -> String {
 pub fn ensure_renders() -> bool {
     if job_get(&JOB).get("state").and_then(|v| v.as_str()) == Some("running") {
         return false;
+    }
+    // ⚠ at most every 15 s: Home and Play both ask on every visit, and the
+    // answer only changes when a viewer, game or mod update lands
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    {
+        let mut g = LAST.lock().unwrap();
+        if g.map(|t| t.elapsed().as_secs() < 15).unwrap_or(false) {
+            return false;
+        }
+        *g = Some(std::time::Instant::now());
     }
     let rid = renderer_full_id();
     if rid.is_empty() {

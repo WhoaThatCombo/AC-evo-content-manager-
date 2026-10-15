@@ -104,7 +104,27 @@ fn mark(cars: &mut [Value]) {
 }
 
 /// Every car that has geometry, cached on the packages AND the mod folders.
+/// index(false), reused for a few seconds. ⚠ Each call lists every package,
+/// stats them, counts both mod folders and parses index.json - ~26 ms - and
+/// a picture check asks package_for() once per car: 121 cars made Home and
+/// Play take 1-3 s to open on a real install.
+static INDEX_MEM: std::sync::Mutex<Option<(std::time::Instant, Value)>> = std::sync::Mutex::new(None);
+const INDEX_TTL_MS: u128 = 3000;
+
 pub fn index(refresh: bool) -> Value {
+    if !refresh {
+        if let Some((at, v)) = INDEX_MEM.lock().unwrap().as_ref() {
+            if at.elapsed().as_millis() < INDEX_TTL_MS {
+                return v.clone();
+            }
+        }
+    }
+    let v = index_now(refresh);
+    *INDEX_MEM.lock().unwrap() = Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
+fn index_now(refresh: bool) -> Value {
     let pkgs = packages();
     if pkgs.is_empty() {
         return json!({"error": "game install not found - set the game folder in Settings", "cars": []});
@@ -232,12 +252,26 @@ pub fn viewer_exe() -> Option<String> {
 
 /// Which package holds this car: the base game, or a mod's own.
 pub fn package_for(car_id: &str) -> Option<String> {
-    for c in index(false).get("cars").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-        if c.get("id").and_then(|v| v.as_str()) == Some(car_id) {
-            return c.get("pkg").and_then(|v| v.as_str()).filter(|p| !p.is_empty()).map(String::from).or_else(package);
+    // car id -> its own package, from index(), rebuilt every few seconds
+    // (scanning a cloned index per call cost ~2 ms a car)
+    static MAP: std::sync::Mutex<Option<(std::time::Instant, std::collections::HashMap<String, String>)>> = std::sync::Mutex::new(None);
+    let mut g = MAP.lock().unwrap();
+    if !g.as_ref().map(|(at, _)| at.elapsed().as_millis() < INDEX_TTL_MS).unwrap_or(false) {
+        let mut m = std::collections::HashMap::new();
+        for c in index(false).get("cars").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+            if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
+                let pkg = c.get("pkg").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                m.entry(id.to_string()).or_insert(pkg);
+            }
         }
+        *g = Some((std::time::Instant::now(), m));
     }
-    package()
+    let hit = g.as_ref().and_then(|(_, m)| m.get(car_id).cloned());
+    drop(g);
+    match hit {
+        Some(p) if !p.is_empty() => Some(p),
+        _ => package(),
+    }
 }
 
 /// evoview is a console binary: its own console, hidden; cwd is our data folder.
