@@ -1893,7 +1893,7 @@ def serve():
             backend.lobby_prefetch()
         except Exception as ex:                        # noqa: BLE001
             logs.LOG.warning("lobby prefetch at startup: %s", ex)
-        # ⚠ Warm the EvoForge directory the same way, for the same reason. Since
+        # ⚠ Warm the server directory the same way, for the same reason. Since
         # it became non-blocking (so a slow host cannot stall the Drive list past
         # the point the browser gives up), the FIRST call returns whatever is
         # cached - nothing, on a fresh start - and fills in afterwards. Without

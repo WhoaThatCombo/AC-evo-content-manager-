@@ -52,7 +52,7 @@ fn import_root() -> PathBuf {
     home().join("Saved Games").join("ACE").join("mods").join("content").join("tracks")
 }
 
-/// Track folders players have imported loose (EvoForge writes these).
+/// Track folders players have imported loose (third-party tools write these).
 pub fn client_track_folders() -> Vec<String> {
     let d = import_root();
     let mut v: Vec<String> = std::fs::read_dir(&d).map(|rd| rd.flatten()
@@ -83,7 +83,7 @@ fn strip_name(f: &str) -> String {
     title(&f.rsplit_once('_').map(|(a, _)| a).unwrap_or(f).replace('_', " "))
 }
 
-/// One canonical display name per folder. ⚠ Stripping EvoForge's random
+/// One canonical display name per folder. ⚠ Stripping an importer's random
 /// "_xxxx" suffix collides for real (Tatsumi PA and Daishi PA both strip to
 /// "Shutoko R"), so a folder whose stripped name is not unique keeps its
 /// full name - upsert_track_row keys by display name.
@@ -121,7 +121,7 @@ impl TrackFolder {
 }
 
 /// An imported track folder as an installable source (root .scene, .track
-/// and containers\, exactly what EvoForge writes).
+/// and containers\, exactly what track importers write).
 pub fn read_track_folder(src: &Path, folder: Option<&str>) -> Result<TrackFolder, String> {
     let own = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let folder = folder.filter(|f| !f.is_empty()).map(String::from).unwrap_or(own.clone());

@@ -165,6 +165,6 @@ pub fn fetch(force: bool, block: bool) -> Value {
         return json!({"ok": true, "servers": d.get("servers").cloned().unwrap_or(json!([])), "cached": true, "stale": true, "error": last});
     }
     MEM.lock().unwrap().failed_at = now();
-    crate::logs::info(format!("evoforge registry unavailable: {last}"));
+    crate::logs::info(format!("server directory unavailable: {last}"));
     json!({"ok": false, "servers": [], "error": if last.is_empty() { "unavailable".to_string() } else { last }})
 }

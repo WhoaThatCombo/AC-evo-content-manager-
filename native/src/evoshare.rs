@@ -65,7 +65,7 @@ pub fn manifest(base: &str) -> Value {
     };
     let has = d.get("content").map(|c| match c { Value::Array(a) => !a.is_empty(), Value::Null => false, _ => true }).unwrap_or(false);
     if !d.is_object() || !has {
-        return json!({"ok": false, "error": "not an EvoForge share"});
+        return json!({"ok": false, "error": "not a content share"});
     }
     let mut out = Map::new();
     out.insert("ok".into(), json!(true));
