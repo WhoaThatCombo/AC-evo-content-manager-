@@ -33,5 +33,13 @@ fn main() {
         t("overview::state", acecm::overview::state);
         t("gamesettings::state", acecm::gamesettings::state);
         t("autoshare state", || acecm::registry::public_list(""));
+        t("events snapshot(fresh)", || acecm::events::snapshot(true));
+        t("drive::status", acecm::drive::status);
+        t("jobs::progress", acecm::jobs::progress);
+        t("compress::status", acecm::compress::status);
+        t("evoshare::status", acecm::evoshare::status);
+        t("thumbs::job", acecm::thumbs::job);
+        t("backend::join_state", acecm::backend::join_state);
+        t("serverproc::start_state", acecm::serverproc::start_state);
     }
 }

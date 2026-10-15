@@ -116,6 +116,7 @@ pub fn ensure_steam(wait: f64) -> Value {
         }
         match c.spawn() {
             Ok(_) => {
+                procs::invalidate_snapshot();
                 started = true;
                 logs::info(format!("started Steam; waiting up to {wait:.0}s for the client"));
             }
@@ -183,7 +184,10 @@ fn spawn(argv: &[String], cwd: &str, env: &[(String, String)]) -> std::io::Resul
     for (k, v) in env {
         c.env(k, v);
     }
-    c.spawn().map(|_| ())
+    let r = c.spawn().map(|_| ());
+    // the caller polls for this process next (snapshot cache)
+    procs::invalidate_snapshot();
+    r
 }
 
 /// Start the client, rewriting the exe first so Steam cannot skip us.

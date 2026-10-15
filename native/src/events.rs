@@ -25,6 +25,15 @@ struct State {
 static STATE: Mutex<State> = Mutex::new(State { snap: None, slow_at: None, servers: Value::Null, proxy: Value::Null, lobby: Value::Null });
 static STARTED: Mutex<bool> = Mutex::new(false);
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+/// When a page last read the feed. ⚠ Nobody reading for IDLE seconds puts
+/// the builder to sleep (a headless server whose remote viewers left kept
+/// probing every 0.8 s forever); the next read wakes it and rebuilds.
+static LAST_READ: Mutex<Option<Instant>> = Mutex::new(None);
+const IDLE: f64 = 30.0;
+
+fn dormant() -> bool {
+    LAST_READ.lock().unwrap().map(|t| t.elapsed().as_secs_f64() > IDLE).unwrap_or(true)
+}
 
 fn now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
@@ -132,7 +141,11 @@ pub fn start() {
         // woken early by kick() after something starts
         let (m, cv) = &WAKE;
         let g = m.lock().unwrap();
-        let (mut g, _) = cv.wait_timeout_while(g, Duration::from_secs_f64(FAST), |k| !*k).unwrap();
+        let mut g = if dormant() {
+            cv.wait_while(g, |k| !*k).unwrap()
+        } else {
+            cv.wait_timeout_while(g, Duration::from_secs_f64(FAST), |k| !*k).unwrap().0
+        };
         *g = false;
     }).ok();
 }
@@ -147,6 +160,13 @@ pub fn kick() {
 /// The latest snapshot - never waits on a probe (except the very first).
 pub fn snapshot(fresh: bool) -> Value {
     start();
+    let was_dormant = dormant();
+    *LAST_READ.lock().unwrap() = Some(Instant::now());
+    // a sleeping builder's last snapshot is stale: build now, and wake it
+    let fresh = fresh || was_dormant;
+    if was_dormant {
+        kick();
+    }
     let cur = STATE.lock().unwrap().snap.clone();
     let snap = match cur {
         Some(s) if !fresh => s,

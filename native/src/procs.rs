@@ -32,14 +32,15 @@ mod imp {
     }
 
     static SNAP: std::sync::Mutex<Option<(std::time::Instant, Vec<Proc>)>> = std::sync::Mutex::new(None);
-    const SNAP_TTL_MS: u128 = 400;
+    const SNAP_TTL_MS: u128 = 1500;
 
-    /// Every process, from a Toolhelp snapshot at most 400 ms old.
-    /// ⚠ A snapshot costs ~10 ms (hundreds of processes), and one request
-    /// used to take several (game_running + server_pids per profile + port
-    /// checks). Anything WE spawn or kill clears it (invalidate_snapshot),
-    /// so our own changes are seen at once; loops waiting on someone else's
-    /// process poll slower than the TTL anyway.
+    /// Every process, from a snapshot at most 1.5 s old.
+    /// ⚠ A snapshot costs ~7 ms (hundreds of processes and their threads),
+    /// one request used to take several, and the live feed took one per
+    /// tick - 1.5% of a core for as long as a window was open. Anything WE
+    /// spawn or kill clears it (invalidate_snapshot), so our own changes are
+    /// seen at once; a process someone else starts or ends shows up within
+    /// 1.5 s, well inside what every waiting loop tolerates.
     pub fn snapshot() -> Vec<Proc> {
         let mut g = SNAP.lock().unwrap();
         if let Some((at, v)) = g.as_ref() {
@@ -56,8 +57,68 @@ mod imp {
         *SNAP.lock().unwrap() = None;
     }
 
-    /// Every process, from one Toolhelp snapshot.
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQuerySystemInformation(class: u32, buf: *mut core::ffi::c_void, len: u32, ret: *mut u32) -> i32;
+    }
+
+    /// Every process, from one NtQuerySystemInformation(SystemProcessInformation)
+    /// call - what Toolhelp wraps, at about half its cost (7 vs 12 ms here).
+    /// Falls back to Toolhelp if the call or the layout ever disagrees.
     pub fn snapshot_fresh() -> Vec<Proc> {
+        const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
+        let mut buf: Vec<u64> = vec![0; (2 << 20) / 8];
+        for _ in 0..4 {
+            let mut need = 0u32;
+            let st = unsafe { NtQuerySystemInformation(5, buf.as_mut_ptr() as *mut _, (buf.len() * 8) as u32, &mut need) };
+            if st == STATUS_INFO_LENGTH_MISMATCH {
+                buf = vec![0; (need as usize + (1 << 16)) / 8 + 1];
+                continue;
+            }
+            if st < 0 {
+                break;
+            }
+            // SYSTEM_PROCESS_INFORMATION (x64): NextEntryOffset @0,
+            // ImageName {u16 len, u16 max, ptr} @0x38, UniqueProcessId @0x50,
+            // InheritedFromUniqueProcessId @0x58
+            let base = buf.as_ptr() as *const u8;
+            let total = buf.len() * 8;
+            let mut out = Vec::new();
+            let mut off = 0usize;
+            loop {
+                if off + 0x60 > total {
+                    return toolhelp();
+                }
+                unsafe {
+                    let e = base.add(off);
+                    let next = (e as *const u32).read_unaligned() as usize;
+                    let nlen = (e.add(0x38) as *const u16).read_unaligned() as usize / 2;
+                    let nptr = (e.add(0x40) as *const *const u16).read_unaligned();
+                    let pid = (e.add(0x50) as *const usize).read_unaligned() as u32;
+                    let ppid = (e.add(0x58) as *const usize).read_unaligned() as u32;
+                    let name = if nptr.is_null() || nlen == 0 {
+                        String::new()
+                    } else {
+                        let start = nptr as usize;
+                        if start < base as usize || start + nlen * 2 > base as usize + total {
+                            return toolhelp();
+                        }
+                        String::from_utf16_lossy(std::slice::from_raw_parts(nptr, nlen))
+                    };
+                    out.push(Proc { pid, ppid, name });
+                    if next == 0 {
+                        break;
+                    }
+                    off += next;
+                }
+            }
+            return out;
+        }
+        toolhelp()
+    }
+
+    /// Every process, from one Toolhelp snapshot.
+    pub fn toolhelp() -> Vec<Proc> {
         let mut out = vec![];
         unsafe {
             let snap: HANDLE = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -232,6 +293,24 @@ mod tests {
     }
 
     #[test]
+    fn ntquery_matches_toolhelp() {
+        let a = snapshot_fresh();
+        let b = toolhelp();
+        let me = std::process::id();
+        let mine = a.iter().find(|p| p.pid == me).expect("self in the snapshot");
+        let th = b.iter().find(|p| p.pid == me).unwrap();
+        assert_eq!(mine.name.to_lowercase(), th.name.to_lowercase());
+        assert_eq!(mine.ppid, th.ppid);
+        // the two calls are a moment apart: allow a little churn
+        let pa: std::collections::HashSet<u32> = a.iter().map(|p| p.pid).collect();
+        let common = b.iter().filter(|p| pa.contains(&p.pid)).count();
+        assert!(common * 100 >= b.len() * 95, "{common} of {}", b.len());
+        let same_name = b.iter().filter(|p| p.pid > 4)
+            .filter(|p| a.iter().any(|q| q.pid == p.pid && q.name.eq_ignore_ascii_case(&p.name))).count();
+        assert!(same_name * 100 >= (b.len() - 2) * 95);
+    }
+
+    #[test]
     fn finds_a_listening_port() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
@@ -247,6 +326,8 @@ mod tests {
         hide(&mut c);
         let mut child = c.spawn().unwrap();
         let pid = child.id();
+        // the contract: whoever spawns and then looks itself up clears the cache
+        invalidate_snapshot();
         assert!(alive(pid));
         assert!(pids_named(&["PING"]).contains(&pid));
         assert!(kill(pid));
