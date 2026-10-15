@@ -345,7 +345,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/browser/plan" | "/api/share" | "/api/progress" | "/api/drop/status" | "/api/mods/scan"
             | "/api/library" | "/api/library/clip" | "/api/library/export" | "/api/pack/preview"
             | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"
-            | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"),
+            | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"
+            | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -363,7 +364,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/registry/save" | "/api/registry/delete" | "/api/share/track"
             | "/api/auth/rotate" | "/api/auth/remote" | "/api/penalties/set"
             | "/api/thumbs/build" | "/api/thumbs/covers" | "/api/viewer/open" | "/api/viewer/open_track"
-            | "/api/compress/start"),
+            | "/api/compress/start" | "/api/evoshare/start" | "/api/evoshare/cancel"),
         _ => false,
     }
 }
@@ -666,6 +667,25 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                 }
             }
         }
+        (false, "/api/drive") => json_resp(200, &blocking(|| {
+            // fills in any car with no picture yet, in the background
+            crate::thumbs::ensure_renders();
+            crate::drive::options()
+        }).await),
+        (false, "/api/drive/servers") => json_resp(200, &blocking(crate::drive::public_servers).await),
+        (false, "/api/evoshare/manifest") => { let b = q_get(&query, "base").unwrap_or_default(); json_resp(200, &blocking(move || crate::evoshare::manifest(&b)).await) }
+        (false, "/api/evoshare/plan") => {
+            let (b, f) = (q_get(&query, "base").unwrap_or_default(), q_get(&query, "file").unwrap_or_default());
+            let k = q_get(&query, "kind").filter(|k| !k.is_empty()).unwrap_or_else(|| "track".into());
+            json_resp(200, &blocking(move || crate::evoshare::plan(&b, &f, &k)).await)
+        }
+        (false, "/api/evoshare/status") => json_resp(200, &crate::evoshare::status()),
+        (true, "/api/evoshare/start") => {
+            let (b, f, fo) = (bs("base"), bs("file"), bs("folder"));
+            let k = { let k = bs("kind"); if k.is_empty() { "track".to_string() } else { k } };
+            json_resp(200, &crate::evoshare::start(&b, &f, &fo, &k))
+        }
+        (true, "/api/evoshare/cancel") => json_resp(200, &crate::evoshare::cancel()),
         (false, "/api/thumbs/status") => json_resp(200, &blocking(crate::thumbs::status).await),
         (true, "/api/thumbs/build") => { let f = bb("force"); json_resp(200, &crate::thumbs::build_all(f)) }
         (true, "/api/thumbs/covers") => { let f = bb("force"); json_resp(200, &crate::thumbs::build_covers(f)) }

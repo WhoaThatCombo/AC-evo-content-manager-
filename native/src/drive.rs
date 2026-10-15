@@ -1851,3 +1851,112 @@ pub fn direct_lookup(raw: &str) -> Value {
     json!({"ok": true, "source": "unknown", "ip": host, "tcp": tcp, "udp": tcp, "name": format!("{host}:{tcp}"), "cars": [],
         "note": "not in your captured list and the host is not sharing through ACECM, so its track and cars are unknown - joining will still work if the address is right"})
 }
+
+// --------------------------------------------------------- the Drive page --
+/// ACECM profiles as Drive can start / join them.
+fn local_briefs() -> Vec<Value> {
+    let mut out = Vec::new();
+    for p in profiles::load() {
+        let st = serverproc::status(&p);
+        let ev = lobby::event(&p);
+        let evs = |k: &str| ev.get(k).map(|v| s_or(Some(v))).unwrap_or_default();
+        let tcp = { let t = int0(p.get("tcp_port")); if t == 0 { 9700 } else { t } };
+        let http = { let t = int0(p.get("http_port")); if t == 0 { 8080 } else { t } };
+        let maxp = { let t = int0(p.get("max_players")); if t == 0 { 90 } else { t } };
+        let custom = s_or(p.get("custom_track")).trim().to_string();
+        let track = { let t = evs("track"); if t.is_empty() { s_or(p.get("custom_track")) } else { t } };
+        out.push(json!({
+            "id": p.get("id"),
+            "name": ({ let n = s_or(p.get("name")); if n.is_empty() { "(unnamed)".to_string() } else { n } }),
+            "running": truthy(st.get("running")),
+            "clients": st.get("clients").cloned().unwrap_or(Value::Null),
+            "track": track, "layout": evs("layout"), "custom_track": custom,
+            "tcp_port": tcp, "udp_port": tcp, "http_port": http, "max_players": maxp,
+            "cars": servers::allowed_car_ids(&p),
+            "no_lobby": truthy(p.get("no_lobby")), "listed": !truthy(p.get("no_lobby")),
+            "locked": truthy(p.get("driver_password")),
+            "game_mode": ({ let g = s_or(p.get("game_mode")); if g.is_empty() { "PRACTICE".to_string() } else { g } }),
+        }));
+    }
+    out
+}
+
+/// GET /api/drive: everything the page needs to draw - but NOT the public
+/// list, which is the slow half and arrives separately.
+pub fn options() -> Value {
+    let tracks = content::tracks();
+    let cars = content::cars();
+    let be = backend::state();
+    let pick = load_pick();
+    let mut modes: Vec<String> = OFFERED_MODES.iter().map(|s| s.to_string()).collect();
+    let cur = s_or(pick.get("game_mode")).to_uppercase();
+    // ⚠ plus whatever is selected, even when no longer offered
+    if !cur.is_empty() && SP_MODES.contains(&cur.as_str()) && !OFFERED_MODES.contains(&cur.as_str()) {
+        modes.push(cur);
+    }
+    json!({
+        "ok": true, "pick": pick, "game_modes": modes,
+        "weather": serverproc::options().get("weather").cloned().unwrap_or(json!([])),
+        "aggressiveness": AGGRO, "ai_modes": AI_MODES,
+        "tracks": tracks.get("tracks").filter(|v| truthy(Some(v))).cloned().unwrap_or(json!([])),
+        "tracks_error": tracks.get("error").cloned().unwrap_or(Value::Null),
+        "cars": cars.get("cars").filter(|v| truthy(Some(v))).cloned().unwrap_or(json!([])),
+        "cars_error": cars.get("error").cloned().unwrap_or(Value::Null),
+        "servers": [], "car_pool": [], "servers_pending": true, "servers_meta": {},
+        "local_servers": local_briefs(),
+        "backend": {"listening": truthy(be.get("listening")), "client_patched": truthy(be.get("client_patched"))},
+    })
+}
+
+/// The public list for the page: the lobby's, ENRICHED from the directory
+/// (address match copies source/share_url/track_origin; unseen ones are
+/// appended), with car ids interned into a pool.
+pub fn public_servers() -> Value {
+    backend::lobby_prefetch_default();
+    let lst = backend::server_list();
+    let mut raw: Vec<Value> = lst.get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut by_addr: std::collections::HashMap<(String, i64), usize> = Default::default();
+    for (i, s) in raw.iter().enumerate() {
+        by_addr.insert((s_or(s.get("server_ip")), int0(s.get("server_tcp_port"))), i);
+    }
+    // ⚠ block=false: a third-party host being slow must cost a stale row,
+    // never the whole list
+    for s in crate::evoreg::fetch(false, false).get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        let key = (s_of(s.get("server_ip")), int0(s.get("server_tcp_port")));
+        match by_addr.get(&key) {
+            None => raw.push(s),
+            Some(&i) => {
+                for f in ["source", "share_url", "track_origin"] {
+                    if truthy(s.get(f)) {
+                        raw[i][f] = s[f].clone();
+                    }
+                }
+            }
+        }
+    }
+    let mut pool: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = Default::default();
+    let mut out = Vec::new();
+    for s in &raw {
+        let idx: Vec<usize> = car_ids_of(s).into_iter().map(|cid| {
+            *seen.entry(cid.clone()).or_insert_with(|| { pool.push(cid); pool.len() - 1 })
+        }).collect();
+        let or0 = |k: &str| if truthy(s.get(k)) { s[k].clone() } else { json!(0) };
+        let gm = [s.get("game_mode_type"), s.get("current_session")].into_iter().flatten().find(|v| truthy(Some(v))).cloned().unwrap_or(json!(""));
+        out.push(json!({
+            "id": s_or(s.get("server_id")),
+            "name": ({ let n = s_or(s.get("server_name")); if n.is_empty() { "(unnamed)".to_string() } else { n } }),
+            "server_ip": s_or(s.get("server_ip")), "server_tcp_port": or0("server_tcp_port"), "server_udp_port": or0("server_udp_port"),
+            "track": s_or(s.get("track")), "layout": s_or(s.get("layout")), "game_mode": gm,
+            "players": or0("players"), "max_players": or0("max_players"), "ping": or0("ping"),
+            "cars": idx, "locked": truthy(s.get("driver_password")),
+            "source": ({ let v = s_or(s.get("source")); if v.is_empty() { "lobby".to_string() } else { v } }),
+            "share_url": s_or(s.get("share_url")), "track_origin": s_or(s.get("track_origin")),
+        }));
+    }
+    let count = if truthy(lst.get("count")) { lst["count"].clone() } else { json!(out.len()) };
+    json!({"ok": true, "servers": out, "car_pool": pool,
+           "servers_meta": {"count": count, "captured_at": lst.get("captured_at").cloned().unwrap_or(Value::Null),
+                            "cached": truthy(lst.get("cached")), "error": lst.get("error").cloned().unwrap_or(Value::Null),
+                            "hint": lst.get("hint").cloned().unwrap_or(Value::Null)}})
+}

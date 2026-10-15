@@ -44,7 +44,7 @@ fn int_or(v: &Value, k: &str, d: i64) -> i64 {
     }
 }
 
-fn event(profile: &Value) -> Map<String, Value> {
+pub fn event(profile: &Value) -> Map<String, Value> {
     let custom = sv(profile, "custom_track").trim().to_string();
     let mut m = Map::new();
     if !custom.is_empty() {

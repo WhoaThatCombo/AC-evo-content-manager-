@@ -300,8 +300,8 @@ pub fn progress() -> Value {
         return json!({"ok": true, "active": true, "phase": "download", "what": if what.is_empty() { "Downloading".to_string() } else { what },
                       "done": job.get("done").cloned().unwrap_or(json!(0)), "total": job.get("total").cloned().unwrap_or(json!(0))});
     }
-    // a fetch from a third-party share is still the backend's: same bar
-    let ev = crate::api::backend_get("/api/evoshare/status");
+    // a fetch from a directory server's share: same bar
+    let ev = crate::evoshare::status();
     let want = ev.get("want").and_then(|v| v.as_u64()).unwrap_or(0);
     if ev.get("active") == Some(&json!(true)) && want > 0 {
         let file = { let f = sv(&ev, "file"); if f.is_empty() { "content".to_string() } else { f } };

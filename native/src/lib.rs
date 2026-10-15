@@ -16,6 +16,8 @@ pub mod content;
 pub mod damage;
 pub mod detect;
 pub mod drive;
+pub mod evoreg;
+pub mod evoshare;
 pub mod gamesettings;
 pub mod gameui;
 pub mod gameui_js;
