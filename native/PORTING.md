@@ -120,14 +120,37 @@ the server memory tracker, the live map (/api/telemetry*, /api/live*,
 launch a tracker. Hide the Telemetry UI before the Python backend is
 removed.
 
-Still Python: Drive's options / public list (/api/drive GET,
-/api/drive/servers - they merge the third-party directory) and the pasted
-address lookup (/api/drive/direct, fav/add - contentsync.discover), events
-(the live feed; it reads the drive job + lobby state from the shell),
-install/packs/share serving, registry content serving, thumbs rendering,
-gameui extras (pit button, mph HUD), updater/installer, Linux (launch under
-Proton is still the backend's).
-Next: events -> Rust (SSE), then install/packs/registry.
+## Status (2026-10-15): every route is the shell's
+
+All 158 Python routes answer in Rust (only the dropped telemetry ones do
+not exist). A release build does NOT start the Python backend
+(sidecar::wanted - a debug build still does, for tools/diff_api.py;
+ACECM_SIDECAR=1/0 overrides). With it off, all ten pages load with no
+failed request and no script error.
+
+Ported in the last stretch:
+* Binary patching + trampoline hooks (patching.rs, iced-x86): 150 hook
+  plans on the server exe and the save/apply/restore cycle match Python.
+* Updater (updater.rs): same signed-release format, Ed25519 verify
+  (checked against the live 1.0.21 release), swap script + --okflag
+  handshake + rollback (run for real in a sandbox).
+* Installer (installer.rs): install / uninstall / shortcuts / Restart /
+  launch-time install offer / second launch raises the window / headless
+  and browser modes. Dev overrides: ACECM_FROZEN=1, ACECM_INSTALL_DIR,
+  ACECM_SHORTCUT_DIR - never test against the real install.
+* /api/state, /api/overview (overview.rs).
+* Startup + background jobs (startup.rs); the backend skips them under the
+  shell (ACECM_NATIVE_URL) so nothing runs twice.
+* Standalone lobby backend: `acecm --tool acevo_backend` (lobbybackend.rs);
+  replies to all 311 request types decode equal to acevo_backend.py.
+* The exe carries the UI, cars.json, the event catalogs and evoview.exe
+  (build.rs + bundle.rs), unpacked once per build to data/bundle.
+
+Left:
+* Linux: Proton launch (proton.py), evdev pit button (_input_posix.py),
+  /proc helpers (_proc_posix.py) - the Rust side has stubs only.
+* Delete the Python backend + sidecar code once a release build has been
+  used for real; switch build.py / release tooling to the native exe.
 
 ## Build
 
