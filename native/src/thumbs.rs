@@ -200,6 +200,10 @@ pub fn render_car(car_id: &str, force: bool, make: bool, big: bool, visual: &str
     }
     let r = render_car_now(car_id, big, visual, paint, &out);
     mark_failed(&out, r.is_none());
+    if r.is_some() {
+        let src = source_fp(car_id, &mut HashMap::new());
+        set_record(&out, Some(json!({"renderer": renderer_full_id(), "source": src})));
+    }
     r
 }
 
@@ -274,9 +278,85 @@ fn render_jobs() -> Vec<(String, String, String, String, String)> {
         })).collect()
 }
 
-/// Render every car in the background; poll job().
+/// Render every car in the background; poll job(). `force` redraws all of
+/// them; otherwise only pictures that are missing or out of date.
 pub fn build_all(force: bool) -> Value {
     build_pass(force)
+}
+
+// ------------------------------------------------------- picture records --
+// ⚠ The render cache used to ask only "is there a file": pictures from an
+// old viewer (flat paint, missing decals, cars that did not render at all)
+// stayed for good while the viewer improved, and a game or mod update never
+// redrew the car it changed. Every picture now carries what it was drawn
+// FROM - the renderer and the car's package - and is redrawn by itself
+// whenever either changes. Nobody has to delete a folder by hand.
+
+/// Bump when render_car's framing (size, yaw, pitch, zoom) changes: every
+/// picture is then redrawn on the next pass.
+const RECIPE: &str = "v1 900x600 1440x960 yaw2.35 pitch0.17 zoom1.35";
+
+fn records_path() -> PathBuf {
+    dir("cars").join("sources.json")
+}
+
+/// One shared copy (a pass and on-demand renders both write it).
+static RECORDS: Mutex<Option<Map<String, Value>>> = Mutex::new(None);
+
+fn load_records() -> Map<String, Value> {
+    let mut g = RECORDS.lock().unwrap();
+    g.get_or_insert_with(|| std::fs::read(records_path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.as_object().cloned()).unwrap_or_default()).clone()
+}
+
+/// Remember what `p` was drawn from (None: forget it), and save.
+fn set_record(p: &Path, v: Option<Value>) {
+    load_records();
+    let mut g = RECORDS.lock().unwrap();
+    let m = g.get_or_insert_with(Map::new);
+    match v {
+        Some(v) => { m.insert(pic_name(p), v); }
+        None => { m.remove(&pic_name(p)); }
+    }
+    let _ = crate::safefs::write_atomic(&records_path(), serde_json::to_string(&*m).unwrap_or_default().as_bytes());
+}
+
+/// The package a model's picture is drawn from, as "size:mtime" - a game
+/// update replaces content.kspkg, a mod update its own .kspkg.
+fn source_fp(model: &str, cache: &mut HashMap<String, String>) -> String {
+    let Some(pkg) = crate::viewer::package_for(model) else { return String::new() };
+    if let Some(v) = cache.get(&pkg) {
+        return v.clone();
+    }
+    let fp = std::fs::metadata(&pkg).map(|m| {
+        let t = m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+        format!("{}:{t}", m.len())
+    }).unwrap_or_default();
+    cache.insert(pkg, fp.clone());
+    fp
+}
+
+fn pic_name(p: &Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Is this picture missing, or drawn by another renderer / from another
+/// version of its car?
+fn out_of_date(p: &Path, rid: &str, src: &str, rec: &Map<String, Value>) -> bool {
+    if !p.is_file() {
+        return true;
+    }
+    match rec.get(&pic_name(p)) {
+        // no record: drawn before records existed - by an older viewer
+        None => true,
+        Some(r) => r.get("renderer").and_then(|v| v.as_str()) != Some(rid)
+            || r.get("source").and_then(|v| v.as_str()) != Some(src),
+    }
+}
+
+fn renderer_full_id() -> String {
+    let exe = renderer_id();
+    if exe.is_empty() { String::new() } else { format!("{exe} {RECIPE}") }
 }
 
 fn build_pass(force: bool) -> Value {
@@ -291,41 +371,37 @@ fn build_pass(force: bool) -> Value {
     }
     if force {
         *FAILED.lock().unwrap() = None;
-        // the large detail renders are made on demand: drop them so an old
-        // one is not shown next to a new list picture
-        for n in have().iter().filter(|n| n.ends_with("@big")) {
-            let _ = std::fs::remove_file(dir("cars").join(format!("{n}.png")));
-        }
     }
-    let rid = renderer_id();
+    let rid = renderer_full_id();
     std::thread::spawn(move || {
         let jobs = render_jobs();
         job_set(&JOB, json!({"total": jobs.len()}));
         let t0 = std::time::Instant::now();
+        let mut fps = HashMap::new();
         let mut made = 0;
         for (i, (pid, label, model, visual, paint)) in jobs.iter().enumerate() {
             job_set(&JOB, json!({"done": i + 1, "current": if label.is_empty() { pid } else { label }}));
-            // ⚠ count a render only when the file was NOT there before
-            let had = car_path(model, false, visual, paint).is_file();
-            if render_car(model, force, true, false, visual, paint).is_some() && (force || !had) {
-                made += 1;
-                job_set(&JOB, json!({"made": made}));
-                // a fresh trim/paint picture supersedes the model's old plain
-                // one (the fallback a row shows when no variant exists)
-                if force && (!visual.is_empty() || !paint.is_empty()) {
-                    let plain = car_path(model, false, "", "");
-                    let old = std::fs::metadata(&plain).and_then(|m| m.modified()).ok()
-                        .map(|t| t.elapsed().map(|e| e > t0.elapsed()).unwrap_or(false)).unwrap_or(false);
-                    if old {
-                        let _ = std::fs::remove_file(&plain);
-                    }
+            let p = car_path(model, false, visual, paint);
+            let src = source_fp(model, &mut fps);
+            let stale = force || out_of_date(&p, &rid, &src, &load_records());
+            if !stale {
+                continue;
+            }
+            // redraw over an existing picture (it stays up until replaced)
+            if render_car(model, p.is_file(), true, false, visual, paint).is_none() {
+                continue;
+            }
+            made += 1;
+            job_set(&JOB, json!({"made": made}));
+            // the model's other pictures from the old renderer go: the large
+            // detail render is redrawn on demand, and the plain fallback is
+            // superseded by this trim/paint picture
+            for other in [car_path(model, true, visual, paint), car_path(model, false, "", "")] {
+                if other != p && other.is_file() && out_of_date(&other, &rid, &src, &load_records()) {
+                    let _ = std::fs::remove_file(&other);
+                    set_record(&other, None);
                 }
             }
-        }
-        // a full pass by this viewer: the pictures are current (also for a
-        // first pass, so a fresh install does not redraw everything again)
-        if !rid.is_empty() {
-            let _ = std::fs::write(renderer_stamp(), &rid);
         }
         job_set(&JOB, json!({"state": "done", "current": "", "seconds": (t0.elapsed().as_secs_f64() * 10.0).round_ties_even() / 10.0}));
     });
@@ -350,38 +426,29 @@ fn renderer_id() -> String {
     id
 }
 
-fn renderer_stamp() -> PathBuf {
-    dir("cars").join("renderer.txt")
-}
-
-/// Were the cached pictures drawn by an older viewer? ⚠ The cache only
-/// ever asked "is there a file": renders from August's viewer (flat paint,
-/// missing decals, cars that did not render at all then) stayed for good
-/// while the viewer itself kept improving. No stamp yet = pictures from
-/// before this check existed, also stale.
-fn renders_stale() -> bool {
-    let now = renderer_id();
-    !now.is_empty() && std::fs::read_to_string(renderer_stamp()).map(|s| s.trim() != now).unwrap_or(true)
-}
-
-/// Kick a render pass when cars are missing their picture (newly
-/// installed or fetched cars must not stay blank tiles), or when the viewer
-/// changed since the pictures were drawn (then every picture is redrawn,
-/// each old one staying up until its replacement is written).
+/// Start a background pass when any picture is missing or out of date: a
+/// new viewer (ACECM update), a new render recipe, a game update or an
+/// updated mod. Called when the Home and Play pages load; cheap when
+/// everything is current (one stat per package).
 pub fn ensure_renders() -> bool {
     if job_get(&JOB).get("state").and_then(|v| v.as_str()) == Some("running") {
         return false;
     }
-    if renders_stale() && !have().is_empty() {
-        crate::logs::info("thumbs: the viewer changed since the car pictures were drawn - redrawing them");
-        build_pass(true);
-        return true;
-    }
-    if !render_jobs().iter().any(|j| { let p = car_path(&j.2, false, &j.3, &j.4); !p.is_file() && !failed(&p) }) {
+    let rid = renderer_full_id();
+    if rid.is_empty() {
         return false;
     }
-    build_all(false);
-    true
+    let rec = load_records();
+    let mut fps = HashMap::new();
+    let due = render_jobs().iter().any(|j| {
+        let p = car_path(&j.2, false, &j.3, &j.4);
+        !failed(&p) && out_of_date(&p, &rid, &source_fp(&j.2, &mut fps), &rec)
+    });
+    if due {
+        crate::logs::info("thumbs: some car pictures are missing or out of date - redrawing them in the background");
+        build_pass(false);
+    }
+    due
 }
 
 fn pngs(which: &str) -> Vec<String> {

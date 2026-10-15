@@ -18,6 +18,7 @@ are left alone for now.
 and firing 74 at once would fight the viewer the user may have open.
 """
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -41,6 +42,7 @@ SIZE = "900x600"
 # launch.
 BIG = "1440x960"
 _LOCK = threading.Lock()
+_FAILED = set()   # pictures that failed to render this session
 _JOB = {"state": "idle", "done": 0, "total": 0, "current": "", "made": 0}
 # tracks decode separately from cars: different work, different button
 _COVER_JOB = {"state": "idle", "done": 0, "total": 0, "current": "", "made": 0}
@@ -85,6 +87,15 @@ def preset_look(preset_id):
         visual = ((t.get("variants") or {}).get(preset_id) or {}).get("visual", "")
     except Exception:
         pass
+    if not model:
+        # ⚠ a MOD's presets are not in the base game's table: its own
+        # manifest names the car. Without this the model was the preset id,
+        # no garage paint matched, and the picture fell back to the bare model
+        try:
+            from . import install
+            model = install.car_models().get(preset_id) or ""
+        except Exception:
+            model = ""
     if not model:
         model = preset_id
     paint = _garage_paints().get(model, "")
@@ -147,6 +158,9 @@ def render_car(car_id, force=False, timeout=180, make=True, big=False,
         return out
     if not make:
         return None
+    # a car the viewer cannot load is not retried on every page visit
+    if not force and out in _FAILED:
+        return None
     exe = viewer.viewer_exe()
     if not exe:
         return None
@@ -188,8 +202,96 @@ def render_car(car_id, force=False, timeout=180, make=True, big=False,
     if r.returncode != 0 or not os.path.isfile(out):
         logs.LOG.warning("thumb %s: exit %s %s", car_id, r.returncode,
                          (r.stdout or r.stderr or "")[-200:])
+        _FAILED.add(out)
         return None
+    _FAILED.discard(out)
+    _set_record(out, {"renderer": _renderer_id(), "source": _source_fp(car_id)})
     return out
+
+
+# ---------------------------------------------------------- picture records
+# ⚠ The render cache used to ask only "is there a file": pictures from an old
+# viewer (flat paint, missing decals, cars that did not render at all) stayed
+# for good while the viewer improved, and a game or mod update never redrew
+# the car it changed. Every picture now records what it was drawn FROM - the
+# renderer and the car's package - and is redrawn by itself when either
+# changes. Same file and format as the native app (native/src/thumbs.rs), so
+# moving between the two does not redraw everything.
+
+# Bump when render_car's framing (size, yaw, pitch, zoom) changes.
+RECIPE = "v1 900x600 1440x960 yaw2.35 pitch0.17 zoom1.35"
+_RECORDS_FILE = os.path.join(CARS, "sources.json")
+_RECORDS = {"map": None}
+_RID = {"key": None, "id": ""}
+
+
+def _renderer_id():
+    """Hash of the viewer exe + RECIPE ("" when there is no viewer)."""
+    exe = viewer.viewer_exe()
+    if not exe or not os.path.isfile(exe):
+        return ""
+    st = os.stat(exe)
+    key = (exe, st.st_size, st.st_mtime_ns)
+    if _RID["key"] != key:
+        import hashlib
+        with open(exe, "rb") as f:
+            _RID.update(key=key, id=hashlib.sha256(f.read()).hexdigest()[:16])
+    return f"{_RID['id']} {RECIPE}"
+
+
+def _source_fp(model, cache=None):
+    """The package a picture is drawn from, as "size:mtime"."""
+    pkg = viewer._package_for(model)
+    if not pkg:
+        return ""
+    if cache is not None and pkg in cache:
+        return cache[pkg]
+    try:
+        st = os.stat(pkg)
+        fp = f"{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        fp = ""
+    if cache is not None:
+        cache[pkg] = fp
+    return fp
+
+
+def _records():
+    with _LOCK:
+        if _RECORDS["map"] is None:
+            try:
+                with open(_RECORDS_FILE, encoding="utf-8") as f:
+                    _RECORDS["map"] = json.load(f) or {}
+            except (OSError, ValueError):
+                _RECORDS["map"] = {}
+        return dict(_RECORDS["map"])
+
+
+def _set_record(path, value):
+    _records()
+    with _LOCK:
+        m = _RECORDS["map"]
+        name = os.path.basename(path)
+        if value is None:
+            m.pop(name, None)
+        else:
+            m[name] = value
+        tmp = _RECORDS_FILE + ".part"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(m, f)
+            os.replace(tmp, _RECORDS_FILE)
+        except OSError as ex:
+            logs.LOG.info("thumb records: %s", ex)
+
+
+def _out_of_date(path, rid, src, rec):
+    if not os.path.isfile(path):
+        return True
+    r = rec.get(os.path.basename(path))
+    if not r:
+        return True          # drawn before records existed: an older viewer
+    return r.get("renderer") != rid or r.get("source") != src
 
 
 def render_preset(preset_id, **kw):
@@ -216,18 +318,34 @@ def build_all(force=False):
         jobs = _render_jobs()
         _JOB["total"] = len(jobs)
         t0 = time.time()
+        rid = _renderer_id()
+        fps = {}
+        if force:
+            _FAILED.clear()
         for i, (pid, label, model, visual, paint) in enumerate(jobs, 1):
             _JOB["done"], _JOB["current"] = i, label or pid
             try:
-                # ⚠ render_car returns the cached path for a car it did not
-                # render, so counting a truthy result made "made" equal to the
-                # number of cars looked at - a run that rendered 12 reported
-                # 86. Ask whether the file was there BEFORE.
-                had = os.path.isfile(car_path(model, visual=visual,
-                                              paint=paint))
-                if (render_car(model, force, visual=visual, paint=paint)
-                        and (force or not had)):
-                    _JOB["made"] += 1
+                pic = car_path(model, visual=visual, paint=paint)
+                src = _source_fp(model, fps)
+                if not force and not _out_of_date(pic, rid, src, _records()):
+                    continue
+                # redraw over an existing picture: it stays up until replaced
+                if not render_car(model, os.path.isfile(pic), visual=visual,
+                                  paint=paint):
+                    continue
+                _JOB["made"] += 1
+                # the model's other pictures from the old renderer go: the
+                # large one is redrawn on demand, and the plain fallback is
+                # superseded by this trim/paint picture
+                for other in (car_path(model, big=True, visual=visual, paint=paint),
+                              car_path(model)):
+                    if (other != pic and os.path.isfile(other)
+                            and _out_of_date(other, rid, src, _records())):
+                        try:
+                            os.remove(other)
+                        except OSError:
+                            pass
+                        _set_record(other, None)
             except Exception as ex:
                 logs.LOG.warning("thumb %s: %s", pid, ex)
         _JOB.update({"state": "done", "current": "",
@@ -292,11 +410,22 @@ def _ensure_renders_local():
         # ⚠ Compare real FILES, not bare model ids. Renders are keyed by
         # trim and livery now, so a name-based check against the model list
         # said "all present" while every trim picture was still missing.
-        missing = [j for j in _render_jobs()
-                   if not os.path.isfile(car_path(j[2], visual=j[3],
-                                                  paint=j[4]))]
-        if not missing:
+        # also redraws pictures that are OUT OF DATE: a new viewer (ACECM
+        # update), a new render recipe, a game update or an updated mod
+        rid = _renderer_id()
+        if not rid:
             return False
+        rec, fps = _records(), {}
+        due = False
+        for j in _render_jobs():
+            pic = car_path(j[2], visual=j[3], paint=j[4])
+            if pic not in _FAILED and _out_of_date(pic, rid, _source_fp(j[2], fps), rec):
+                due = True
+                break
+        if not due:
+            return False
+        logs.LOG.info("thumbs: some car pictures are missing or out of date - "
+                      "redrawing them in the background")
         build_all()
         return True
     except Exception as ex:
