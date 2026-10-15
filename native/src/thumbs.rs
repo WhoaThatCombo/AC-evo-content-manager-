@@ -73,7 +73,10 @@ pub fn preset_look(preset_id: &str) -> (String, String, String) {
     let visual = t.get("variants").and_then(|v| v.get(preset_id)).and_then(|v| v.get("visual"))
         .and_then(|v| v.as_str()).unwrap_or("").to_string();
     if model.is_empty() {
-        model = preset_id.to_string();
+        // ⚠ a MOD's presets are not in the base game's table: its own
+        // manifest names the car. Without this the model was the preset id,
+        // no garage paint matched, and the render fell back to the bare model
+        model = crate::mods::car_models().get(preset_id).and_then(|v| v.as_str()).unwrap_or(preset_id).to_string();
     }
     let paint = garage_paints().get(&model).and_then(|v| v.as_str()).unwrap_or("").to_string();
     (model, visual, paint)
@@ -273,6 +276,10 @@ fn render_jobs() -> Vec<(String, String, String, String, String)> {
 
 /// Render every car in the background; poll job().
 pub fn build_all(force: bool) -> Value {
+    build_pass(force)
+}
+
+fn build_pass(force: bool) -> Value {
     {
         let mut g = JOB.lock().unwrap();
         let m = g.get_or_insert_with(idle_job);
@@ -284,7 +291,13 @@ pub fn build_all(force: bool) -> Value {
     }
     if force {
         *FAILED.lock().unwrap() = None;
+        // the large detail renders are made on demand: drop them so an old
+        // one is not shown next to a new list picture
+        for n in have().iter().filter(|n| n.ends_with("@big")) {
+            let _ = std::fs::remove_file(dir("cars").join(format!("{n}.png")));
+        }
     }
+    let rid = renderer_id();
     std::thread::spawn(move || {
         let jobs = render_jobs();
         job_set(&JOB, json!({"total": jobs.len()}));
@@ -297,18 +310,72 @@ pub fn build_all(force: bool) -> Value {
             if render_car(model, force, true, false, visual, paint).is_some() && (force || !had) {
                 made += 1;
                 job_set(&JOB, json!({"made": made}));
+                // a fresh trim/paint picture supersedes the model's old plain
+                // one (the fallback a row shows when no variant exists)
+                if force && (!visual.is_empty() || !paint.is_empty()) {
+                    let plain = car_path(model, false, "", "");
+                    let old = std::fs::metadata(&plain).and_then(|m| m.modified()).ok()
+                        .map(|t| t.elapsed().map(|e| e > t0.elapsed()).unwrap_or(false)).unwrap_or(false);
+                    if old {
+                        let _ = std::fs::remove_file(&plain);
+                    }
+                }
             }
+        }
+        // a full pass by this viewer: the pictures are current (also for a
+        // first pass, so a fresh install does not redraw everything again)
+        if !rid.is_empty() {
+            let _ = std::fs::write(renderer_stamp(), &rid);
         }
         job_set(&JOB, json!({"state": "done", "current": "", "seconds": (t0.elapsed().as_secs_f64() * 10.0).round_ties_even() / 10.0}));
     });
     json!({"ok": true})
 }
 
+/// Which viewer build draws the pictures: a hash of its exe, cached
+/// against the file's size and mtime (hashing 8 MB once per change).
+fn renderer_id() -> String {
+    static C: Mutex<Option<(String, u64, u128, String)>> = Mutex::new(None);
+    let Some(exe) = crate::viewer::viewer_exe() else { return String::new() };
+    let Ok(m) = std::fs::metadata(&exe) else { return String::new() };
+    let t = m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
+    if let Some((p, l, mt, id)) = C.lock().unwrap().as_ref() {
+        if *p == exe && *l == m.len() && *mt == t {
+            return id.clone();
+        }
+    }
+    use sha2::Digest;
+    let id = std::fs::read(&exe).map(|b| sha2::Sha256::digest(&b).iter().take(8).map(|x| format!("{x:02x}")).collect::<String>()).unwrap_or_default();
+    *C.lock().unwrap() = Some((exe, m.len(), t, id.clone()));
+    id
+}
+
+fn renderer_stamp() -> PathBuf {
+    dir("cars").join("renderer.txt")
+}
+
+/// Were the cached pictures drawn by an older viewer? ⚠ The cache only
+/// ever asked "is there a file": renders from August's viewer (flat paint,
+/// missing decals, cars that did not render at all then) stayed for good
+/// while the viewer itself kept improving. No stamp yet = pictures from
+/// before this check existed, also stale.
+fn renders_stale() -> bool {
+    let now = renderer_id();
+    !now.is_empty() && std::fs::read_to_string(renderer_stamp()).map(|s| s.trim() != now).unwrap_or(true)
+}
+
 /// Kick a render pass when cars are missing their picture (newly
-/// installed or fetched cars must not stay blank tiles).
+/// installed or fetched cars must not stay blank tiles), or when the viewer
+/// changed since the pictures were drawn (then every picture is redrawn,
+/// each old one staying up until its replacement is written).
 pub fn ensure_renders() -> bool {
     if job_get(&JOB).get("state").and_then(|v| v.as_str()) == Some("running") {
         return false;
+    }
+    if renders_stale() && !have().is_empty() {
+        crate::logs::info("thumbs: the viewer changed since the car pictures were drawn - redrawing them");
+        build_pass(true);
+        return true;
     }
     if !render_jobs().iter().any(|j| { let p = car_path(&j.2, false, &j.3, &j.4); !p.is_file() && !failed(&p) }) {
         return false;
