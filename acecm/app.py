@@ -214,6 +214,11 @@ def _progress():
     moving, and reporting the finished download instead would freeze the bar
     at 100% for the slowest part of the job.
     """
+    # the shell runs the content jobs: its view is the real one
+    if backend._NATIVE_URL:
+        r = backend._native("/api/_native/progress", timeout=8)
+        if r.get("ok"):
+            return r
     ing = install.INGEST
     if ing.get("state") == "running":
         return {"ok": True, "active": True, "phase": "install",

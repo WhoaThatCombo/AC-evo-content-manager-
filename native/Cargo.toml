@@ -32,6 +32,7 @@ x509-parser = "0.16"
 time = "0.3"
 libloading = "0.8"
 sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = { version = "0.4", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

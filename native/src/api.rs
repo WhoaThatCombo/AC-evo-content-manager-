@@ -115,6 +115,71 @@ async fn serve_file(path: &std::path::Path, range: &str, ctype: &'static str, fi
         .body(Body::from_stream(stream)).unwrap_or_else(|_| json_resp(500, &json!({"error": "bad response"})))
 }
 
+/// Python bool() of a JSON value
+fn bb_of(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Null) | None => false,
+        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(o)) => !o.is_empty(),
+    }
+}
+
+/// A server profile by id (ids compare as strings, as `str(x.get("id"))`).
+fn find_profile_s(sid: &str) -> Option<Value> {
+    crate::profiles::load().into_iter().find(|p| match p.get("id") {
+        Some(Value::String(s)) => s == sid,
+        Some(Value::Null) | None => sid == "None",
+        Some(v) => v.to_string() == sid,
+    })
+}
+
+/// One dragged-in file, streamed into its drop staging folder. ⚠ Exactly
+/// Content-Length bytes: an HTTP/1.1 browser keeps the connection open and
+/// never sends EOF, and a short upload must not be handed on as the file.
+async fn drop_part(req: Request, query: &str) -> Response {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let did = q_get(query, "id").unwrap_or_default();
+    let name = q_get(query, "name").or_else(|| req.headers().get("X-Filename").and_then(|v| v.to_str().ok()).map(String::from)).unwrap_or_default();
+    let size: u64 = req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let (d2, n2) = (did.clone(), name.clone());
+    let opened = tokio::task::spawn_blocking(move || crate::install::drop_part_open(&d2, &n2)).await;
+    let (dest, f) = match opened {
+        Ok(Ok(x)) => x,
+        Ok(Err(v)) => return json_resp(400, &v),
+        Err(e) => return json_resp(500, &json!({"ok": false, "error": e.to_string()})),
+    };
+    let mut f = tokio::fs::File::from_std(f);
+    let mut stream = req.into_body().into_data_stream();
+    let mut wrote: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else { break };
+        wrote += chunk.len() as u64;
+        if wrote > crate::install::DROP_LIMIT {
+            drop(f);
+            let _ = tokio::fs::remove_file(&dest).await;
+            return json_resp(400, &json!({"ok": false, "error": "file is larger than 8 GB"}));
+        }
+        if let Err(e) = f.write_all(&chunk).await {
+            return json_resp(400, &json!({"ok": false, "error": e.to_string()}));
+        }
+        if size != 0 && wrote >= size {
+            break;
+        }
+    }
+    let _ = f.flush().await;
+    drop(f);
+    if size != 0 && wrote != size {
+        let _ = tokio::fs::remove_file(&dest).await;
+        return json_resp(400, &json!({"ok": false, "error": format!("upload stopped early ({wrote} of {size} bytes)")}));
+    }
+    let shown = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    json_resp(200, &json!({"ok": true, "name": shown, "bytes": wrote, "size": if size != 0 { size } else { wrote }}))
+}
+
 fn png(path: &std::path::Path) -> Response {
     match std::fs::read(path) {
         // cheap to regenerate, and a stale render after a repaint confuses
@@ -239,6 +304,7 @@ async fn native_internal(peer: IpAddr, req: Request, path: &str) -> Response {
             let p = blocking(move || json!(crate::registry::ensure_track_pack(&folder).map(|p| p.to_string_lossy().into_owned()))).await;
             json!({"path": p})
         }
+        "/api/_native/progress" => blocking(crate::jobs::progress).await,
         "/api/_native/drive/status" => blocking(crate::drive::status).await,
         "/api/_native/drive/ensure_backend" => blocking(crate::drive::ensure_backend).await,
         _ => json!({"ok": false, "error": "not found"}),
@@ -269,14 +335,22 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/profiles" | "/api/server/status" | "/api/server/log"
             | "/api/backend" | "/api/backend/log" | "/api/join/state" | "/api/browser/why"
             | "/api/browser" | "/api/drive/status"
-            | "/api/registry/list" | "/api/registry/manifest" | "/api/registry/file" | "/api/registry/pack"),
+            | "/api/registry/list" | "/api/registry/manifest" | "/api/registry/file" | "/api/registry/pack"
+            | "/api/browser/status" | "/api/browser/discover" | "/api/browser/tag" | "/api/browser/needs"
+            | "/api/browser/plan" | "/api/share" | "/api/progress" | "/api/drop/status" | "/api/mods/scan"
+            | "/api/library" | "/api/library/clip" | "/api/library/export" | "/api/pack/preview"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
             | "/api/profiles/save" | "/api/profiles/delete" | "/api/server/start" | "/api/server/stop"
             | "/api/backend/start" | "/api/backend/stop" | "/api/backend/redirect" | "/api/join"
             | "/api/app/quit" | "/api/drive" | "/api/drive/cancel" | "/api/drive/capture"
-            | "/api/drive/list" | "/api/backend/ensure" | "/api/game/launch"),
+            | "/api/drive/list" | "/api/backend/ensure" | "/api/game/launch"
+            | "/api/browser/install" | "/api/browser/scan" | "/api/tracks/restore" | "/api/push/send"
+            | "/api/push/plan" | "/api/push/server_build" | "/api/server_build" | "/api/mods/install"
+            | "/api/drop" | "/api/drop/part" | "/api/library/remove" | "/api/library/export" | "/api/mods/fix"
+            | "/api/mods/remove" | "/api/mods/sync" | "/api/pack/build" | "/api/drive/direct"
+            | "/api/drive/fav/add" | "/api/drive/fav/remove"),
         _ => false,
     }
 }
@@ -312,6 +386,10 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
     if gated && !auth::browser_ok(write, &peer, &h, &query) {
         let (c, v) = auth::deny_browser();
         return Ok(json_resp(c, &v));
+    }
+    // a drag-drop STREAMS the file: never read it as a JSON body
+    if write && path == "/api/drop/part" {
+        return Ok(drop_part(req, &query).await);
     }
     // ⚠ The body is read ONCE and kept, so a route that turns out to need
     // the backend (decided from the body) can still be passed on intact.
@@ -575,6 +653,133 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                 }
             }
         }
+        (false, "/api/browser/status") => json_resp(200, &crate::jobs::status()),
+        (false, "/api/progress") => json_resp(200, &blocking(crate::jobs::progress).await),
+        (false, "/api/drop/status") => {
+            let mut m = serde_json::Map::new();
+            m.insert("ok".into(), json!(true));
+            m.extend(crate::install::ingest_state());
+            json_resp(200, &Value::Object(m))
+        }
+        (false, "/api/browser/discover") => {
+            // ⚠ two ports, briefly: seven at 4 s each looked like a hang
+            let raw = q_get(&query, "host").unwrap_or_default();
+            let port = q_get(&query, "port").and_then(|p| p.parse::<u16>().ok());
+            json_resp(200, &blocking(move || {
+                let (_h, explicit, given) = crate::contentsync::parse_target(&raw);
+                let to = if !given.is_empty() || explicit.is_some() { 8.0 } else { 2.0 };
+                crate::contentsync::discover(&raw, port, &[8092, 8093], to)
+            }).await)
+        }
+        (false, "/api/browser/tag") => {
+            let mut ips: Vec<String> = query.split('&').filter_map(|kv| kv.split_once('=')).filter(|(k, _)| *k == "ip")
+                .map(|(_, v)| q_get(&format!("x={v}"), "x").unwrap_or_default()).filter(|v| !v.is_empty()).collect();
+            if ips.is_empty() {
+                ips = q_get(&query, "ips").unwrap_or_default().split(',').map(String::from).collect();
+            }
+            json_resp(200, &blocking(move || crate::contentsync::tag_hosts(&ips, 0.45)).await)
+        }
+        (false, "/api/browser/needs") => json_resp(200, &blocking(|| {
+            let lst = crate::backend::server_list();
+            let servers = lst.get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            json!({"ok": lst.get("ok"), "cached": lst.get("cached").cloned().unwrap_or(json!(false)),
+                   "captured_at": lst.get("captured_at"), "total": servers.len(),
+                   "missing": crate::contentsync::needs(&servers)})
+        }).await),
+        (false, "/api/browser/plan") => {
+            let (base, id) = (q_get(&query, "base").unwrap_or_default(), q_get(&query, "id").unwrap_or_default());
+            json_resp(200, &blocking(move || crate::contentsync::plan(&base, &id)).await)
+        }
+        (false, "/api/share") => json_resp(200, &blocking(crate::contentsync::share_info).await),
+        (false, "/api/mods/scan") => {
+            let p = q_get(&query, "path").unwrap_or_default();
+            json_resp(200, &blocking(move || crate::install::scan_source(&p)).await)
+        }
+        (false, "/api/library") => json_resp(200, &blocking(crate::install::library).await),
+        (false, "/api/library/clip") => {
+            let (k, n) = (q_get(&query, "kind").unwrap_or_default(), q_get(&query, "name").unwrap_or_default());
+            json_resp(200, &blocking(move || crate::install::clip_item(&k, &n)).await)
+        }
+        (false, "/api/library/export") => {
+            let (k, n) = (q_get(&query, "kind").unwrap_or_default(), q_get(&query, "name").unwrap_or_default());
+            let r = blocking(move || crate::install::export_item(&k, &n, None)).await;
+            let ok = r.get("ok") == Some(&json!(true));
+            match r.get("path").and_then(|p| p.as_str()).map(std::path::PathBuf::from).filter(|p| p.is_file()) {
+                Some(p) if ok => {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let ctype = if name.to_lowercase().ends_with(".zip") { "application/zip" } else { "application/x-tar" };
+                    serve_file(&p, "", ctype, &name, "").await
+                }
+                _ if !ok => json_resp(400, &r),
+                _ => json_resp(500, &json!({"error": "export file missing"})),
+            }
+        }
+        (false, "/api/pack/preview") => {
+            let sid = q_get(&query, "id").unwrap_or_default();
+            json_resp(200, &blocking(move || match find_profile_s(&sid) {
+                Some(p) => crate::pack::preview(&p),
+                None => json!({"ok": false, "error": "no such server"}),
+            }).await)
+        }
+        (true, "/api/browser/install") => { let b = body.clone(); json_resp(200, &blocking(move || crate::jobs::install_content(&b)).await) }
+        (true, "/api/browser/scan") => {
+            let only = match body.get("only_missing") { None => true, v => bb_of(v) };
+            json_resp(200, &blocking(move || {
+                let lst = crate::backend::server_list();
+                let servers = lst.get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let pool = if only { crate::contentsync::needs(&servers) } else { servers };
+                crate::contentsync::scan(&pool, 24, 6)
+            }).await)
+        }
+        (true, "/api/tracks/restore") => json_resp(200, &blocking(crate::jobs::tracks_restore).await),
+        (true, "/api/push/send") => { let b = body.clone(); json_resp(200, &blocking(move || crate::jobs::push_send(&b)).await) }
+        (true, "/api/push/plan") => { let b = body.clone(); json_resp(200, &blocking(move || crate::jobs::push_plan(&b)).await) }
+        (true, "/api/push/server_build") => { let b = body.clone(); json_resp(200, &blocking(move || crate::jobs::push_server_build(&b)).await) }
+        (true, "/api/server_build") => { let id = bs("id"); json_resp(200, &blocking(move || crate::jobs::apply_server_build(&id)).await) }
+        (true, "/api/mods/install") => {
+            let (p, ow) = (bs("path"), bb("overwrite"));
+            let only: Option<Vec<String>> = body.get("only").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            json_resp(200, &blocking(move || crate::install::install(&p, only, ow)).await)
+        }
+        (true, "/api/drop") => {
+            let (id, ow, path, cancel) = (bs("id"), bb("overwrite"), bs("path"), bb("cancel"));
+            json_resp(200, &blocking(move || {
+                if cancel && !id.is_empty() {
+                    crate::install::drop_cleanup(&id);
+                    return json!({"ok": true, "cancelled": true});
+                }
+                if !id.is_empty() { crate::install::ingest_staging(&id, ow) } else { crate::install::ingest(&path, ow) }
+            }).await)
+        }
+        (true, "/api/library/remove") => { let (k, n) = (bs("kind"), bs("name")); json_resp(200, &blocking(move || crate::install::remove_item(&k, &n)).await) }
+        (true, "/api/library/export") => {
+            let (k, n, d) = (bs("kind"), bs("name"), bs("dest"));
+            json_resp(200, &blocking(move || crate::install::export_item(&k, &n, if d.is_empty() { None } else { Some(&d) })).await)
+        }
+        (true, "/api/mods/fix") => { let n = bs("name"); json_resp(200, &blocking(move || crate::install::apply_fix(&n)).await) }
+        (true, "/api/mods/remove") => { let n = bs("name"); json_resp(200, &blocking(move || crate::install::remove(&n, None)).await) }
+        (true, "/api/mods/sync") => {
+            let (d, f) = (bs("direction"), bb("force"));
+            let names: Option<Vec<String>> = body.get("names").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            json_resp(200, &blocking(move || crate::install::sync(if d.is_empty() { "to_server" } else { &d }, f, names)).await)
+        }
+        (true, "/api/pack/build") => {
+            // ⚠ local only: it writes a multi-gigabyte file wherever it is told
+            if !auth::is_loopback(&peer) {
+                let (c, v) = auth::deny_remote(&cfg);
+                json_resp(c, &v)
+            } else {
+                let sid = match body.get("id") { Some(Value::String(s)) => s.clone(), Some(Value::Null) | None => String::new(), Some(v) => v.to_string() };
+                let dest = bs("dest");
+                json_resp(200, &blocking(move || match find_profile_s(&sid) {
+                    Some(p) => crate::pack::build(&p, if dest.is_empty() { None } else { Some(&dest) }, true),
+                    None => json!({"ok": false, "error": "no such server"}),
+                }).await)
+            }
+        }
+        (true, "/api/drive/direct") => { let t = bs("target"); json_resp(200, &blocking(move || crate::drive::direct_lookup(&t)).await) }
+        (true, "/api/drive/fav/add") => { let (t, n) = (bs("target"), bs("name")); json_resp(200, &blocking(move || crate::drive::favourite_add(&t, &n)).await) }
+        (true, "/api/drive/fav/remove") => { let i = bs("id"); json_resp(200, &blocking(move || crate::drive::favourite_remove(&i)).await) }
         (false, "/api/drive/status") => json_resp(200, &blocking(crate::drive::status).await),
         (true, "/api/drive") => {
             let b = body.clone();

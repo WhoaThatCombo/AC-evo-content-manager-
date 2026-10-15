@@ -120,6 +120,16 @@ fn cached(which: usize) -> Value {
     if which == 0 { c } else { t }
 }
 
+/// THE "content changed" hook (content.forget_lists): drop the cached
+/// inventories and the files a stat key cannot see through.
+pub fn forget_lists() {
+    *CACHE.lock().unwrap() = None;
+    for f in [paths::data().join("track_map.json"), paths::data().join("viewer").join("index.json"), paths::data().join("preset_map.json")] {
+        let _ = std::fs::remove_file(f);
+    }
+    crate::carsmap::forget();
+}
+
 pub fn cars() -> Value {
     cached(0)
 }

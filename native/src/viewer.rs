@@ -27,6 +27,10 @@ fn s(p: &Path) -> String {
 
 /// The client's content.kspkg (fresh detection, like viewer.package).
 pub fn package() -> Option<String> {
+    // dev/test only: point every client-archive read AND write at a copy
+    if let Ok(p) = std::env::var("ACECM_CLIENT_KSPKG") {
+        return Path::new(&p).is_file().then_some(p);
+    }
     let g = detect::steam_app_dir(detect::APPID_GAME);
     let g = if g.is_empty() { detect::find("game_dir", true) } else { g };
     if g.is_empty() {

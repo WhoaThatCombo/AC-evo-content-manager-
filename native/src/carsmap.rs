@@ -176,6 +176,10 @@ fn scan(path: &str) -> std::io::Result<Map<String, Value>> {
 
 static MEM: Mutex<Option<(String, Value)>> = Mutex::new(None);
 
+pub fn forget() {
+    *MEM.lock().unwrap() = None;
+}
+
 pub fn table(refresh: bool) -> Value {
     let path = kspkg_path();
     if path.is_empty() {

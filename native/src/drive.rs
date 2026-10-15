@@ -1766,3 +1766,88 @@ pub fn status() -> Value {
         "now": now_f(),
     })
 }
+
+// ------------------------------------------------------------ favourites --
+fn save_favourites(items: &[Value]) {
+    if let Err(e) = profiles::write_json_indent2(&paths::data().join("favourites.json"), &Value::Array(items.to_vec())) {
+        logs::warn(format!("could not write favourites: {e}"));
+    }
+}
+
+/// Pin an address. ⚠ ip+port is the identity, not the name (names change).
+pub fn favourite_add(target: &str, name: &str) -> Value {
+    let info = direct_lookup(target);
+    if info.get("ok") != Some(&json!(true)) {
+        return info;
+    }
+    let ip = s_of(info.get("ip"));
+    let tcp = int0(info.get("tcp"));
+    let mut items: Vec<Value> = crate::misc::favourites()["favourites"].as_array().cloned().unwrap_or_default()
+        .into_iter().filter(|f| !(s_of(f.get("ip")) == ip && int0(f.get("tcp")) == tcp)).collect();
+    let nm = [name.to_string(), s_or(info.get("name")), format!("{ip}:{tcp}")].into_iter().find(|s| !s.is_empty()).unwrap_or_default();
+    let udp = if truthy(info.get("udp")) { info["udp"].clone() } else { json!(tcp) };
+    items.insert(0, json!({"id": format!("{ip}:{tcp}"), "name": nm.trim(), "ip": ip, "tcp": tcp, "udp": udp, "added": now_i()}));
+    save_favourites(&items);
+    json!({"ok": true, "favourites": items, "added": format!("{ip}:{tcp}")})
+}
+
+pub fn favourite_remove(fid: &str) -> Value {
+    let items: Vec<Value> = crate::misc::favourites()["favourites"].as_array().cloned().unwrap_or_default()
+        .into_iter().filter(|f| s_of(f.get("id")) != fid).collect();
+    save_favourites(&items);
+    json!({"ok": true, "favourites": items})
+}
+
+/// What is at a pasted address: the captured list's entry, else the host's
+/// own ACECM registry, else honestly unknown (still joinable).
+/// ⚠ The pasted port is the GAME's; ACECM is probed on its own two ports.
+pub fn direct_lookup(raw: &str) -> Value {
+    let (host, port, _base) = crate::contentsync::parse_target(raw);
+    if host.is_empty() {
+        return json!({"ok": false, "error": "type an address, like 1.2.3.4:9700"});
+    }
+    let tcp = port.map(|p| p as i64).unwrap_or(9700);
+    for s in backend::server_list().get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        if s_of(s.get("server_ip")) == host && int0(s.get("server_tcp_port")) == tcp {
+            let udp = { let u = int0(s.get("server_udp_port")); if u == 0 { tcp } else { u } };
+            let name = { let n = s_or(s.get("server_name")); if n.is_empty() { host.clone() } else { n } };
+            return json!({"ok": true, "source": "list", "ip": host, "tcp": tcp, "udp": udp, "name": name,
+                "track": s_or(s.get("track")), "layout": s_or(s.get("layout")),
+                "players": if truthy(s.get("players")) { s["players"].clone() } else { json!(0) },
+                "max_players": if truthy(s.get("max_players")) { s["max_players"].clone() } else { json!(0) },
+                "locked": truthy(s.get("driver_password")), "cars": car_ids_of(&s)});
+        }
+    }
+    let got = crate::contentsync::discover(&host, None, &[8092, 8093], 2.0);
+    if got.get("ok") == Some(&json!(true)) {
+        let entries = got.get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        // ⚠ a port match only when UNAMBIGUOUS: entries default to 9700
+        let onport: Vec<&Value> = entries.iter().filter(|e| int0(e.get("port")) == tcp).collect();
+        let hit = if onport.len() == 1 { Some(onport[0]) } else if entries.len() == 1 { Some(&entries[0]) } else { None };
+        let base = s_or(got.get("base"));
+        if let Some(hit) = hit {
+            let rt = hit.get("required_tracks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let tracks: Vec<String> = rt.iter().map(|t| s_of(Some(t))).collect();
+            let hp = int0(hit.get("port"));
+            return json!({"ok": true, "source": "acecm", "ip": host, "tcp": if hp != 0 { hp } else { tcp }, "udp": tcp,
+                "name": ({ let n = s_or(hit.get("name")); if n.is_empty() { host.clone() } else { n } }),
+                "description": s_or(hit.get("description")), "track": tracks.join(", "),
+                "needs_mods": hit.get("required_mods").filter(|v| truthy(Some(v))).cloned().unwrap_or(json!([])),
+                "needs_tracks": if rt.is_empty() { json!([]) } else { json!(rt) },
+                "content_bytes": if truthy(hit.get("content_bytes")) { hit["content_bytes"].clone() } else { json!(0) },
+                "base": base, "sid": s_or(hit.get("id")), "cars": []});
+        }
+        let ambiguous = onport.len() > 1;
+        let note = if ambiguous {
+            format!("{} of this host's {} servers claim port {tcp}, so which one you mean is not clear - Get content will fetch what they all need", onport.len(), entries.len())
+        } else {
+            format!("{} servers shared here and none lists port {tcp} - Get content will fetch what they all need", entries.len())
+        };
+        let sids: Vec<Value> = entries.iter().filter(|e| truthy(e.get("id"))).map(|e| e["id"].clone()).collect();
+        let names: Vec<Value> = entries.iter().map(|e| if truthy(e.get("name")) { e["name"].clone() } else { e.get("id").cloned().unwrap_or(Value::Null) }).collect();
+        return json!({"ok": true, "source": "acecm", "ip": host, "tcp": tcp, "udp": tcp, "name": host, "base": base,
+            "sids": sids, "names": names, "note": note, "cars": []});
+    }
+    json!({"ok": true, "source": "unknown", "ip": host, "tcp": tcp, "udp": tcp, "name": format!("{host}:{tcp}"), "cars": [],
+        "note": "not in your captured list and the host is not sharing through ACECM, so its track and cars are unknown - joining will still work if the address is right"})
+}

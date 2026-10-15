@@ -194,6 +194,14 @@ fn mod_files(name: &str) -> Vec<(String, PathBuf)> {
     out
 }
 
+pub fn mod_files_pub(name: &str) -> Vec<(String, PathBuf)> {
+    mod_files(name)
+}
+
+pub fn track_files_pub(folder: &str) -> Vec<(String, PathBuf)> {
+    track_files(folder)
+}
+
 /// os.walk order: this folder's files, then each subfolder in turn.
 fn walk_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>, folder: &str) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };

@@ -56,6 +56,10 @@ def assets_root():
 
 def package():
     """The client's content.kspkg, or None if the game was not found."""
+    # dev/test only: point every client-archive read AND write at a copy
+    test = os.environ.get("ACECM_CLIENT_KSPKG")
+    if test:
+        return test if os.path.isfile(test) else None
     g = detect.game_dir()
     if not g:
         return None
