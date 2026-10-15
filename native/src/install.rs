@@ -192,7 +192,13 @@ pub fn sync(direction: &str, force: bool, names: Option<Vec<String>>) -> Value {
     }
     let _ = std::fs::create_dir_all(&cli);
     let au = mods::audit();
-    let wanted = names.unwrap_or_else(|| au.get("mods").and_then(|m| m.as_array()).cloned().unwrap_or_default().iter().map(|r| sv(r, "name")).collect());
+    // only names the audit knows (they become file names below); an empty
+    // list means all, as in the Python (`names or [...]`)
+    let known: Vec<String> = au.get("mods").and_then(|m| m.as_array()).cloned().unwrap_or_default().iter().map(|r| sv(r, "name")).collect();
+    let wanted: Vec<String> = match names.filter(|n| !n.is_empty()) {
+        Some(n) => n.into_iter().filter(|x| known.contains(x)).collect(),
+        None => known,
+    };
     let (mut copied, mut skipped, mut errors) = (Vec::new(), Vec::new(), Vec::new());
     let mut one = |name: &str, src_dir: &str, dst_dir: &str, label: &str| {
         for ext in [".kspkg", ".json"] {
@@ -297,8 +303,20 @@ fn write_mod_file(name: &str, ext: &str, src: Result<&mut dyn Read, &Path>) -> s
     match src {
         Err(path) => if !same_path(path, &first) { copy2(path, &first)?; },
         Ok(r) => {
-            let mut f = std::fs::File::create(&first)?;
-            std::io::copy(r, &mut f)?;
+            // ⚠ not File::create(first): that emptied the installed mod
+            // before a single byte of the new one had arrived
+            let tmp = first.with_extension(format!("{}.part", ext.trim_start_matches('.')));
+            let res = (|| {
+                let mut f = std::fs::File::create(&tmp)?;
+                std::io::copy(r, &mut f)?;
+                f.sync_all()?;
+                drop(f);
+                std::fs::rename(&tmp, &first)
+            })();
+            if res.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            res?;
         }
     }
     let mut written = vec![first.clone()];
@@ -858,39 +876,91 @@ pub fn install_track_pack(path: &Path, folder: Option<&str>, overwrite: bool) ->
     if let Some(bad) = archive_budget(path, &dest) {
         return bad;
     }
-    if overwrite && track_has_files(&dest) {
-        if let Err(e) = std::fs::remove_dir_all(&dest) {
-            return json!({"ok": false, "error": e.to_string()});
-        }
-    }
-    if let Err(e) = extract_archive(path, &dest) {
+    // ⚠ Unpack into a staging folder and swap it in only when complete. The
+    // old copy used to be DELETED first, so one bad member left the player
+    // with half a track and no old one.
+    let staging = match staging_dir(&td) { Ok(s) => s, Err(e) => return json!({"ok": false, "error": e}) };
+    if let Err(e) = extract_archive(path, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
         return json!({"ok": false, "error": e});
     }
-    if let Some(side) = std::fs::read(dest.join("acecm_track.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+    if let Some(side) = std::fs::read(staging.join("acecm_track.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
         merge(&mut meta, &side);
     }
+    // the pack's own sidecar may name the folder it belongs in
     let mf = sv(&meta, "folder");
     if !mf.is_empty() && safe_folder(&mf) != folder {
         let want = safe_folder(&mf);
         if !want.is_empty() {
             if let Ok(dest2) = under(&td, &[&want]) {
                 if dest2 != dest {
-                    if dest2.is_dir() {
-                        let _ = std::fs::remove_dir_all(&dest2);
+                    // ⚠ the SAME conflict check as the folder asked for: a pack
+                    // whose sidecar named another installed track deleted it
+                    if !overwrite {
+                        let label = { let d = sv(&meta, "display_name"); if d.is_empty() { want.clone() } else { d } };
+                        if let Some(hit) = track_conflict(&want, &dest2, &archive_file_sizes(path), &label) {
+                            let _ = std::fs::remove_dir_all(&staging);
+                            return hit;
+                        }
                     }
-                    if std::fs::rename(&dest, &dest2).is_ok() {
-                        dest = dest2;
-                        folder = want;
-                    }
+                    dest = dest2;
+                    folder = want;
                 }
             }
         }
+    }
+    if let Err(e) = swap_in(&staging, &dest) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return json!({"ok": false, "error": e});
     }
     ingest_begin("Registering in the client tables", 0);
     let reg = crate::trackdeploy::register_client_track(&folder, &meta);
     ingest_end("");
     after_content_change();
     track_result(&folder, &meta, &dest, reg, Some("files are in place; register the track when the game is closed"))
+}
+
+fn rand_tag() -> String {
+    let mut b = [0u8; 4];
+    let _ = getrandom::fill(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// An empty folder BESIDE the tracks folder (same volume, so the final move
+/// is a rename; not inside it, where it would look like a track).
+fn staging_dir(tracks: &str) -> Result<PathBuf, String> {
+    let t = std::path::absolute(tracks).map_err(|e| e.to_string())?;
+    let parent = t.parent().map(Path::to_path_buf).unwrap_or_else(|| t.clone());
+    let s = parent.join(format!("acecm-staging-{}", rand_tag()));
+    std::fs::create_dir_all(&s).map_err(|e| e.to_string())?;
+    Ok(s)
+}
+
+/// Put `staging` where `dest` is, all or nothing: the old copy is moved
+/// aside, the new one renamed in, and the old one deleted only after that
+/// worked (or moved back if it did not).
+fn swap_in(staging: &Path, dest: &Path) -> Result<(), String> {
+    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let old = dest.with_file_name(format!("{name}.acecm-old-{}", rand_tag()));
+    let had = dest.exists();
+    if had {
+        std::fs::rename(dest, &old).map_err(|e| format!("could not move the old copy aside: {e}"))?;
+    }
+    let moved = std::fs::rename(staging, dest).or_else(|_| {
+        // another volume: copy, then drop the staging copy
+        copytree(staging, dest).map(|_| { let _ = std::fs::remove_dir_all(staging); })
+    });
+    if let Err(e) = moved {
+        let _ = std::fs::remove_dir_all(dest);
+        if had {
+            let _ = std::fs::rename(&old, dest);
+        }
+        return Err(format!("could not put the new copy in place: {e}"));
+    }
+    if had {
+        let _ = std::fs::remove_dir_all(&old);
+    }
+    Ok(())
 }
 
 fn copytree(src: &Path, dst: &Path) -> std::io::Result<()> {

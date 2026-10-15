@@ -205,12 +205,11 @@ pub fn install(path: &Path) -> Value {
                     bad.push(format!("{rel}: checksum mismatch"));
                     continue;
                 }
-                let _ = std::fs::remove_file(&dest);
                 std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
                 written += 1;
             }
             let parts: Vec<&str> = rel.split('/').collect();
-            if parts.len() >= 3 && parts[0] == "tracks" {
+            if parts.len() >= 3 && parts[0] == "tracks" && crate::install::safe_folder(parts[1]) == parts[1] {
                 folders.insert(parts[1].to_string());
             }
             install::ingest_step(size, rel.rsplit('/').next().unwrap_or(""));

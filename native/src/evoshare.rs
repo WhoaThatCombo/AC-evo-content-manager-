@@ -132,8 +132,12 @@ fn plan_car(base: &str, fname: &str) -> Value {
     if d.is_empty() {
         return json!({"ok": false, "error": "no client mods folder"});
     }
-    let dest = Path::new(&d).join(fname);
-    let base_name = if fname.to_lowercase().ends_with(".kspkg") { &fname[..fname.len() - 6] } else { fname };
+    // ⚠ fname is the SHARE's: a "..\\..\\Startup\\x.cmd" wrote anywhere
+    if crate::install::safe_base(fname) != fname || !fname.to_lowercase().ends_with(".kspkg") {
+        return json!({"ok": false, "error": "not a car package name"});
+    }
+    let dest = match contentsync::under(&d, &[fname]) { Ok(p) => p, Err(e) => return json!({"ok": false, "error": e}) };
+    let base_name = &fname[..fname.len() - 6];
     let side = Path::new(&d).join(format!("{base_name}.json"));
     let man = manifest(base);
     let mut want = 0;
@@ -217,7 +221,11 @@ pub fn start(base: &str, fname: &str, folder: &str, kind: &str) -> Value {
     }
     let (b, f, fo, k) = (base.to_string(), fname.to_string(), folder.to_string(), kind.to_string());
     std::thread::spawn(move || {
-        if let Err(e) = if k.to_lowercase() == "car" { run_car(&b, &f) } else { run(&b, &f, &fo) } {
+        // ⚠ a panic must not leave the job "active" (every later download
+        // was refused as "already running" until a restart)
+        let r = std::panic::catch_unwind(|| if k.to_lowercase() == "car" { run_car(&b, &f) } else { run(&b, &f, &fo) })
+            .unwrap_or_else(|_| Err("the download stopped unexpectedly".into()));
+        if let Err(e) = r {
             logs::warn(format!("evoshare download failed: {e}"));
             set(json!({"active": false, "phase": "error", "error": e}));
         }
@@ -242,8 +250,8 @@ fn write_entry(it: &Value, raw: &[u8]) -> Result<(), String> {
     }
     let tmp = PathBuf::from(format!("{}.part", dest.display()));
     std::fs::write(&tmp, &data).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&dest);
-    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())
+    // rename replaces: deleting first lost the old file when the rename failed
+    std::fs::rename(&tmp, &dest).map_err(|e| { let _ = std::fs::remove_file(&tmp); e.to_string() })
 }
 
 fn run(base: &str, fname: &str, folder: &str) -> Result<(), String> {
@@ -264,6 +272,10 @@ fn run(base: &str, fname: &str, folder: &str) -> Result<(), String> {
     let mut runs: Vec<(u64, u64, Vec<Value>)> = Vec::new();
     for it in need.iter().cloned() {
         let (o, s) = (int(it.get("o")), int(it.get("s")));
+        // entries are u32-sized in a kspkg; anything else is a broken index
+        if s > u32::MAX as u64 || o.checked_add(s).is_none() {
+            return Err("the share's index is damaged".into());
+        }
         match runs.last_mut() {
             Some(r) if o.saturating_sub(r.1) <= GAP_TOLERANCE && o + 0 >= r.0 => { r.1 = r.1.max(o + s); r.2.push(it); }
             _ => runs.push((o, o + s, vec![it])),
@@ -278,6 +290,9 @@ fn run(base: &str, fname: &str, folder: &str) -> Result<(), String> {
         }
         let mut r = get(&u, Some((start, end.saturating_sub(1))), 60)?;
         let mut buf: Vec<u8> = Vec::new();
+        // the stream offset buf[0] stands for: written entries are dropped
+        // from the front, so a run never holds more than one entry ahead
+        let mut base = start;
         let mut chunk = vec![0u8; CHUNK];
         for it in items {
             if cancelled() {
@@ -285,7 +300,10 @@ fn run(base: &str, fname: &str, folder: &str) -> Result<(), String> {
                 return Ok(());
             }
             let (o, s) = (int(it.get("o")), int(it.get("s")));
-            let want_to = (o + s - start) as usize;
+            if o < base {
+                return Err("the share's index has overlapping entries".into());
+            }
+            let want_to = (o + s - base) as usize;
             while buf.len() < want_to {
                 let n = r.read(&mut chunk).map_err(|e| e.to_string())?;
                 if n == 0 {
@@ -296,8 +314,10 @@ fn run(base: &str, fname: &str, folder: &str) -> Result<(), String> {
             if buf.len() < want_to {
                 return Err("the share closed the stream early".into());
             }
-            let at = (o - start) as usize;
+            let at = (o - base) as usize;
             write_entry(&it, &buf[at..at + s as usize])?;
+            buf.drain(..at + s as usize);
+            base = o + s;
             got += s;
             done += 1;
             set(json!({"done": done, "bytes": got}));
@@ -339,8 +359,13 @@ fn run_car(base: &str, fname: &str) -> Result<(), String> {
         let tmp = PathBuf::from(format!("{}.part", dest.display()));
         // resume a part-finished file rather than starting the GB again
         let at = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
-        let rng = if at > 0 && want > 0 && at < want { Some((at, want - 1)) } else { None };
+        // ⚠ a .part as big as the car (or bigger) is not resumable
+        let at = if want > 0 && at >= want { 0 } else { at };
+        let rng = if at > 0 && want > 0 { Some((at, want - 1)) } else { None };
         let mut r = get(&url(base, &["content", fname]), rng, 60)?;
+        // ⚠ resume ONLY on a 206: a host that ignores Range sends the whole
+        // file, which appended to the part made a corrupt car
+        let at = if rng.is_some() && r.status().as_u16() != 206 { 0 } else { at };
         let mut f = std::fs::OpenOptions::new().create(true).write(true).append(at > 0).truncate(at == 0).open(&tmp).map_err(|e| e.to_string())?;
         let mut got = at;
         let mut chunk = vec![0u8; CHUNK];
@@ -353,12 +378,17 @@ fn run_car(base: &str, fname: &str) -> Result<(), String> {
             if n == 0 {
                 break;
             }
+            if want > 0 && got + n as u64 > want {
+                return Err("the car is larger than the share declared".into());
+            }
             f.write_all(&chunk[..n]).map_err(|e| e.to_string())?;
             got += n as u64;
             set(json!({"bytes": got}));
         }
         drop(f);
-        let _ = std::fs::remove_file(&dest);
+        if want > 0 && got != want {
+            return Err(format!("the car arrived incomplete ({got} of {want} bytes) - try again to resume"));
+        }
         std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
         set(json!({"done": 1}));
     }

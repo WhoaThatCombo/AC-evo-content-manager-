@@ -32,10 +32,23 @@ fn sv(v: &Value, k: &str) -> String {
 }
 
 /// Absolute path inside root, or Err if it would escape.
+/// ⚠ Every component must be a plain name: no `.` / `..` (a manifest path
+/// "tracks/./x" made the WHOLE tracks folder one track's folder, so every
+/// other track's files counted as stale and were deleted), no `:` (NTFS
+/// alternate data streams, drive letters) and no NUL. Names come from
+/// remote hosts and shares.
 pub fn under(root: &str, parts: &[&str]) -> Result<PathBuf, String> {
     let root = std::path::absolute(root).map_err(|e| e.to_string())?;
     let mut dest = root.clone();
     for p in parts {
+        for c in p.split(['/', '\\']) {
+            if c.is_empty() {
+                continue;
+            }
+            if c == "." || c == ".." || c.contains(':') || c.contains('\0') {
+                return Err("bad path component".into());
+            }
+        }
         dest.push(p);
     }
     let dest = normalize(&dest);
@@ -399,8 +412,14 @@ fn stale_files(man: &Value) -> Vec<String> {
         }
     }
     let td = tracks_dir();
+    // ⚠ strip against the SAME normalised root under() returns: a relative
+    // or ..-containing setting made every file fail the match and be deleted
+    let tdn = std::path::absolute(&td).map(|p| normalize(&p)).unwrap_or_else(|_| PathBuf::from(&td));
     let mut out = Vec::new();
     for folder in folders {
+        if crate::install::safe_folder(&folder) != folder {
+            continue;
+        }
         let Ok(root) = under(&td, &[&folder]) else { continue };
         if !root.is_dir() {
             continue;
@@ -413,7 +432,8 @@ fn stale_files(man: &Value) -> Vec<String> {
                 if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     stack.push(p);
                 } else {
-                    let rel = p.strip_prefix(&td).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+                    let Ok(rel) = p.strip_prefix(&tdn) else { continue };
+                    let rel = rel.to_string_lossy().replace('\\', "/");
                     if !keep.contains(&format!("tracks/{rel}").to_lowercase()) {
                         out.push(p.to_string_lossy().into_owned());
                     }
@@ -567,7 +587,8 @@ fn ranged_to_file(url: &str, size: u64, tmp: &Path, progress: Option<Progress>, 
                     let want = ((b - pos + 1) as usize).min(buf.len());
                     let n = r.read(&mut buf[..want]).map_err(|e| e.to_string())?;
                     if n == 0 {
-                        break;
+                        // ⚠ a range that ends early is a hole of zeros in the file
+                        return Err("the host closed a range early".into());
                     }
                     f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
                     pos += n as u64;
@@ -625,18 +646,28 @@ pub fn fetch(entry: &Value, progress: Option<Progress>) -> Result<PathBuf, Strin
     let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; 1 << 20];
     let mut done = 0u64;
+    let fail = |e: String| { let _ = std::fs::remove_file(&tmp); e };
     loop {
-        let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+        let n = r.read(&mut buf).map_err(|e| fail(e.to_string()))?;
         if n == 0 {
             break;
         }
-        f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         done += n as u64;
+        // ⚠ never more than the manifest declared (a hostile host could
+        // otherwise stream until the disk is full)
+        if size > 0 && done > size {
+            drop(f);
+            return Err(fail(format!("{} is larger than the host declared", sv(entry, "path"))));
+        }
+        f.write_all(&buf[..n]).map_err(|e| fail(e.to_string()))?;
         if let Some(p) = progress {
             p(done, size);
         }
     }
     drop(f);
+    if size > 0 && done != size {
+        return Err(fail(format!("{} arrived incomplete ({done} of {size} bytes)", sv(entry, "path"))));
+    }
     digest_check(&tmp, entry)?;
     std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
     Ok(dest)
@@ -768,6 +799,9 @@ pub fn fetch_track_pack(base: &str, sid: &str, folder: &str, files: &[Value], pr
 
 /// Put a downloaded track in the client's system tables.
 pub fn register_downloaded_track(folder: &str) -> Value {
+    if folder.is_empty() || crate::install::safe_folder(folder) != folder {
+        return json!({"ok": false, "error": format!("not a track folder name: {folder:?}")});
+    }
     let dest = Path::new(&tracks_dir()).join(folder);
     let meta = std::fs::read(dest.join("acecm_track.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).unwrap_or(json!({}));
     let r = crate::trackdeploy::register_client_track(folder, &meta);
@@ -799,6 +833,10 @@ pub fn install_files(need: &[Value], status: &Mutex<Map<String, Value>>, registe
         let rel = sv(e, "path").replace('\\', "/");
         let parts: Vec<&str> = rel.split('/').collect();
         if parts.len() >= 3 && parts[0] == "tracks" && !parts[1].is_empty() {
+            if crate::install::safe_folder(parts[1]) != parts[1] {
+                logs::warn(format!("skipping {rel}: not a track folder name"));
+                continue;
+            }
             match tracks.iter_mut().find(|(f, _)| f == parts[1]) {
                 Some((_, v)) => v.push(e.clone()),
                 None => tracks.push((parts[1].to_string(), vec![e.clone()])),
@@ -906,4 +944,22 @@ pub fn installed_cars() -> Vec<String> {
         .iter().filter_map(|m| m.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()).map(String::from)).collect();
     v.sort();
     v
+}
+
+#[cfg(test)]
+mod under_tests {
+    use super::under;
+
+    #[test]
+    fn only_plain_components() {
+        let root = std::env::temp_dir().join("acecm_under_root");
+        let r = root.to_string_lossy().to_string();
+        assert!(under(&r, &["tracks", "monza", "a.texture"]).is_ok());
+        assert!(under(&r, &["monza/layouts/x.bin"]).is_ok());
+        for bad in [".", "..", "x/../..", "a:b.texture", "C:", "x/./y", "nul\0"] {
+            assert!(under(&r, &[bad]).is_err(), "{bad:?} must be refused");
+        }
+        let abs = if cfg!(windows) { r"C:\Windows\x" } else { "/etc/x" };
+        assert!(under(&r, &[abs]).is_err());
+    }
 }

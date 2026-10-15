@@ -175,6 +175,9 @@ fn strs(e: &Value, k: &str) -> Vec<String> {
 
 /// Both halves of a car mod, from either side's mod folder.
 fn mod_files(name: &str) -> Vec<(String, PathBuf)> {
+    if !plain_name(name) {
+        return Vec::new();
+    }
     let mut dirs: Vec<String> = Vec::new();
     for d in [crate::mods::mods_dir(), crate::mods::client_mods_dir()] {
         if !d.is_empty() && Path::new(&d).is_dir() && !dirs.contains(&d) {
@@ -192,6 +195,13 @@ fn mod_files(name: &str) -> Vec<(String, PathBuf)> {
         }
     }
     out
+}
+
+/// ⚠ Registry entries are edited by hand and imported: a name like
+/// "..\\..\\.." would otherwise serve the user's profile through the
+/// unauthenticated share routes.
+fn plain_name(n: &str) -> bool {
+    !n.is_empty() && crate::install::safe_base(n) == n
 }
 
 pub fn mod_files_pub(name: &str) -> Vec<(String, PathBuf)> {
@@ -213,7 +223,12 @@ fn walk_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>, folder:
             subdirs.push(p);
         } else {
             let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
-            out.push((format!("tracks/{folder}/{rel}"), p));
+            let rel = format!("tracks/{folder}/{rel}");
+            // only game content is offered (the Downloads fallback would
+            // otherwise share whatever else is in that folder)
+            if crate::contentsync::content_allowed(&rel) {
+                out.push((rel, p));
+            }
         }
     }
     for d in subdirs {
@@ -224,6 +239,9 @@ fn walk_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>, folder:
 /// Everything in a track folder; the IMPORTED folder first (a deploy
 /// package is only the logic, the art is in Saved Games).
 fn track_files(folder: &str) -> Vec<(String, PathBuf)> {
+    if !plain_name(folder) || crate::install::safe_folder(folder) != folder {
+        return Vec::new();
+    }
     let roots = [
         home().join("Saved Games").join("ACE").join("mods").join("content").join("tracks").join(folder),
         paths::data().join("track_packages").join(folder),
@@ -371,7 +389,6 @@ fn build_track_pack(folder: &str) -> Option<PathBuf> {
         let _ = std::fs::remove_file(&tmp);
         return None;
     }
-    let _ = std::fs::remove_file(&tar_path);
     std::fs::rename(&tmp, &tar_path).ok()?;
     let digest = file_digest(&tar_path).unwrap_or_default();
     let _ = std::fs::write(&sig_path, format!("{want}\n"));
