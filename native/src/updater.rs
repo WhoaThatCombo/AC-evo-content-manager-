@@ -340,130 +340,160 @@ fn launch_mode_flags() -> String {
         .map(|f| format!(" {f}")).collect()
 }
 
+/// A batch file plus the environment it reads its paths from.
+pub struct Script {
+    pub bat: PathBuf,
+    pub log: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
+/// ⚠ Every PATH reaches the batch file through the environment and is used
+/// as "!VAR!" (delayed expansion), never written into the script text:
+///  * cmd reads a .bat in the OEM codepage, so a UTF-8 "José" in the
+///    profile path came out garbled and every move failed;
+///  * with delayed expansion on, a literal `!` in a path vanished, and `%`
+///    was expanded;
+///  * `&`, `(` and `)` in a %VAR% expansion break the parse.
+/// A delayed expansion is substituted after parsing and never re-scanned,
+/// so any character is safe there, and the script itself stays ASCII.
+fn env(k: &str, v: impl AsRef<std::ffi::OsStr>) -> (String, String) {
+    (k.to_string(), v.as_ref().to_string_lossy().into_owned())
+}
+
 /// The script that replaces a running exe once it exits. Split out so it
 /// can be tested without downloading anything.
 pub fn write_swap_script(exe: &Path, new: &Path, pid: u32, bat: Option<PathBuf>, blog: Option<PathBuf>,
-                         relaunch: bool, ver: Option<&str>, okflag: Option<String>) -> std::io::Result<(PathBuf, PathBuf)> {
+                         relaunch: bool, ver: Option<&str>, okflag: Option<String>) -> std::io::Result<Script> {
     let data = crate::paths::data();
     let bat = bat.unwrap_or_else(|| data.join("_update.bat"));
     let blog = blog.unwrap_or_else(|| data.join("_update.log"));
-    let exe_s = exe.to_string_lossy().to_string();
-    let new_s = new.to_string_lossy().to_string();
-    let inst = exe.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    let marker = format!("{inst}\\version.txt");
-    let prev_marker = format!("{marker}.prev");
-    let rolled = rollback_flag_path().to_string_lossy().to_string();
+    let inst = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    let marker = inst.join("version.txt");
     let okflag = if relaunch && okflag.is_none() {
         let mut b = [0u8; 16];
         let _ = getrandom::fill(&mut b);
         let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
         Some(std::env::temp_dir().join(format!("acecm-upok-{hex}.flag")).to_string_lossy().to_string())
     } else { okflag };
-    let image = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "ACECM.exe".into());
-    let stem = exe.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "ACECM".into());
+    // the version came from the signed release tag; keep only what a
+    // version can contain, so it is safe on a command line
+    let ver: String = ver.unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || ".-+".contains(*c)).collect();
     let mut args = String::new();
-    if relaunch {
-        if let Some(v) = ver {
-            args += &format!(" --updated {v}");
-        }
-        if let Some(o) = &okflag {
-            args += &format!(" --okflag \"{o}\"");
-        }
-        args += &launch_mode_flags();
+    if relaunch && !ver.is_empty() {
+        args += &format!(" --updated {ver}");
     }
+    // --headless / --no-ui / --browser: ASCII flags only
+    let mode = if relaunch { launch_mode_flags() } else { String::new() };
+    let vars = vec![
+        env("ACECM_PID", pid.to_string()), env("ACECM_EXE", exe), env("ACECM_NEW", new),
+        env("ACECM_INST", &inst), env("ACECM_LOG", &blog), env("ACECM_MARKER", &marker),
+        env("ACECM_PREV", format!("{}.prev", marker.display())), env("ACECM_ROLLED", rollback_flag_path()),
+        env("ACECM_PENDING", pending_path()), env("ACECM_OKFLAG", okflag.clone().unwrap_or_default()),
+        env("ACECM_VER", &ver), env("ACECM_ARGS", &args), env("ACECM_MODE", &mode), env("ACECM_BAT", &bat),
+    ];
+    // is a process running THIS exe (by path, never by image name - another
+    // install's ACECM.exe must not count)
+    let running_ours = "powershell -NoProfile -NonInteractive -Command \"if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $env:ACECM_EXE }) { exit 0 } else { exit 1 }\"";
     let mut l: Vec<String> = vec![
         "@echo off".into(),
-        // ⚠ delayed expansion: %VAR% inside a block is expanded at PARSE time
+        // ⚠ delayed expansion: !VAR! below, and a retry counter inside a
+        // block that %VAR% would freeze at parse time
         "setlocal enabledelayedexpansion".into(),
-        format!("set LOG=\"{}\"", blog.to_string_lossy()),
-        format!("echo [%date% %time%] waiting for pid {pid} > %LOG%"),
+        "echo [%date% %time%] waiting for pid !ACECM_PID! > \"!ACECM_LOG!\"".into(),
         "rem Wait for ACECM to exit - Windows will not let a running exe be".into(),
         "rem replaced. Use ping, not timeout: timeout needs a console.".into(),
         ":wait".into(),
-        format!("tasklist /fi \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul"),
+        "tasklist /fi \"PID eq !ACECM_PID!\" 2>nul | find \"!ACECM_PID!\" >nul".into(),
         "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)".into(),
-        // ⚠ helpers run from the same exe keep its image locked; match on the
-        // PATH so an unrelated ACECM elsewhere is not collateral
+        // ⚠ helpers run from the same exe keep its image locked; match on
+        // the PATH so an unrelated ACECM elsewhere is not collateral
         "rem clear helpers still running the exe we are replacing".into(),
-        format!("powershell -NoProfile -NonInteractive -Command \"Get-Process -Name {stem} -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{}' }} | Stop-Process -Force -ErrorAction SilentlyContinue\" >>%LOG% 2>&1",
-                exe_s.replace('\'', "''")),
+        "powershell -NoProfile -NonInteractive -Command \"Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $env:ACECM_EXE } | Stop-Process -Force -ErrorAction SilentlyContinue\" >>\"!ACECM_LOG!\" 2>&1".into(),
         "rem the file can stay locked for a moment after the process goes".into(),
         "ping -n 4 127.0.0.1 >nul".into(),
         "set TRIES=0".into(),
         ":swap".into(),
-        format!("move /y \"{exe_s}\" \"{exe_s}.old\" >>%LOG% 2>&1"),
+        "move /y \"!ACECM_EXE!\" \"!ACECM_EXE!.old\" >>\"!ACECM_LOG!\" 2>&1".into(),
         "if errorlevel 1 (".into(),
         "  set /a TRIES+=1".into(),
         "  if !TRIES! lss 20 (ping -n 2 127.0.0.1 >nul & goto swap)".into(),
-        "  echo could not replace the exe - it is still locked >>%LOG%".into(),
+        "  echo could not replace the exe - it is still locked >>\"!ACECM_LOG!\"".into(),
         "  goto giveup".into(),
         ")".into(),
-        format!("move /y \"{new_s}\" \"{exe_s}\" >>%LOG% 2>&1"),
+        "move /y \"!ACECM_NEW!\" \"!ACECM_EXE!\" >>\"!ACECM_LOG!\" 2>&1".into(),
         "if errorlevel 1 (".into(),
-        "  echo could not move the new exe into place - restoring >>%LOG%".into(),
-        format!("  copy /y \"{exe_s}.old\" \"{exe_s}\" >>%LOG% 2>&1"),
+        "  echo could not move the new exe into place - restoring >>\"!ACECM_LOG!\"".into(),
+        "  copy /y \"!ACECM_EXE!.old\" \"!ACECM_EXE!\" >>\"!ACECM_LOG!\" 2>&1".into(),
         "  goto giveup".into(),
         ")".into(),
-        "echo swapped ok >>%LOG%".into(),
-        format!("if exist \"{marker}\" copy /y \"{marker}\" \"{prev_marker}\" >>%LOG% 2>&1"),
+        "echo swapped ok >>\"!ACECM_LOG!\"".into(),
+        "if exist \"!ACECM_MARKER!\" copy /y \"!ACECM_MARKER!\" \"!ACECM_PREV!\" >>\"!ACECM_LOG!\" 2>&1".into(),
+        "if defined ACECM_VER (>\"!ACECM_MARKER!\" echo !ACECM_VER!)".into(),
     ];
-    if let Some(v) = ver {
-        l.push(format!("echo {v}> \"{marker}\""));
-    }
     if relaunch {
-        l.push(format!("start \"ACECM\" /d \"{inst}\" \"{exe_s}\"{args} --relaunch"));
-        l.push("set W=0".into());
-        l.push(":waitok".into());
-        l.push("ping -n 3 127.0.0.1 >nul".into());
-        l.push(match &okflag { Some(o) => format!("if exist \"{o}\" goto upok"), None => "goto upok".into() });
-        l.push("set /a W+=1".into());
-        l.push("if !W! lss 20 goto waitok".into());
-        // a live exe after the swap is success even if the flag was lost
-        l.push(format!("tasklist /fi \"IMAGENAME eq {image}\" 2>nul | find /i \"{image}\" >nul"));
-        l.push("if not errorlevel 1 (".into());
-        l.push("  echo new exe is running without a flag - keeping it >>%LOG%".into());
-        l.push("  goto upok".into());
-        l.push(")".into());
-        l.push("echo new exe did not start - rolling back >>%LOG%".into());
-        l.push(":rollback".into());
-        l.push(format!("copy /y \"{exe_s}.old\" \"{exe_s}\" >>%LOG% 2>&1"));
-        l.push(format!("if exist \"{prev_marker}\" copy /y \"{prev_marker}\" \"{marker}\" >>%LOG% 2>&1"));
-        l.push(format!("echo rollback> \"{rolled}\""));
-        l.push(format!("start \"ACECM\" /d \"{inst}\" \"{exe_s}\" --relaunch"));
-        l.push("goto done".into());
-        l.push(":upok".into());
-        if let Some(o) = &okflag {
-            l.push(format!("del \"{o}\" >nul 2>&1"));
-        }
-        l.push(format!("del \"{}\" >nul 2>&1", pending_path().to_string_lossy()));
-        l.push("echo handshake ok >>%LOG%".into());
-        l.push("goto done".into());
+        l.extend([
+            "start \"ACECM\" /d \"!ACECM_INST!\" \"!ACECM_EXE!\"!ACECM_ARGS! --okflag \"!ACECM_OKFLAG!\"!ACECM_MODE! --relaunch".to_string(),
+            "set W=0".into(),
+            ":waitok".into(),
+            "ping -n 3 127.0.0.1 >nul".into(),
+            "if exist \"!ACECM_OKFLAG!\" goto upok".into(),
+            "set /a W+=1".into(),
+            "if !W! lss 20 goto waitok".into(),
+            // a live copy of THIS exe after the swap is success even if the
+            // flag was lost; rolling back would fight it
+            running_ours.into(),
+            "if not errorlevel 1 (".into(),
+            "  echo new exe is running without a flag - keeping it >>\"!ACECM_LOG!\"".into(),
+            "  goto upok".into(),
+            ")".into(),
+            "echo new exe did not start - rolling back >>\"!ACECM_LOG!\"".into(),
+            ":rollback".into(),
+            "copy /y \"!ACECM_EXE!.old\" \"!ACECM_EXE!\" >>\"!ACECM_LOG!\" 2>&1".into(),
+            "if exist \"!ACECM_PREV!\" copy /y \"!ACECM_PREV!\" \"!ACECM_MARKER!\" >>\"!ACECM_LOG!\" 2>&1".into(),
+            "echo rollback> \"!ACECM_ROLLED!\"".into(),
+            "del \"!ACECM_PENDING!\" >nul 2>&1".into(),
+            "start \"ACECM\" /d \"!ACECM_INST!\" \"!ACECM_EXE!\" --relaunch".into(),
+            "goto done".into(),
+            ":upok".into(),
+            "del \"!ACECM_OKFLAG!\" >nul 2>&1".into(),
+            "del \"!ACECM_PENDING!\" >nul 2>&1".into(),
+            "echo handshake ok >>\"!ACECM_LOG!\"".into(),
+            "goto done".into(),
+        ]);
     }
     l.push(":giveup".into());
-    l.push("echo giveup >>%LOG%".into());
+    l.push("echo giveup >>\"!ACECM_LOG!\"".into());
+    // ⚠ the swap did not happen: no update is pending any more
+    l.push("del \"!ACECM_PENDING!\" >nul 2>&1".into());
     if relaunch {
-        l.push(format!("start \"\" /d \"{inst}\" \"{exe_s}\""));
+        l.push("start \"\" /d \"!ACECM_INST!\" \"!ACECM_EXE!\"".into());
     }
     l.push(":done".into());
-    l.push("del \"%~f0\"".into());
+    l.push("del \"!ACECM_BAT!\"".into());
     std::fs::create_dir_all(&data)?;
     let mut text = l.join("\r\n");
     text.push_str("\r\n");
     std::fs::write(&bat, text)?;
-    Ok((bat, blog))
+    Ok(Script { bat, log: blog, env: vars })
 }
 
 /// Run a batch file windowless, in its own process group, so it outlives us.
 /// ⚠ CREATE_NO_WINDOW, not DETACHED_PROCESS: detached leaves the batch with
 /// no console and its redirections fail outright.
-pub fn run_batch(bat: &Path) -> std::io::Result<()> {
+/// ⚠ `/s /c ""path""`: with `&` or `( )` in the path, cmd strips a plain
+/// pair of quotes and then fails to find the script - while spawn() itself
+/// still succeeds, so the failure was silent.
+pub fn run_batch(s: &Script) -> std::io::Result<()> {
     let mut c = std::process::Command::new("cmd");
-    c.arg("/c").arg(bat).current_dir(crate::paths::data());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        c.raw_arg(format!("/d /s /c \"\"{}\"\"", s.bat.display()));
         c.creation_flags(0x0800_0000 | 0x0000_0200);
     }
+    #[cfg(not(windows))]
+    c.arg("/c").arg(&s.bat);
+    c.current_dir(crate::paths::data()).envs(s.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     c.spawn().map(|_| ())
 }
@@ -473,8 +503,8 @@ pub fn run_batch(bat: &Path) -> std::io::Result<()> {
 pub fn schedule_relaunch(exe: &Path, pid: u32) -> std::io::Result<PathBuf> {
     #[cfg(not(windows))]
     {
-        let script = format!("while kill -0 {pid} 2>/dev/null; do sleep 0.5; done; sleep 0.5; exec \"{}\" --relaunch", exe.display());
-        std::process::Command::new("/bin/sh").arg("-c").arg(script)
+        let script = format!("while kill -0 {pid} 2>/dev/null; do sleep 0.5; done; sleep 0.5; exec \"$ACECM_EXE\" --relaunch");
+        std::process::Command::new("/bin/sh").arg("-c").arg(script).env("ACECM_EXE", exe)
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
             .spawn()?;
         return Ok(PathBuf::new());
@@ -484,19 +514,23 @@ pub fn schedule_relaunch(exe: &Path, pid: u32) -> std::io::Result<PathBuf> {
         let data = crate::paths::data();
         std::fs::create_dir_all(&data)?;
         let bat = data.join("_relaunch.bat");
-        let inst = exe.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let inst = exe.parent().map(Path::to_path_buf).unwrap_or_default();
         let lines = [
-            "@echo off".to_string(),
-            ":wait".into(),
-            format!("tasklist /fi \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul"),
-            "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)".into(),
-            "ping -n 2 127.0.0.1 >nul".into(),
+            "@echo off",
+            "setlocal enabledelayedexpansion",
+            ":wait",
+            "tasklist /fi \"PID eq !ACECM_PID!\" 2>nul | find \"!ACECM_PID!\" >nul",
+            "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)",
+            "ping -n 2 127.0.0.1 >nul",
             // --relaunch: the new copy waits for the port instead of deferring
-            format!("start \"ACECM\" /d \"{inst}\" \"{}\" --relaunch{}", exe.display(), launch_mode_flags()),
-            "del \"%~f0\"".into(),
+            "start \"ACECM\" /d \"!ACECM_INST!\" \"!ACECM_EXE!\" --relaunch!ACECM_MODE!",
+            "del \"!ACECM_BAT!\"",
         ];
         std::fs::write(&bat, lines.join("\r\n") + "\r\n")?;
-        run_batch(&bat)?;
+        let s = Script { bat: bat.clone(), log: PathBuf::new(), env: vec![
+            env("ACECM_PID", pid.to_string()), env("ACECM_INST", &inst), env("ACECM_EXE", exe),
+            env("ACECM_MODE", launch_mode_flags()), env("ACECM_BAT", &bat)] };
+        run_batch(&s)?;
         Ok(bat)
     }
 }
@@ -525,11 +559,29 @@ fn linux_swap(exe: &Path, new: &Path, ver: &str) -> Result<PathBuf, String> {
     Ok(old)
 }
 
+static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Download a new build and schedule the swap on exit.
+/// ⚠ One at a time: a second Apply while one is downloading or waiting
+/// rewrote the shared .new and .bat under the first, and two swap scripts
+/// then raced through the moves - one could put the NEW build onto .old,
+/// so a failed update "rolled back" to the very build that failed.
 pub fn apply() -> Value {
     if !frozen() {
         return json!({"ok": false, "error": "running from source - update with git, not this"});
     }
+    if swap_pending() {
+        return json!({"ok": false, "error": "an update is already downloaded - close ACECM (or press Restart) to finish installing it"});
+    }
+    if APPLYING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return json!({"ok": false, "error": "an update is already being downloaded"});
+    }
+    let r = apply_inner();
+    APPLYING.store(false, std::sync::atomic::Ordering::SeqCst);
+    r
+}
+
+fn apply_inner() -> Value {
     let info = check(false);
     // ⚠ never take url/sha256 from the caller: anyone who could reach the API
     // could feed a binary of their own
@@ -571,7 +623,8 @@ pub fn apply() -> Value {
     // ⚠ verify BEFORE scheduling the swap
     if got.to_lowercase() != sha256.to_lowercase() {
         let _ = std::fs::remove_file(&new);
-        return json!({"ok": false, "error": format!("checksum mismatch (got {}, expected {})", &got[..12], &sha256[..12])});
+        let short = |h: &str| h.chars().take(12).collect::<String>();
+        return json!({"ok": false, "error": format!("checksum mismatch (got {}, expected {})", short(&got), short(&sha256))});
     }
     // ⚠ AND the signature, over the hash actually downloaded
     let (ok_sig, why) = verify_release(ASSET_NAME, &latest, &got, &s("sig"));
@@ -593,14 +646,17 @@ pub fn apply() -> Value {
     }
     #[cfg(windows)]
     {
-        let (bat, blog) = match write_swap_script(&exe, &new, std::process::id(), None, None, true, Some(&ver), None) {
+        let script = match write_swap_script(&exe, &new, std::process::id(), None, None, true, Some(&ver), None) {
             Ok(x) => x,
             Err(e) => return json!({"ok": false, "error": format!("could not write the swap script: {e}")}),
         };
-        let _ = std::fs::write(pending_path(), &ver);
-        if let Err(e) = run_batch(&bat) {
+        if let Err(e) = run_batch(&script) {
             return json!({"ok": false, "error": format!("could not start the swap: {e}")});
         }
+        // only once the script is really waiting: a stale flag makes Restart
+        // quit without relaunching
+        let _ = std::fs::write(pending_path(), &ver);
+        let blog = script.log.clone();
         crate::logs::info(format!("update to {latest} downloaded and verified; swap scheduled ({})", blog.display()));
         json!({"ok": true, "version": latest, "log": blog.to_string_lossy(),
                "note": "downloaded and verified; close ACECM to finish the update - it will relaunch itself. If the new build does not start, the previous one is put back."})

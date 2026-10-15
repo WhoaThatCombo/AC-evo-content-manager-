@@ -12,11 +12,11 @@ fn main() {
         let d = Path::new(&a[2]);
         let pid: u32 = a[3].parse().unwrap();
         let relaunch = a.get(4).map(|s| s == "1").unwrap_or(false);
-        let (bat, log) = updater::write_swap_script(&d.join("ACECM.exe"), &d.join("ACECM-update.new"), pid,
+        let s = updater::write_swap_script(&d.join("ACECM.exe"), &d.join("ACECM-update.new"), pid,
             Some(d.join("_update.bat")), Some(d.join("_update.log")), relaunch, Some("9.9.9"),
             if relaunch { Some(d.join("ok.flag").to_string_lossy().into_owned()) } else { None }).unwrap();
-        updater::run_batch(&bat).unwrap();
-        println!("scheduled {} (log {})", bat.display(), log.display());
+        updater::run_batch(&s).unwrap();
+        println!("scheduled {} (log {})", s.bat.display(), s.log.display());
         return;
     }
     let info = updater::check(true);
@@ -33,8 +33,8 @@ fn main() {
     println!("short sig:      {:?}", updater::verify_release(updater::ASSET_NAME, &latest, &sha, "AAAA"));
     println!("newer: {} {} {}", updater::newer("1.0.10", "1.0.9"), updater::newer("1.0", "1.0.0"), updater::newer("v2", "1.9.9"));
     if let Some(out) = std::env::args().nth(1) {
-        let (bat, _) = updater::write_swap_script(Path::new(r"C:\X\ACECM.exe"), Path::new(r"C:\D\ACECM-update.new"), 4242,
+        let s = updater::write_swap_script(Path::new(r"C:\X\ACECM.exe"), Path::new(r"C:\D\ACECM-update.new"), 4242,
             Some(out.into()), Some(r"C:\D\_update.log".into()), true, Some("9.9.9"), Some(r"C:\T\ok.flag".into())).unwrap();
-        println!("wrote {}", bat.display());
+        println!("wrote {}", s.bat.display());
     }
 }

@@ -66,6 +66,10 @@ mod imp {
     /// call - what Toolhelp wraps, at about half its cost (7 vs 12 ms here).
     /// Falls back to Toolhelp if the call or the layout ever disagrees.
     pub fn snapshot_fresh() -> Vec<Proc> {
+        // the offsets below are the x64 layout
+        if cfg!(not(target_pointer_width = "64")) {
+            return toolhelp();
+        }
         const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
         let mut buf: Vec<u64> = vec![0; (2 << 20) / 8];
         for _ in 0..4 {

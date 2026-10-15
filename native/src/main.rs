@@ -209,6 +209,14 @@ fn main() {
         }
     };
     std_listener.set_nonblocking(true).ok();
+    // ⚠ The port is ours: this binary is good enough to keep. Confirm the
+    // update handshake NOW, before anything spawns helpers from this exe -
+    // a helper still alive at the swap script's check would otherwise make a
+    // build that died right after spawning it look like it started.
+    updater::confirm_update(okflag.as_deref());
+    // a swap that was scheduled has run (or given up) by the time anything
+    // binds this port again: a flag left behind made Restart quit for good
+    let _ = std::fs::remove_file(updater::pending_path());
     updater::consume_rollback();
     // the UI, catalogs and viewer this exe carries (release builds)
     acecm::bundle::ensure();
@@ -280,7 +288,6 @@ fn main() {
         start_background();
         rt.block_on(async move {
             let l = tokio::net::TcpListener::from_std(std_listener).expect("listener");
-            updater::confirm_update(okflag.as_deref());
             if mode == Mode::Browser {
                 acecm::launch::open_url(&url);
             } else {
@@ -301,7 +308,6 @@ fn main() {
             // HTTP is up: this binary is good enough to keep. Before the
             // window, so a later window close is not mistaken for a failed
             // update.
-            updater::confirm_update(okflag.as_deref());
             let h = app.handle().clone();
             acecm::api::set_quit(move || h.exit(0));
             let h = app.handle().clone();

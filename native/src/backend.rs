@@ -500,7 +500,8 @@ pub fn start(mode: &str) -> Value {
         .env("PYTHONUNBUFFERED", "1")
         // it goes with us, even when we are killed rather than closed
         .env("ACECM_PARENT_PID", std::process::id().to_string())
-        .stdout(log.try_clone().unwrap()).stderr(log);
+        .stderr(match log.try_clone() { Ok(l) => l, Err(e) => return json!({"ok": false, "error": format!("cannot open the backend log: {e}")}) })
+        .stdout(log);
     if !lan.is_empty() {
         c.env("SERVER_IP", &lan).env("LAN_IP", &lan);
     }
