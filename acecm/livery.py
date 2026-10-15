@@ -51,6 +51,9 @@ RECORD = "CarFinalStateWithConsumable"
 def _saved_cars_dir():
     """<Saved Games>\\ACE\\ProfileData\\<profile>\\OpenData\\SavedCars."""
     from . import detect
+    test = os.environ.get("ACECM_SAVED_CARS")        # dev/test: a copy
+    if test:
+        return test if os.path.isdir(test) else ""
     root = os.path.join(detect.saved_games(), "ACE", "ProfileData")
     if not os.path.isdir(root):
         return ""

@@ -378,7 +378,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"
             | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"
             | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"
-            | "/api/events" | "/api/events/snapshot"),
+            | "/api/events" | "/api/events/snapshot" | "/api/livery"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -396,7 +396,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/registry/save" | "/api/registry/delete" | "/api/share/track"
             | "/api/auth/rotate" | "/api/auth/remote" | "/api/penalties/set"
             | "/api/thumbs/build" | "/api/thumbs/covers" | "/api/viewer/open" | "/api/viewer/open_track"
-            | "/api/compress/start" | "/api/evoshare/start" | "/api/evoshare/cancel"),
+            | "/api/compress/start" | "/api/evoshare/start" | "/api/evoshare/cancel"
+            | "/api/livery/apply" | "/api/livery/populate"),
         _ => false,
     }
 }
@@ -698,6 +699,45 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                     }
                 }
             }
+        }
+        (false, "/api/livery") => {
+            let model = q_get(&query, "model").unwrap_or_default();
+            json_resp(200, &blocking(move || {
+                let mut out = json!({"ok": true, "cars": crate::livery::garage()});
+                if !model.is_empty() {
+                    let allowed = crate::livery::allowed(&model);
+                    let ext: Vec<String> = allowed.get("EXT SKIN").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+                        .iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                    // the paints' own display names for the picker
+                    out["names"] = crate::livery::color_names(&model, &ext);
+                    out["allowed"] = allowed;
+                    out["designs"] = json!(crate::livery::designs(&model).iter().map(|d| {
+                        let mut slots: Vec<String> = d["slots"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                        slots.sort();
+                        json!({"name": d["name"], "slots": slots})
+                    }).collect::<Vec<_>>());
+                }
+                out
+            }).await)
+        }
+        (true, "/api/livery/apply") => {
+            // ⚠ writes the player's garage, and only ever a colour the car's
+            // own design allows (an arbitrary path crashed the game)
+            let (car, color, model) = (bs("file"), bs("color"), bs("model"));
+            let slot = { let s = bs("slot"); if s.is_empty() { "EXT SKIN".to_string() } else { s } };
+            json_resp(200, &blocking(move || {
+                if !model.is_empty() {
+                    let ok_list = crate::livery::allowed(&model).get(&slot).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    if !ok_list.is_empty() && !ok_list.iter().any(|c| c.as_str() == Some(color.as_str())) {
+                        return json!({"ok": false, "error": "that colour is not offered for this car"});
+                    }
+                }
+                crate::livery::apply_color(&car, &slot, &color, false)
+            }).await)
+        }
+        (true, "/api/livery/populate") => {
+            let (undo, dry) = (bb("undo"), bb("dry_run"));
+            json_resp(200, &blocking(move || if undo { crate::livery::depopulate() } else { crate::livery::populate(dry) }).await)
         }
         (false, "/api/events/snapshot") => { let f = q_flag(&query, "fresh"); json_resp(200, &blocking(move || crate::events::snapshot(f)).await) }
         (false, "/api/events") => events_stream(),
