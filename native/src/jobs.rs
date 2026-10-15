@@ -109,6 +109,14 @@ pub fn install_content(body: &Value) -> Value {
         return json!({"ok": false, "error": if errors.is_empty() { "you already have everything this host offers".to_string() } else { errors.join("; ") }});
     }
     let bytes: u64 = need.iter().map(|e| e.get("size").and_then(|v| v.as_u64()).unwrap_or(0)).sum();
+    let targets: Vec<(std::path::PathBuf, u64)> = need.iter().filter_map(|e| {
+        let d = sv(e, "dest");
+        let p = if d.is_empty() { contentsync::destination(&sv(e, "path")).ok()? } else { std::path::PathBuf::from(d) };
+        Some((p, e.get("size").and_then(|v| v.as_u64()).unwrap_or(0)))
+    }).collect();
+    if let Some(why) = install::room_for_all(&targets) {
+        return json!({"ok": false, "error": why});
+    }
     begin("starting", bytes);
     let n = need.len();
     std::thread::spawn(move || {

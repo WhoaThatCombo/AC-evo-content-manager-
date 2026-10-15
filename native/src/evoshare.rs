@@ -262,6 +262,10 @@ fn run(base: &str, fname: &str, folder: &str) -> Result<(), String> {
         return Ok(());
     }
     let mut need: Vec<Value> = p["need"].as_array().cloned().unwrap_or_default();
+    let targets: Vec<(PathBuf, u64)> = need.iter().map(|it| (PathBuf::from(sv(it, "dest")), int(it.get("s")))).collect();
+    if let Some(why) = crate::install::room_for_all(&targets) {
+        return Err(why);
+    }
     if need.is_empty() {
         set(json!({"active": false, "phase": "done", "done": 0, "total": 0, "note": "you already have everything this share offers"}));
         return Ok(());
@@ -353,6 +357,9 @@ fn run_car(base: &str, fname: &str) -> Result<(), String> {
     }
     set(json!({"phase": "downloading", "total": 1, "want": want}));
     if p["have"] != json!(true) {
+        if let Some(why) = crate::install::room_for(&dest, want) {
+            return Err(why);
+        }
         if let Some(d) = dest.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }

@@ -670,6 +670,33 @@ const BOMB_RATIO: u64 = 1000;
 const BOMB_MIN_BYTES: u64 = 1 << 30;
 const FREE_MARGIN: u64 = 1 << 30;
 
+/// None when `bytes` fit on the drive holding `dest` with the usual 1 GB to
+/// spare, else what to tell the user. ⚠ Checked BEFORE a download starts:
+/// a host's claimed sizes are preallocated, and filling C: to the last byte
+/// takes the game, the server and Windows down with it.
+pub fn room_for(dest: &Path, bytes: u64) -> Option<String> {
+    let free = free_bytes(&existing_dir(dest))?;
+    if bytes as i128 > free as i128 - FREE_MARGIN as i128 {
+        return Some(format!("this needs {:.1} GB but only {:.1} GB is free on the drive holding {} - make room first",
+            bytes as f64 / 1e9, free as f64 / 1e9, existing_dir(dest).display()));
+    }
+    None
+}
+
+/// room_for() per drive, for files bound for several folders.
+pub fn room_for_all(items: &[(PathBuf, u64)]) -> Option<String> {
+    let mut by_drive: Vec<(String, PathBuf, u64)> = Vec::new();
+    for (p, n) in items {
+        let abs = std::path::absolute(p).unwrap_or_else(|_| p.clone());
+        let drive = abs.components().next().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).unwrap_or_default();
+        match by_drive.iter_mut().find(|(d, _, _)| *d == drive) {
+            Some(e) => e.2 += n,
+            None => by_drive.push((drive, abs, *n)),
+        }
+    }
+    by_drive.iter().find_map(|(_, p, n)| room_for(p, *n))
+}
+
 fn existing_dir(p: &Path) -> PathBuf {
     let mut p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
     while !p.is_dir() {
@@ -1339,4 +1366,18 @@ pub fn library() -> Value {
 /// Write a body stream to a staged drop file, exactly `want` bytes.
 pub fn drop_write(f: &mut std::fs::File, chunk: &[u8]) -> std::io::Result<()> {
     f.write_all(chunk)
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::*;
+
+    #[test]
+    fn room_for_checks_the_drive() {
+        let d = std::env::temp_dir().join("acecm_room").join("not").join("yet");
+        assert!(room_for(&d, 1).is_none());
+        assert!(room_for(&d, u64::MAX / 4).is_some());
+        let both = [(d.clone(), 1u64), (std::env::temp_dir(), u64::MAX / 4)];
+        assert!(room_for_all(&both).is_some());
+    }
 }
