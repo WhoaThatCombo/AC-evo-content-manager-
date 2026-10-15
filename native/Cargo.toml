@@ -14,7 +14,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "time", "sync", "fs", "io-util"] }
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "rustls-tls-native-roots", "blocking", "json"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
@@ -33,6 +33,7 @@ time = "0.3"
 libloading = "0.8"
 sha2 = "0.10"
 md-5 = "0.10"
+ed25519-dalek = "2"
 iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel"] }
 png = "0.17"
 texture2ddecoder = "0.1"
@@ -55,5 +56,5 @@ panic = "abort"
 strip = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_ProcessStatus", "Win32_Security", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_ProcessStatus", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 winreg = "0.55"

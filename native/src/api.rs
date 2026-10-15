@@ -261,6 +261,16 @@ async fn thumb(peer: IpAddr, req: Request, path: &str, query: &str) -> Result<Re
 static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static BACKEND_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static QUIT: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+static SHOW: std::sync::OnceLock<Box<dyn Fn() -> bool + Send + Sync>> = std::sync::OnceLock::new();
+
+/// How a second launch raises this instance's window (false: none to raise).
+pub fn set_show(f: impl Fn() -> bool + Send + Sync + 'static) {
+    let _ = SHOW.set(Box::new(f));
+}
+
+pub fn quit_now() {
+    if let Some(q) = QUIT.get() { q() }
+}
 
 /// How the app quits (the window owner hands this in): Quit in the UI must
 /// close the SHELL, which then stops the backend and the helpers.
@@ -379,7 +389,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"
             | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"
             | "/api/events" | "/api/events/snapshot" | "/api/livery" | "/api/car/specs" | "/api/pit/devices"
-            | "/api/patches" | "/api/patches/inspect"),
+            | "/api/patches" | "/api/patches/inspect"
+            | "/api/state" | "/api/install" | "/api/overview" | "/api/update/check"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -400,7 +411,9 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/compress/start" | "/api/evoshare/start" | "/api/evoshare/cancel"
             | "/api/livery/apply" | "/api/livery/populate"
             | "/api/pit/go" | "/api/pit/capture" | "/api/pit/bind" | "/api/hud/mph"
-            | "/api/patches/save" | "/api/patches/apply" | "/api/patches/restore" | "/api/patches/delete" | "/api/hook/plan"),
+            | "/api/patches/save" | "/api/patches/apply" | "/api/patches/restore" | "/api/patches/delete" | "/api/hook/plan"
+            | "/api/install/run" | "/api/install/remove" | "/api/update/apply" | "/api/app/restart"
+            | "/api/app/show" | "/api/server_shortcut"),
         _ => false,
     }
 }
@@ -475,8 +488,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (false, "/api/version") => json_resp(200, &json!({
             "name": "Assetto Corsa EVO Content Manager",
             "version": env!("CARGO_PKG_VERSION"),
-            // the installer/updater still live in the (source) backend
-            "frozen": false,
+            "frozen": crate::updater::frozen(),
             "data_dir": crate::paths::data().to_string_lossy(),
         })),
         (false, "/api/logs") => {
@@ -651,6 +663,11 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let mode = q_get(&query, "mode").unwrap_or_else(|| "proxy".into());
             json_resp(200, &crate::backend::log(&mode, 80))
         }
+        (true, "/api/app/quit") if !auth::is_loopback(&peer) => {
+            // ⚠ a remote peer must never be able to kill this app
+            let (c, v) = auth::deny_remote(&cfg);
+            json_resp(c, &v)
+        }
         (true, "/api/app/quit") => {
             // answer first, then go (the page shows "closed" on the reply)
             std::thread::spawn(|| {
@@ -702,6 +719,39 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                     }
                 }
             }
+        }
+        (false, "/api/state") => json_resp(200, &blocking(crate::overview::state).await),
+        (false, "/api/overview") => json_resp(200, &blocking(crate::overview::overview).await),
+        (false, "/api/install") => json_resp(200, &blocking(crate::installer::status).await),
+        (false, "/api/update/check") => {
+            // ?force=1 from the Updater page; the dashboard takes the cached answer
+            let force = q_get(&query, "force").as_deref() == Some("1");
+            json_resp(200, &blocking(move || crate::updater::check(force)).await)
+        }
+        (true, "/api/update/apply") => json_resp(200, &blocking(crate::updater::apply).await),
+        (true, "/api/install/run") => {
+            let desktop = body.get("desktop").map(|v| bb_of(Some(v))).unwrap_or(true);
+            json_resp(200, &blocking(move || crate::installer::install(desktop, false)).await)
+        }
+        (true, "/api/install/remove") => {
+            let purge = bb("purge");
+            json_resp(200, &blocking(move || crate::installer::uninstall(purge)).await)
+        }
+        (true, "/api/server_shortcut") => {
+            if !auth::is_loopback(&peer) {
+                let (c, v) = auth::deny_remote(&cfg);
+                json_resp(c, &v)
+            } else {
+                let desktop = body.get("desktop").map(|v| bb_of(Some(v))).unwrap_or(true);
+                json_resp(200, &blocking(move || crate::installer::headless_shortcut(desktop)).await)
+            }
+        }
+        (true, "/api/app/restart") => json_resp(200, &blocking(|| crate::installer::restart(quit_now)).await),
+        (true, "/api/app/show") => {
+            // a second launch asks the window owner to raise it, rather than
+            // opening a rival webview on the same profile
+            let ok = SHOW.get().map(|f| f()).unwrap_or(false);
+            json_resp(200, &json!({"ok": ok}))
         }
         (false, "/api/patches") => json_resp(200, &blocking(crate::patching::overview).await),
         (false, "/api/patches/inspect") => {

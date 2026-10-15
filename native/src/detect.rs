@@ -157,6 +157,25 @@ pub fn saved_games() -> String {
     }
 }
 
+/// The real Desktop, which is often redirected into OneDrive.
+pub fn desktop() -> String {
+    #[cfg(windows)]
+    {
+        known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Desktop, home().join("Desktop"))
+    }
+    #[cfg(not(windows))]
+    {
+        // XDG: the user may have renamed or relocated it
+        if let Ok(o) = std::process::Command::new("xdg-user-dir").arg("DESKTOP").output() {
+            let d = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !d.is_empty() && Path::new(&d).is_dir() {
+                return d;
+            }
+        }
+        norm(&home().join("Desktop"))
+    }
+}
+
 // ------------------------------------------------------------- detectors --
 fn first_dir(cands: &[PathBuf], contains: Option<&dyn Fn(&str) -> bool>) -> String {
     for c in cands {
