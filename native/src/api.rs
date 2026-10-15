@@ -378,7 +378,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"
             | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"
             | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"
-            | "/api/events" | "/api/events/snapshot" | "/api/livery" | "/api/car/specs" | "/api/pit/devices"),
+            | "/api/events" | "/api/events/snapshot" | "/api/livery" | "/api/car/specs" | "/api/pit/devices"
+            | "/api/patches" | "/api/patches/inspect"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -398,7 +399,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/thumbs/build" | "/api/thumbs/covers" | "/api/viewer/open" | "/api/viewer/open_track"
             | "/api/compress/start" | "/api/evoshare/start" | "/api/evoshare/cancel"
             | "/api/livery/apply" | "/api/livery/populate"
-            | "/api/pit/go" | "/api/pit/capture" | "/api/pit/bind" | "/api/hud/mph"),
+            | "/api/pit/go" | "/api/pit/capture" | "/api/pit/bind" | "/api/hud/mph"
+            | "/api/patches/save" | "/api/patches/apply" | "/api/patches/restore" | "/api/patches/delete" | "/api/hook/plan"),
         _ => false,
     }
 }
@@ -701,6 +703,29 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                 }
             }
         }
+        (false, "/api/patches") => json_resp(200, &blocking(crate::patching::overview).await),
+        (false, "/api/patches/inspect") => {
+            let t = q_get(&query, "target").unwrap_or_else(|| crate::detect::find("server_exe", false));
+            json_resp(200, &blocking(move || crate::patching::inspect(&t)).await)
+        }
+        (true, "/api/patches/save") => { let b = body.clone(); json_resp(200, &blocking(move || crate::patching::upsert(&b)).await) }
+        (true, "/api/patches/delete") => {
+            let id = body.get("id").cloned().unwrap_or(Value::Null);
+            json_resp(200, &blocking(move || crate::patching::remove(&id)).await)
+        }
+        (true, "/api/patches/apply") | (true, "/api/patches/restore") => {
+            let (id, force, apply) = (body.get("id").cloned().unwrap_or(Value::Null), bb("force"), path == "/api/patches/apply");
+            let r = blocking(move || match crate::patching::find(&id) {
+                Some(p) => if apply { crate::patching::apply(&p, force) } else { crate::patching::restore(&p) },
+                None => json!({"_missing": true}),
+            }).await;
+            if r.get("_missing").is_some() {
+                json_resp(404, &json!({"ok": false, "error": "no such patch"}))
+            } else {
+                json_resp(200, &r)
+            }
+        }
+        (true, "/api/hook/plan") => { let b = body.clone(); json_resp(200, &blocking(move || crate::patching::hook_route(&b)).await) }
         (false, "/api/pit/devices") => json_resp(200, &blocking(|| json!({"ok": true, "devices": crate::hotkey::devices()})).await),
         (true, "/api/pit/go") => json_resp(200, &blocking(crate::gameui::back_to_pit).await),
         (true, "/api/hud/mph") => { let on = bb("on"); json_resp(200, &blocking(move || crate::gameui::set_mph(on)).await) }

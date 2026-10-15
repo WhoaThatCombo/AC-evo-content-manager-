@@ -32,6 +32,8 @@ x509-parser = "0.16"
 time = "0.3"
 libloading = "0.8"
 sha2 = "0.10"
+md-5 = "0.10"
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel"] }
 png = "0.17"
 texture2ddecoder = "0.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }

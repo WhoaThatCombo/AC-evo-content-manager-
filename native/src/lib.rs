@@ -38,6 +38,7 @@ pub mod misc;
 pub mod mods;
 pub mod pack;
 pub mod penalties;
+pub mod patching;
 pub mod paths;
 pub mod pb;
 pub mod procs;
