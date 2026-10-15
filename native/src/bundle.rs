@@ -3,7 +3,7 @@
 //! into the data folder and reads them from there; a debug build reads the
 //! source tree, so UI edits show without rebuilding.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::Digest;
 
@@ -51,8 +51,24 @@ pub fn ensure() {
     if std::fs::read_to_string(&stamp_file).map(|s| s.trim() == want).unwrap_or(false) {
         return;
     }
+    // ⚠ The UI and catalogs now, the viewer exe in the background: writing a
+    // fresh 8 MB exe is what antivirus scans, and it held the first window
+    // after every update back by ~1.7 s. Nothing on the first page needs it.
+    let is_exe = |rel: &str| rel.to_ascii_lowercase().ends_with(".exe");
+    let failed_now = unpack(&d, FILES.iter().filter(|f| !is_exe(f.0)));
+    std::thread::spawn(move || {
+        let failed = failed_now + unpack(&d, FILES.iter().filter(|f| is_exe(f.0)));
+        if failed == 0 {
+            let _ = std::fs::write(&stamp_file, &want);
+            crate::logs::info(format!("bundle: unpacked {} file(s) to {}", FILES.len(), d.display()));
+        }
+    });
+}
+
+/// Write each file whose content differs; returns how many failed.
+fn unpack<'a>(d: &Path, files: impl Iterator<Item = &'a (&'a str, &'a [u8], usize)>) -> usize {
     let mut failed = 0;
-    for (rel, packed, size) in FILES {
+    for (rel, packed, size) in files {
         let data = &inflate(packed, *size);
         if data.len() != *size {
             crate::logs::warn(format!("bundle: {rel} did not unpack ({} of {size} bytes)", data.len()));
@@ -75,10 +91,7 @@ pub fn ensure() {
             failed += 1;
         }
     }
-    if failed == 0 {
-        let _ = std::fs::write(&stamp_file, &want);
-        crate::logs::info(format!("bundle: unpacked {} file(s) to {}", FILES.len(), d.display()));
-    }
+    failed
 }
 
 /// Where the UI files are: the bundle, or the source tree.
