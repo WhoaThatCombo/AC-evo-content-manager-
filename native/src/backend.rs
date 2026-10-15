@@ -450,8 +450,9 @@ fn running() -> Value {
 pub fn start(mode: &str) -> Value {
     let Some(tool) = tool_name(mode) else { return json!({"ok": false, "error": format!("unknown mode {mode}")}) };
     let script = paths::repo().join("tools").join(format!("{tool}.py"));
-    // the proxy is ported (acecm --tool acevo_proxy); standalone is not yet
-    let native = mode == "proxy" && std::env::var("ACECM_PY_PROXY").is_err();
+    // both are ported (acecm --tool acevo_proxy / acevo_backend);
+    // ACECM_PY_PROXY=1 runs the Python scripts instead, for comparison
+    let native = std::env::var("ACECM_PY_PROXY").is_err();
     if !native && !script.exists() {
         return json!({"ok": false, "error": format!("missing {}", script.display())});
     }

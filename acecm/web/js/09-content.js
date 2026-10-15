@@ -948,16 +948,16 @@ async function contentPage() {
   };
   p.append(inst);
 
-  // --- AI lines / telemetry maps ------------------------------------------
+  // --- AI lines ------------------------------------------------------------
   const sp = await api('splines');
   const sc = el('div', 'card');
-  sc.innerHTML = `<h2>AI lines for telemetry &middot; `
+  sc.innerHTML = `<h2>AI lines &middot; `
     + `${sp.ready_folders ?? 0}/${sp.folders ?? 0} tracks ready</h2>`
     + '<div class="tiny dim" style="margin-bottom:10px">The dedicated server '
     + 'does not ship racing-line files. Stock layouts are inside the game '
     + 'archive; custom tracks (Barber, Highlands) keep theirs in the import '
-    + 'folder. Ship copies both next to the server so the live map and vAI '
-    + 'work on every hosted track.</div>'
+    + 'folder. Ship copies both next to the server so the AI lines '
+    + 'are there on every hosted track.</div>'
     + `<div class="row wrap" style="margin-bottom:10px">`
     + `<span class="pill ${sp.server ? 'on' : 'off'}"><i class="dot"></i>`
     + `${sp.server || 0} on server</span>`

@@ -31,7 +31,7 @@ use crate::protos;
 
 const TYPE_PREFIX: &str = "type.googleapis.com/";
 
-fn env(k: &str, d: &str) -> String {
+pub(crate) fn env(k: &str, d: &str) -> String {
     std::env::var(k).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| d.to_string())
 }
 
@@ -64,6 +64,19 @@ pub fn wrap(msg: &DynamicMessage, type_name: &str) -> Vec<u8> {
 
 pub fn new(name: &str) -> Option<DynamicMessage> {
     protos::find(name).map(DynamicMessage::new)
+}
+
+static VERSIONS: Mutex<Option<(i64, i64)>> = Mutex::new(None);
+
+/// (protocol, server): the env defaults until a RegisterRequest says otherwise.
+pub(crate) fn versions() -> (i64, i64) {
+    VERSIONS.lock().unwrap().unwrap_or_else(|| (env("PROTOCOL_VERSION", "8").parse().unwrap_or(8),
+                                                env("SERVER_VERSION", "6").parse().unwrap_or(6)))
+}
+
+pub(crate) fn set_versions(protocol: Option<i64>, server: Option<i64>) {
+    let (p, s) = versions();
+    *VERSIONS.lock().unwrap() = Some((protocol.unwrap_or(p), server.unwrap_or(s)));
 }
 
 // ------------------------------------------------------------- lobby -----
@@ -150,13 +163,13 @@ fn tagged(name: &str) -> String {
     format!("{tag} {n}").trim().to_string()
 }
 
-fn set_if(m: &mut DynamicMessage, name: &str, v: PV) {
+pub(crate) fn set_if(m: &mut DynamicMessage, name: &str, v: PV) {
     if m.descriptor().get_field_by_name(name).is_some() {
         let _ = m.try_set_field_by_name(name, v);
     }
 }
 
-fn enum_or_int(m: &DynamicMessage, name: &str, n: i64) -> PV {
+pub(crate) fn enum_or_int(m: &DynamicMessage, name: &str, n: i64) -> PV {
     match m.descriptor().get_field_by_name(name).map(|f| f.kind()) {
         Some(prost_reflect::Kind::Enum(_)) => PV::EnumNumber(n as i32),
         Some(prost_reflect::Kind::Int64) | Some(prost_reflect::Kind::Sint64) | Some(prost_reflect::Kind::Sfixed64) => PV::I64(n),
@@ -181,8 +194,11 @@ pub async fn fill_entry(e: &mut DynamicMessage, peer: Option<SocketAddr>) {
     set_if(e, "track", PV::String(s("track", &env("TRACK", ""))));
     set_if(e, "layout", PV::String(s("layout", &env("LAYOUT", ""))));
     set_if(e, "event_name", PV::String(s("event_name", "")));
-    for (f, v) in [("protocol_version", env("PROTOCOL_VERSION", "8").parse().unwrap_or(8)),
-                   ("server_version", env("SERVER_VERSION", "6").parse().unwrap_or(6)),
+    // echo the versions the client registered with (standalone backend):
+    // hardcoding 8/6 is what makes an entry vanish after a game update
+    let (pv, sv) = versions();
+    for (f, v) in [("protocol_version", pv),
+                   ("server_version", sv),
                    ("game_mode_type", lb_i(&lb, "game_mode_type", 10)),
                    ("max_players", lb_i(&lb, "max_players", 90))] {
         let pv = enum_or_int(e, f, v);
@@ -197,8 +213,18 @@ pub async fn fill_entry(e: &mut DynamicMessage, peer: Option<SocketAddr>) {
     set_if(e, "current_session", PV::String(crate::trackdeploy::title(&mode.replace('_', " "))));
     set_if(e, "time_of_day", PV::String(s("time_of_day", &env("TIME_OF_DAY", "13:00"))));
     set_if(e, "is_car_eligible", PV::Bool(true));
-    let names: Vec<String> = lb.get("cars").and_then(|c| c.as_array()).map(|a| a.iter()
+    let mut names: Vec<String> = lb.get("cars").and_then(|c| c.as_array()).map(|a| a.iter()
         .filter_map(|c| c.as_str().filter(|s| !s.is_empty()).map(String::from)).collect()).unwrap_or_default();
+    if names.is_empty() {
+        // no profile snapshot: every preset in the server's cars.json
+        let path = std::env::var("CARS_JSON").ok().filter(|p| !p.is_empty())
+            .unwrap_or_else(|| crate::content::catalog_path("cars.json"));
+        names = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v.get("cars").and_then(|c| c.as_array()).cloned()).unwrap_or_default().iter()
+            .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
+            .filter(|n| n.rsplit_once("_mech_").map(|(h, t)| !h.is_empty() && !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())).unwrap_or(false))
+            .collect();
+    }
     if let Some(fd) = e.descriptor().get_field_by_name("allowed_cars_list_full") {
         if let Some(cd) = fd.kind().as_message().cloned() {
             let items: Vec<PV> = names.iter().map(|n| {
@@ -213,7 +239,12 @@ pub async fn fill_entry(e: &mut DynamicMessage, peer: Option<SocketAddr>) {
             let _ = e.try_set_field(&fd, PV::List(items));
         }
     }
-    set_if(e, "allowed_cars_list", PV::String(names.join(",")));
+    // ⚠ only where it is a plain string: in the current schema it is a
+    // repeated field, which the Python version's assignment never filled
+    // (one comma-joined element is not what the game sends)
+    if e.descriptor().get_field_by_name("allowed_cars_list").map(|f| !f.is_list()).unwrap_or(false) {
+        set_if(e, "allowed_cars_list", PV::String(names.join(",")));
+    }
 }
 
 // ----------------------------------------------------------- the list ----
@@ -414,7 +445,7 @@ pub async fn dial_upstream(url: &str, ua: Option<&str>, subprotocols: Option<&st
     Ok(ws)
 }
 
-fn server_tls() -> Result<tokio_rustls::TlsAcceptor, String> {
+pub(crate) fn server_tls() -> Result<tokio_rustls::TlsAcceptor, String> {
     let dir = PathBuf::from(env("ACECM_CERTS", &crate::backend::certs_dir().to_string_lossy()));
     let cert_pem = std::fs::read(dir.join("cert.pem")).map_err(|e| format!("cert.pem: {e}"))?;
     let key_pem = std::fs::read(dir.join("key.pem")).map_err(|e| format!("key.pem: {e}"))?;

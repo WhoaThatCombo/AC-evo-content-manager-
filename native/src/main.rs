@@ -101,6 +101,7 @@ fn main() {
     if args.get(1).map(|a| a == "--tool").unwrap_or(false) {
         let code = match args.get(2).map(|s| s.as_str()) {
             Some("acevo_proxy") => acecm::lobbyproxy::run(),
+            Some("acevo_backend") => acecm::lobbybackend::run(),
             Some("lobby_fetch") => acecm::lobbyfetch::run(&args[3..]),
             other => { eprintln!("unknown tool {other:?}"); 2 }
         };

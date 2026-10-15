@@ -615,8 +615,8 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             }
             json!({"profiles": items, "template": crate::serverproc::template(),
                    "options": crate::serverproc::options(),
-                   // telemetry is still the backend's
-                   "telemetry": backend_get("/api/telemetry/status")})
+                   // live telemetry was dropped (unused): no trackers to report
+                   "telemetry": {}})
         }).await),
         (false, "/api/server/status") => {
             let id = q_get(&query, "id").unwrap_or_default();

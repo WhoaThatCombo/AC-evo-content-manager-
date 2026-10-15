@@ -30,6 +30,7 @@ pub mod kspkg;
 pub mod launch;
 pub mod kspkg_write;
 pub mod livery;
+pub mod lobbybackend;
 pub mod lobbyproxy;
 pub mod lobby;
 pub mod lobbyfetch;
