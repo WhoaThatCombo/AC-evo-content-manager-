@@ -208,6 +208,16 @@ pub fn apply(p: &Value, force: bool) -> Value {
 pub fn restore(p: &Value) -> Value {
     let bak = backup_path(p);
     let target = sv(p, "target");
+    // ⚠ the backup is the build the patch was APPLIED to: once the file is
+    // anything else (a game update replaced it), copying it back would
+    // downgrade the exe
+    let state = sv(&status(p), "state");
+    if state == "clean" || state == "wrong-build" {
+        return json!({"ok": true, "already": true, "note": "this patch is not applied - nothing to restore"});
+    }
+    if state != "applied" && Path::new(&bak).is_file() {
+        return json!({"ok": false, "error": "the file has changed since the patch was applied (a game update?), so its backup is out of date - nothing was restored"});
+    }
     if Path::new(&bak).is_file() {
         return match crate::safefs::copy_atomic(Path::new(&bak), Path::new(&target)) {
             Ok(_) => json!({"ok": true, "restored_from": bak}),

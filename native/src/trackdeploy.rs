@@ -183,13 +183,35 @@ pub fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Which dedicated-server build this is: its exe's size and mtime (a game
+/// update replaces the exe; nothing of ours writes to it).
+fn server_build() -> String {
+    let d = detect::effective_server_dir();
+    let exe = ["AssettoCorsaEVOServer.exe", "AssettoCorsaEVOServer.stock.exe"].iter()
+        .map(|n| Path::new(&d).join(n)).find(|p| p.is_file());
+    exe.and_then(|p| std::fs::metadata(p).ok()).map(|m| {
+        let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+        format!("{}:{t}", m.len())
+    }).unwrap_or_default()
+}
+
+fn build_note(bak: &str) -> PathBuf {
+    PathBuf::from(format!("{bak}.build"))
+}
+
 /// ⚠ Err stops the deploy: rewriting the archive after a failed backup left
 /// no way back, and a half-copied .bak_pretrack then counted as "exists"
 /// for ever (the copy now goes to a temp name and is renamed when whole).
 fn backup(kspkg: &Path) -> Result<Value, String> {
     let bak = format!("{}.bak_pretrack", kspkg.display());
     match crate::safefs::backup_once(kspkg, Path::new(&bak)) {
-        Ok(made) => Ok(json!({"backup": bak, "made": made})),
+        Ok(made) => {
+            if made {
+                // the build the backup belongs to (Restore checks it)
+                let _ = std::fs::write(build_note(&bak), server_build());
+            }
+            Ok(json!({"backup": bak, "made": made}))
+        }
         Err(e) => Err(format!("could not back up {} first ({e}) - nothing was changed", kspkg.display())),
     }
 }
@@ -569,6 +591,15 @@ pub fn restore() -> Value {
     }
     if server_running() {
         return json!({"ok": false, "error": "stop the server first"});
+    }
+    // ⚠ a backup from BEFORE a game update would downgrade content.kspkg
+    // under a newer server (version mismatch for every joiner)
+    if let Ok(was) = std::fs::read_to_string(build_note(&bak)) {
+        let now = server_build();
+        if !was.trim().is_empty() && !now.is_empty() && was.trim() != now {
+            return json!({"ok": false, "stale_backup": true,
+                "error": "the dedicated server was updated after this backup was taken, so restoring it would put back the OLD game files. Nothing was restored - use Steam's 'Verify integrity of game files' on the dedicated server to get the stock archive back."});
+        }
     }
     // ⚠ atomic: a copy that failed half way over the live archive left a
     // broken content.kspkg
