@@ -61,11 +61,15 @@ pub fn state() -> Value {
     json!({"dir": settings_dir(), "game_running": procs::game_running()})
 }
 
-fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+/// (file, size) under `dir`. ⚠ Size and type come from the directory
+/// listing itself (free on Windows): a metadata() call per file opened each
+/// one, and the settings folder holds thousands - most of the page's load.
+fn walk(dir: &Path, root: &Path, out: &mut Vec<(PathBuf, u64)>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let ft = e.file_type().ok();
+        let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
             // ⚠ PRUNE mods/ (the multi-GB library), logs and crashdumps
             if dir == root {
@@ -75,8 +79,11 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
                 }
             }
             walk(&p, root, out);
-        } else {
-            out.push(p);
+        } else if ft.map(|t| t.is_file()).unwrap_or(false) {
+            out.push((p, e.metadata().map(|m| m.len()).unwrap_or(0)));
+        } else if p.is_file() {
+            // a symlink: follow it, as os.walk + isfile did
+            out.push((p.clone(), std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0)));
         }
     }
 }
@@ -92,14 +99,10 @@ pub fn discover() -> Value {
     let mut paths = vec![];
     walk(root, root, &mut paths);
     let mut found: BTreeMap<String, Value> = BTreeMap::new();
-    for p in paths {
-        if !p.is_file() {
-            continue;
-        }
+    for (p, size) in paths {
         let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
         let msg = message_for(&idx, &p);
         let decodable = msg.as_deref().map(protos::has).unwrap_or(false);
-        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         found.insert(rel.clone(), json!({"file": rel, "message": msg, "size": size, "decodable": decodable}));
     }
     let mut order = vec![];

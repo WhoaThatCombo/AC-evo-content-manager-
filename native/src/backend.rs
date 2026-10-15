@@ -510,6 +510,7 @@ pub fn start(mode: &str) -> Value {
         Err(e) => return json!({"ok": false, "error": format!("could not start the backend: {e}")}),
     };
     let pid = child.id();
+    procs::invalidate_snapshot();
     PROCS.lock().unwrap().get_or_insert_with(HashMap::new).insert(mode.to_string(), Child { child });
     let until = Instant::now() + Duration::from_secs(30);
     let mut owner = vec![];

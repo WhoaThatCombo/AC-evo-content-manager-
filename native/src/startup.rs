@@ -157,6 +157,20 @@ pub fn run(port: u16) {
             let _ = crate::autoshare::publish(p);
         }
     });
+    // ⚠ Warm what the first pages read (the home page asks for Drive's
+    // options and the overview; each first call parses the catalogs, the
+    // garage and probes the game exe - 0.2-1 s cold, ~10 ms warm). Off the
+    // request path, so the window never waits for it.
+    std::thread::spawn(|| {
+        // the game's message schemas: every garage/settings read needs them
+        let _ = crate::protos::has("BackendMessage");
+        let _ = crate::content::cars();
+        let _ = crate::content::tracks();
+        let _ = crate::drive::options();
+        let _ = crate::backend::state();
+        let _ = crate::overview::overview();
+        let _ = crate::thumbs::status();
+    });
     watch_lobby();
     watch_hud();
     std::thread::spawn(move || allow_share_port(port));

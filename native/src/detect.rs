@@ -318,8 +318,7 @@ fn cache_path() -> PathBuf {
 }
 
 fn load_cache() -> Map<String, Value> {
-    std::fs::read_to_string(cache_path()).ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    crate::jsoncache::read(&cache_path())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default()
 }
@@ -337,6 +336,7 @@ fn save_cache(what: &str, entry: Value) {
     if std::fs::write(&tmp, serde_json::to_string_pretty(&Value::Object(c)).unwrap_or_default()).is_ok() {
         let _ = std::fs::rename(&tmp, &p);
     }
+    crate::jsoncache::forget(&p);
 }
 
 static PROBED: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);

@@ -57,12 +57,51 @@ fn size_mb(p: &Path) -> Value {
 }
 
 /// Every car mod in one mod folder, with health.
+/// (dir, [(file, size, mtime)]) -> the listing built from it.
+type ModsCache = HashMap<String, (Vec<(String, u64, u128)>, Value)>;
+static INSTALLED: std::sync::Mutex<Option<ModsCache>> = std::sync::Mutex::new(None);
+
+/// What is in a mod folder, cheaply: names, sizes and mtimes straight from
+/// the directory listing (no file is opened).
+fn fingerprint(dir: &Path) -> Vec<(String, u64, u128)> {
+    let mut v: Vec<(String, u64, u128)> = std::fs::read_dir(dir).map(|rd| rd.flatten().filter_map(|e| {
+        let n = e.file_name().to_string_lossy().into_owned();
+        let l = n.to_ascii_lowercase();
+        if !(l.ends_with(".kspkg") || l.ends_with(".json")) {
+            return None;
+        }
+        let m = e.metadata().ok()?;
+        let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
+        Some((n, m.len(), t))
+    }).collect()).unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// ⚠ Cached against the folder's fingerprint: the dashboard, Drive and the
+/// content pages each list both mod folders on every render, and reading
+/// every manifest each time was most of /api/overview. Any added, removed,
+/// resized or re-saved file changes the fingerprint.
 pub fn installed(which: &str) -> Value {
     let d = if which == "server" { mods_dir() } else { client_mods_dir() };
     let dir = Path::new(&d);
     if !dir.is_dir() {
         return json!({"dir": d, "mods": [], "note": "mod folder does not exist yet"});
     }
+    let fp = fingerprint(dir);
+    let key = format!("{which}|{d}");
+    if let Some((have, v)) = INSTALLED.lock().unwrap().as_ref().and_then(|m| m.get(&key)) {
+        if *have == fp {
+            return v.clone();
+        }
+    }
+    let v = installed_scan(which, &d);
+    INSTALLED.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, (fp, v.clone()));
+    v
+}
+
+fn installed_scan(which: &str, d: &str) -> Value {
+    let dir = Path::new(d);
     let mut names = BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -123,10 +162,10 @@ fn by_name(v: &Value) -> HashMap<String, Value> {
         .collect()
 }
 
-fn fix_hint(name: &str, s: Option<&Value>, c: Option<&Value>) -> Value {
+fn fix_hint(name: &str, s: Option<&Value>, c: Option<&Value>, dirs: &(String, String)) -> Value {
     let b = |m: Option<&Value>, k: &str| m.and_then(|m| m.get(k)).and_then(|v| v.as_bool()).unwrap_or(false);
-    let srv = Path::new(&mods_dir()).join(format!("{name}.json"));
-    let cli = Path::new(&client_mods_dir()).join(format!("{name}.json"));
+    let srv = Path::new(&dirs.0).join(format!("{name}.json"));
+    let cli = Path::new(&dirs.1).join(format!("{name}.json"));
     if c.is_some() && b(c, "kspkg") && !b(c, "json") && s.is_some() && b(s, "json") {
         return json!({"what": "copy the .json from the server to the client",
                       "src": show(&srv), "dst": show(&cli)});
@@ -143,6 +182,7 @@ pub fn audit() -> Value {
     let srv = installed("server");
     let cli = installed("client");
     let (bs, bc) = (by_name(&srv), by_name(&cli));
+    let dirs = (mods_dir(), client_mods_dir());
     let names: BTreeSet<&String> = bs.keys().chain(bc.keys()).collect();
     let mut rows = vec![];
     let mut problems = 0;
@@ -170,7 +210,7 @@ pub fn audit() -> Value {
             "size_mb": first.and_then(|m| m.get("size_mb")).cloned().unwrap_or(json!(0)),
             "ok": issues.is_empty(),
             "issues": issues,
-            "fix": fix_hint(name, s, c),
+            "fix": fix_hint(name, s, c, &dirs),
         }));
     }
     let total = rows.len();

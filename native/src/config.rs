@@ -59,11 +59,9 @@ pub fn path() -> PathBuf {
 /// DEFAULTS, overlaid with the file (unknown keys in the file are kept).
 pub fn load() -> Map<String, Value> {
     let mut cfg = defaults();
-    if let Ok(text) = std::fs::read_to_string(path()) {
-        if let Ok(Value::Object(file)) = serde_json::from_str::<Value>(&text) {
-            for (k, v) in file {
-                cfg.insert(k, v);
-            }
+    if let Some(Value::Object(file)) = crate::jsoncache::read(&path()) {
+        for (k, v) in file {
+            cfg.insert(k, v);
         }
     }
     cfg
@@ -110,5 +108,7 @@ fn write(cfg: &Map<String, Value>) -> std::io::Result<()> {
     // write-then-rename: a reader (the Python backend) never sees half a file
     let tmp = p.with_extension("json.part");
     std::fs::write(&tmp, serde_json::to_string_pretty(&Value::Object(cfg.clone()))?)?;
-    std::fs::rename(&tmp, &p)
+    let r = std::fs::rename(&tmp, &p);
+    crate::jsoncache::forget(&p);
+    r
 }

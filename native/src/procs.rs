@@ -19,6 +19,7 @@ mod imp {
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
+    #[derive(Clone)]
     pub struct Proc {
         pub pid: u32,
         pub ppid: u32,
@@ -30,8 +31,33 @@ mod imp {
         String::from_utf16_lossy(&buf[..n])
     }
 
-    /// Every process, from one Toolhelp snapshot.
+    static SNAP: std::sync::Mutex<Option<(std::time::Instant, Vec<Proc>)>> = std::sync::Mutex::new(None);
+    const SNAP_TTL_MS: u128 = 400;
+
+    /// Every process, from a Toolhelp snapshot at most 400 ms old.
+    /// ⚠ A snapshot costs ~10 ms (hundreds of processes), and one request
+    /// used to take several (game_running + server_pids per profile + port
+    /// checks). Anything WE spawn or kill clears it (invalidate_snapshot),
+    /// so our own changes are seen at once; loops waiting on someone else's
+    /// process poll slower than the TTL anyway.
     pub fn snapshot() -> Vec<Proc> {
+        let mut g = SNAP.lock().unwrap();
+        if let Some((at, v)) = g.as_ref() {
+            if at.elapsed().as_millis() < SNAP_TTL_MS {
+                return v.clone();
+            }
+        }
+        let v = snapshot_fresh();
+        *g = Some((std::time::Instant::now(), v.clone()));
+        v
+    }
+
+    pub fn invalidate_snapshot() {
+        *SNAP.lock().unwrap() = None;
+    }
+
+    /// Every process, from one Toolhelp snapshot.
+    pub fn snapshot_fresh() -> Vec<Proc> {
         let mut out = vec![];
         unsafe {
             let snap: HANDLE = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -166,10 +192,12 @@ pub fn ppid(pid: u32) -> u32 {
 /// ⚠ Report the OUTCOME: a server started elevated cannot be killed by a
 /// non-elevated ACECM, and taskkill then fails while the server lives on.
 pub fn kill(pid: u32) -> bool {
+    invalidate_snapshot();
     let mut c = std::process::Command::new("taskkill");
     c.args(["/PID", &pid.to_string(), "/T", "/F"]);
     hide(&mut c);
     let ok = c.output().map(|o| o.status.success()).unwrap_or(false);
+    invalidate_snapshot();
     if !alive(pid) {
         return true;
     }
@@ -397,6 +425,7 @@ pub fn spawn_hidden_console(exe: &std::path::Path, args: &[String], cwd: &std::p
         }
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
+        invalidate_snapshot();
         Ok(pi.dwProcessId)
     }
 }

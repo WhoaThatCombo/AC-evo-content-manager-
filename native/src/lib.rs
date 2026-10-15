@@ -27,6 +27,7 @@ pub mod gameui_js;
 pub mod hotkey;
 pub mod install;
 pub mod jobs;
+pub mod jsoncache;
 pub mod kspkg;
 pub mod launch;
 pub mod kspkg_write;
