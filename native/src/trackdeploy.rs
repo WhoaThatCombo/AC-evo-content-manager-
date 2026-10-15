@@ -183,13 +183,15 @@ pub fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     out
 }
 
-fn backup(kspkg: &Path) -> Value {
+/// ⚠ Err stops the deploy: rewriting the archive after a failed backup left
+/// no way back, and a half-copied .bak_pretrack then counted as "exists"
+/// for ever (the copy now goes to a temp name and is renamed when whole).
+fn backup(kspkg: &Path) -> Result<Value, String> {
     let bak = format!("{}.bak_pretrack", kspkg.display());
-    if Path::new(&bak).exists() {
-        return json!({"backup": bak, "made": false});
+    match crate::safefs::backup_once(kspkg, Path::new(&bak)) {
+        Ok(made) => Ok(json!({"backup": bak, "made": made})),
+        Err(e) => Err(format!("could not back up {} first ({e}) - nothing was changed", kspkg.display())),
     }
-    let made = std::fs::copy(kspkg, &bak).is_ok();
-    json!({"backup": bak, "made": made})
 }
 
 fn merge(a: &mut Value, b: Value) {
@@ -254,7 +256,10 @@ pub fn deploy_native_into(kspkg: &Path, pkg_dir: &Path, dry_run: bool, folder: O
     if dry_run {
         return plan;
     }
-    let bak = backup(kspkg);
+    let bak = match backup(kspkg) {
+        Ok(b) => b,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let mut changes = src.files.clone();
     changes.push((r"system\tracks.table".into(), new_tk));
     changes.push((r"system\track_containers.table".into(), new_tc));
@@ -553,7 +558,9 @@ pub fn restore() -> Value {
     if server_running() {
         return json!({"ok": false, "error": "stop the server first"});
     }
-    match std::fs::copy(&bak, &k) {
+    // ⚠ atomic: a copy that failed half way over the live archive left a
+    // broken content.kspkg
+    match crate::safefs::copy_atomic(Path::new(&bak), &k) {
         Ok(_) => json!({"ok": true, "restored_from": bak}),
         Err(e) => json!({"ok": false, "error": e.to_string()}),
     }

@@ -97,7 +97,9 @@ pub fn on_server() -> Vec<Value> {
 pub fn dest_path(folder: &str, filename: &str) -> Result<PathBuf, String> {
     let folder = folder.trim().replace('/', "\\");
     let filename = Path::new(filename).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    if folder.is_empty() || filename.is_empty() || folder.split('\\').any(|p| p == "..") {
+    // ⚠ only plain names: an absolute folder made join() escape the server
+    let plain = |p: &str| !p.is_empty() && p != "." && p != ".." && !p.contains(':');
+    if folder.is_empty() || filename.is_empty() || !folder.split('\\').all(plain) || filename.contains(':') {
         return Err("bad spline dest".into());
     }
     Ok(server_tracks().join(folder).join("layouts").join(filename))

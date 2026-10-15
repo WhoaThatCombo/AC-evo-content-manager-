@@ -96,14 +96,33 @@ pub fn repair_headers(records: &mut [Rec]) -> Vec<String> {
 
 /// Does this archive look XOR-encrypted? A real Kunos archive's records
 /// only parse after decryption; a plaintext one parses as-is.
+/// ⚠ Decided by the record's own checksum: its id (at 232) must be the
+/// FNV hash of its name, read either as stored or after decryption. The
+/// old test (a backslash in the name) called a plaintext archive whose
+/// first record is a bare directory "encrypted" - and XOR-corrupted it.
+/// A table that matches neither way is an error: refuse to write.
 pub fn is_encrypted(archive: &Path) -> std::io::Result<bool> {
     let total = std::fs::metadata(archive)?.len();
+    if total < TABLE {
+        return Err(std::io::Error::other("too small to be an archive"));
+    }
     let mut f = File::open(archive)?;
     f.seek(SeekFrom::Start(total - TABLE))?;
     let mut first = [0u8; BUCKET];
     f.read_exact(&mut first)?;
-    let plain_ok = first.iter().position(|&b| b == 0).map(|e| e > 0 && first[..e].contains(&b'\\')).unwrap_or(false);
-    Ok(!plain_ok)
+    let valid = |r: &Rec| {
+        let end = r.iter().position(|&b| b == 0).unwrap_or(0);
+        end > 0 && end <= MAX_PATH && std::str::from_utf8(&r[..end]).map(|n| u64_at(r, 232) == crate::kspkg::entry_id(n)).unwrap_or(false)
+    };
+    if valid(&first) {
+        return Ok(false);
+    }
+    let mut dec = first;
+    crate::kspkg::decrypt(&mut dec, 0);
+    if valid(&dec) {
+        return Ok(true);
+    }
+    Err(std::io::Error::other("the archive table is not recognised - refusing to touch it"))
 }
 
 fn build_table(records: &mut Vec<Rec>) -> Result<Vec<u8>, String> {
@@ -243,4 +262,34 @@ pub fn verify(archive: &Path) -> Value {
     let ok = sorted && unique && bad.is_empty();
     bad.truncate(10);
     json!({"records": records.len(), "sorted": sorted, "unique": unique, "bad_headers": bad, "ok": ok})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn archive_with(first: &Rec, name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("acecm_enc_test_{name}_{}.kspkg", std::process::id()));
+        let mut t = vec![0u8; TABLE as usize];
+        t[..BUCKET].copy_from_slice(first);
+        std::fs::write(&p, t).unwrap();
+        p
+    }
+
+    #[test]
+    fn tells_plaintext_from_encrypted() {
+        // a bare directory first: the case the old backslash test got wrong
+        let plain = bucket("content", 0, 0, None).unwrap();
+        let p = archive_with(&plain, "plain");
+        assert!(!is_encrypted(&p).unwrap());
+        let mut enc = plain;
+        crate::kspkg::decrypt(&mut enc, 0);
+        let e = archive_with(&enc, "enc");
+        assert!(is_encrypted(&e).unwrap());
+        let g = archive_with(&[0x41u8; BUCKET], "junk");
+        assert!(is_encrypted(&g).is_err());
+        for f in [p, e, g] {
+            let _ = std::fs::remove_file(f);
+        }
+    }
 }

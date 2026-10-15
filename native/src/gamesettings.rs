@@ -202,14 +202,18 @@ fn stamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
-fn copy2(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::copy(src, dst)?;
-    if let Ok(t) = std::fs::metadata(src).and_then(|m| m.modified()) {
-        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(dst) {
-            let _ = f.set_modified(t);
-        }
+/// `<file>.<stamp>.bak`, never an existing one: two edits in one second
+/// overwrote the first backup (restore_backup even overwrote the backup it
+/// was about to restore).
+fn history_path(path: &Path) -> PathBuf {
+    let st = stamp();
+    let mut p = PathBuf::from(format!("{}.{st}.bak", path.display()));
+    let mut n = 2;
+    while p.exists() {
+        p = PathBuf::from(format!("{}.{st}-{n}.bak", path.display()));
+        n += 1;
     }
-    Ok(())
+    p
 }
 
 /// Encode JSON back into the settings file, with a backup (the first one
@@ -231,15 +235,16 @@ pub fn write(rel: &str, values: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": format!("invalid values: {e}")}),
     };
     let blob = obj.encode_to_vec();
+    // ⚠ both backups BEFORE the write, and a failed one stops it (Python
+    // raised here; ignoring it overwrote settings with no way back)
     let bak = PathBuf::from(format!("{}.bak_acecm", path.display()));
-    if path.exists() && !bak.exists() {
-        let _ = copy2(&path, &bak);
-    }
-    let hist = PathBuf::from(format!("{}.{}.bak", path.display(), stamp()));
+    let hist = history_path(&path);
     if path.exists() {
-        let _ = copy2(&path, &hist);
+        if let Err(e) = crate::safefs::backup_once(&path, &bak).and_then(|_| crate::safefs::copy_atomic(&path, &hist)) {
+            return json!({"ok": false, "error": format!("could not back the file up first ({e}) - nothing was changed")});
+        }
     }
-    if let Err(e) = std::fs::write(&path, &blob) {
+    if let Err(e) = crate::safefs::write_atomic(&path, &blob) {
         return json!({"ok": false, "error": e.to_string()});
     }
     let base = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -318,16 +323,23 @@ pub fn restore_backup(rel: &str, name: &str) -> Value {
     let Some(path) = safe_path(rel) else { return json!({"ok": false, "error": "bad settings path"}) };
     let bn = Path::new(&name.replace('\\', "/")).file_name().map(|n| n.to_owned()).unwrap_or_default();
     let src = path.parent().map(|p| p.join(&bn)).unwrap_or_default();
-    if bn.is_empty() || !src.is_file() {
+    // ⚠ only a backup OF THIS file: any sibling name used to be accepted
+    // (audio settings restored over video)
+    let own = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let b = bn.to_string_lossy();
+    let mine = b.starts_with(&format!("{own}.")) && (b.ends_with(".bak") || b.ends_with(".bak_acecm"));
+    if bn.is_empty() || !mine || !src.is_file() {
         return json!({"ok": false, "error": "no such backup"});
     }
     if game_running() {
         return json!({"ok": false, "error": "close the game first"});
     }
     if path.exists() {
-        let _ = copy2(&path, &PathBuf::from(format!("{}.{}.bak", path.display(), stamp())));
+        if let Err(e) = crate::safefs::copy_atomic(&path, &history_path(&path)) {
+            return json!({"ok": false, "error": format!("could not keep the current file first ({e})")});
+        }
     }
-    if let Err(e) = copy2(&src, &path) {
+    if let Err(e) = crate::safefs::copy_atomic(&src, &path) {
         return json!({"ok": false, "error": e.to_string()});
     }
     json!({"ok": true, "restored": rel, "from": bn.to_string_lossy()})
@@ -342,7 +354,7 @@ pub fn restore(rel: &str) -> Value {
     if game_running() {
         return json!({"ok": false, "error": "close the game first"});
     }
-    if let Err(e) = copy2(&bak, &path) {
+    if let Err(e) = crate::safefs::copy_atomic(&bak, &path) {
         return json!({"ok": false, "error": e.to_string()});
     }
     json!({"ok": true, "restored": rel})

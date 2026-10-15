@@ -165,9 +165,8 @@ pub fn color_from_blob(blob: &[u8], path: &str) -> Value {
             2 => {
                 let (Some(ln), ni) = varint(blob, i) else { break };
                 i = ni;
-                if i + ln as usize > blob.len() {
-                    break;
-                }
+                let Some(end) = i.checked_add(ln as usize).filter(|e| *e <= blob.len()) else { break };
+                let _ = end;
                 let chunk = &blob[i..i + ln as usize];
                 i += ln as usize;
                 if num == 2 {
@@ -489,8 +488,24 @@ fn load(path: &str) -> Result<DynamicMessage, String> {
 }
 
 /// Set one slot's colour, writing a channel state that AGREES with it.
+/// Is `file` a saved-car record inside the garage folder? (the route takes
+/// the path from the request)
+fn in_garage(file: &str) -> bool {
+    let d = saved_cars_dir();
+    if d.is_empty() || !file.to_lowercase().ends_with(&EXT.to_lowercase()) {
+        return false;
+    }
+    match (std::fs::canonicalize(&d), std::fs::canonicalize(file)) {
+        (Ok(root), Ok(f)) => f.parent() == Some(root.as_path()),
+        _ => false,
+    }
+}
+
 pub fn apply_color(car_file: &str, slot: &str, color_path: &str, dry_run: bool) -> Value {
     use prost::Message;
+    if !in_garage(car_file) {
+        return json!({"ok": false, "error": "that is not a car in your garage"});
+    }
     let info = color_info(color_path);
     let Some(rgb) = info.get("rgb").and_then(|v| v.as_array()).cloned() else {
         return json!({"ok": false, "error": format!("could not read {color_path}")});
@@ -559,10 +574,10 @@ pub fn apply_color(car_file: &str, slot: &str, color_path: &str, dry_run: bool) 
         return json!({"ok": true, "dry_run": true, "bytes": blob.len(), "color": info, "guid": uuid_str(&new)});
     }
     let bak = format!("{car_file}.bak_livery");
-    if !Path::new(&bak).exists() {
-        let _ = std::fs::copy(car_file, &bak);
+    if let Err(e) = crate::safefs::backup_once(Path::new(car_file), Path::new(&bak)) {
+        return json!({"ok": false, "error": format!("could not back the car up first ({e}) - nothing was changed")});
     }
-    if let Err(e) = std::fs::write(car_file, &blob) {
+    if let Err(e) = crate::safefs::write_atomic(Path::new(car_file), &blob) {
         return json!({"ok": false, "error": e.to_string()});
     }
     let base = |p: &str| Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -635,7 +650,9 @@ pub fn populate(dry_run: bool) -> Value {
             let out = rec.encode_to_vec();
             // never write something we cannot read back
             protos::decode(RECORD, &out).map_err(|_| "record did not round-trip".to_string())?;
-            std::fs::write(Path::new(&d).join(format!("{model}_{}{EXT}", uuid_str(&new))), out).map_err(|e| e.to_string())?;
+            let name = format!("{model}_{}{EXT}", uuid_str(&new));
+            crate::safefs::write_atomic(&Path::new(&d).join(&name), &out).map_err(|e| e.to_string())?;
+            remember_populated(&name, true);
             Ok(())
         })();
         match r {
@@ -650,25 +667,66 @@ pub fn populate(dry_run: bool) -> Value {
     json!({"ok": true, "added": made, "failed": failed, "count": made.len(), "already": have.len()})
 }
 
-/// Remove ONLY records with no mileage (a car you have driven survives).
+fn populated_path() -> std::path::PathBuf {
+    crate::paths::data().join("livery_populated.json")
+}
+
+/// The garage files populate() wrote (names only), or None for a garage
+/// populated before the list existed.
+fn populated() -> Option<Vec<String>> {
+    std::fs::read(populated_path()).ok().and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
+}
+
+fn remember_populated(name: &str, add: bool) {
+    let mut v = populated().unwrap_or_default();
+    v.retain(|n| n != name);
+    if add {
+        v.push(name.to_string());
+    }
+    let _ = crate::safefs::write_atomic(&populated_path(), &serde_json::to_vec_pretty(&v).unwrap_or_default());
+}
+
+/// Remove ONLY records populate() created that still have no mileage (a
+/// car you have driven survives).
+/// ⚠ Stricter than the Python version, which judged by mileage alone: a
+/// car you OWN but never drove was deleted too, and a record whose fields
+/// it could not find (a game update renaming them) counted as undriven and
+/// was deleted. Now: only files on populate()'s list (and still undriven);
+/// with no list at all, nothing is removed.
 pub fn depopulate() -> Value {
     if saved_cars_dir().is_empty() {
         return json!({"ok": false, "error": "no SavedCars folder"});
     }
     let (mut gone, mut kept) = (Vec::new(), Vec::new());
+    // ⚠ No list = an older version did the populating, and there is no
+    // telling its records from cars the player owns but never drove: the
+    // mileage rule alone deleted ~100 of those from a test garage. Refuse.
+    let Some(listed) = populated() else {
+        return json!({"ok": false, "error": "ACECM has no record of which cars it added (an older version added them), so nothing was removed - your garage is unchanged"});
+    };
+    let listed = Some(listed);
     for e in garage() {
         let file = e.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let model = e.get("model").cloned().unwrap_or(Value::Null);
+        let name = Path::new(&file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let ours = match &listed {
+            Some(l) => l.contains(&name),
+            None => !Path::new(&format!("{file}.bak_livery")).exists(),
+        };
+        if !ours {
+            kept.push(model);
+            continue;
+        }
         let driven = match load(&file) {
             Ok(rec) => match rec.get_field_by_name("car_consumable_status").map(|v| v.into_owned()) {
                 Some(PV::Message(cs)) => match cs.get_field_by_name("body").map(|v| v.into_owned()) {
                     Some(PV::Message(b)) => match b.get_field_by_name("hundred_meters").map(|v| v.into_owned()) {
                         Some(PV::U32(n)) => n != 0, Some(PV::I32(n)) => n != 0, Some(PV::U64(n)) => n != 0, Some(PV::I64(n)) => n != 0,
-                        Some(PV::F32(n)) => n != 0.0, Some(PV::F64(n)) => n != 0.0, _ => false,
+                        Some(PV::F32(n)) => n != 0.0, Some(PV::F64(n)) => n != 0.0, _ => true,
                     },
-                    _ => false,
+                    _ => true,
                 },
-                _ => false,
+                _ => true,
             },
             Err(_) => true,
         };
@@ -677,7 +735,10 @@ pub fn depopulate() -> Value {
             continue;
         }
         match std::fs::remove_file(&file) {
-            Ok(()) => gone.push(model),
+            Ok(()) => {
+                remember_populated(&name, false);
+                gone.push(model)
+            }
             Err(ex) => crate::logs::warn(format!("livery: removing {model}: {ex}")),
         }
     }

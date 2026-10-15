@@ -21,8 +21,8 @@ fn hexs(b: &[u8]) -> String {
 
 fn unhex(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
-        return Err("odd-length hex".into());
+    if s.len() % 2 != 0 || !s.is_ascii() {
+        return Err("bad hex".into());
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string())).collect()
 }
@@ -189,16 +189,17 @@ pub fn apply(p: &Value, force: bool) -> Value {
         writes.push((off, new));
     }
     let bak = backup_path(p);
-    if !Path::new(&bak).exists() {
-        if let Err(e) = std::fs::copy(&target, &bak) {
-            return json!({"ok": false, "error": e.to_string()});
-        }
+    if writes.iter().any(|(off, new)| off + new.len() > data.len()) {
+        return json!({"ok": false, "error": "a site writes past the end of the file"});
+    }
+    if let Err(e) = crate::safefs::backup_once(Path::new(&target), Path::new(&bak)) {
+        return json!({"ok": false, "error": e.to_string()});
     }
     let n = writes.len();
     for (off, new) in writes {
         data[off..off + new.len()].copy_from_slice(&new);
     }
-    if let Err(e) = std::fs::write(&target, data) {
+    if let Err(e) = crate::safefs::write_atomic(Path::new(&target), &data) {
         return json!({"ok": false, "error": e.to_string()});
     }
     json!({"ok": true, "backup": bak, "sites": n})
@@ -208,7 +209,7 @@ pub fn restore(p: &Value) -> Value {
     let bak = backup_path(p);
     let target = sv(p, "target");
     if Path::new(&bak).is_file() {
-        return match std::fs::copy(&bak, &target) {
+        return match crate::safefs::copy_atomic(Path::new(&bak), Path::new(&target)) {
             Ok(_) => json!({"ok": true, "restored_from": bak}),
             Err(e) => json!({"ok": false, "error": e.to_string()}),
         };
@@ -225,7 +226,7 @@ pub fn restore(p: &Value) -> Value {
             n += 1;
         }
     }
-    if let Err(e) = std::fs::write(&target, data) {
+    if let Err(e) = crate::safefs::write_atomic(Path::new(&target), &data) {
         return json!({"ok": false, "error": e.to_string()});
     }
     json!({"ok": true, "reverted_sites": n, "note": "no backup; wrote the expected bytes back"})

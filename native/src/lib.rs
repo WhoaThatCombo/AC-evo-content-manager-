@@ -55,6 +55,7 @@ pub mod registry;
 pub mod proxy;
 pub mod push;
 pub mod serverproc;
+pub mod safefs;
 pub mod servers;
 pub mod sidecar;
 pub mod splines;

@@ -155,6 +155,9 @@ fn read_entry(pkg: &Path, rel: &str) -> Result<Option<(Vec<u8>, u32)>, String> {
 fn write_entry(pkg: &Path, rel: &str, content: &[u8]) -> Result<(), String> {
     let _lock = crate::archlock::lock()?;
     let total = std::fs::metadata(pkg).map_err(|e| e.to_string())?.len();
+    if total < TABLE {
+        return Err("too small to be an archive".into());
+    }
     let table_start = total - TABLE;
     let mut f = std::fs::OpenOptions::new().read(true).write(true).open(pkg).map_err(|e| e.to_string())?;
     f.seek(SeekFrom::Start(table_start)).map_err(|e| e.to_string())?;

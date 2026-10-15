@@ -96,7 +96,7 @@ fn set_num(m: &mut DynamicMessage, name: &str, v: f64) -> bool {
 fn py_float(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.trim().parse().ok(),
+        Value::String(s) => s.trim().parse::<f64>().ok().filter(|f| f.is_finite()),
         Value::Bool(b) => Some(*b as i32 as f64),
         _ => None,
     }
@@ -149,8 +149,10 @@ pub fn write(values: &Value) -> Value {
             set_num(p, "type", 4.0);
         }
         let blob = msg.encode_to_vec();
-        let _ = std::fs::copy(&path, format!("{}.{stamp}.bak", path.display()));
-        if let Err(e) = std::fs::write(&path, blob) {
+        if let Err(e) = crate::safefs::copy_atomic(&path, std::path::Path::new(&format!("{}.{stamp}.bak", path.display()))) {
+            return json!({"ok": false, "error": format!("could not back the preset up first ({e}) - nothing was changed")});
+        }
+        if let Err(e) = crate::safefs::write_atomic(&path, &blob) {
             return json!({"ok": false, "error": e.to_string()});
         }
     }
