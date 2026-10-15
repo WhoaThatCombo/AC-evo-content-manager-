@@ -43,7 +43,18 @@ fn free_port() -> u16 {
         .unwrap_or(18092)
 }
 
-fn secret() -> String {
+/// Whether to run the Python backend at all. Every route is the shell's
+/// now; a debug build still starts it so tools/diff_api.py can compare
+/// answers (ACECM_SIDECAR=1 / =0 overrides either way).
+pub fn wanted() -> bool {
+    match std::env::var("ACECM_SIDECAR").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => cfg!(debug_assertions),
+    }
+}
+
+pub fn secret() -> String {
     let mut b = [0u8; 24];
     getrandom::fill(&mut b).expect("no OS randomness");
     b.iter().map(|x| format!("{x:02x}")).collect()

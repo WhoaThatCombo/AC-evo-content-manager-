@@ -217,31 +217,43 @@ fn main() {
     // leaked Python onefile folders from before the native build
     std::thread::spawn(|| { let _ = installer::sweep_bundles(); });
 
-    let side = sidecar::Sidecar::start(listen.port)
-        .unwrap_or_else(|e| fail(&format!("could not start the ACECM backend: {e}")));
+    // the Python backend: only for debug comparisons now (sidecar::wanted)
+    let side = if sidecar::wanted() {
+        Some(sidecar::Sidecar::start(listen.port)
+            .unwrap_or_else(|e| fail(&format!("could not start the ACECM backend: {e}"))))
+    } else {
+        None
+    };
     // ⚠ Do NOT wait for it here. The window, the page and every ported
     // route are ready at once; only a request that needs the backend waits
     // (proxy::wait_backend) - that is the startup the user sees.
-    let addr = side.addr;
-    std::thread::spawn(move || {
-        let ok = sidecar::probe(addr, Duration::from_secs(90));
-        proxy::set_backend_ready(ok);
-        if !ok {
-            message_box_any("the ACECM backend did not start - see data\\native_backend.log");
+    let (base, secret) = match &side {
+        Some(s) => {
+            let addr = s.addr;
+            std::thread::spawn(move || {
+                let ok = sidecar::probe(addr, Duration::from_secs(90));
+                proxy::set_backend_ready(ok);
+                if !ok {
+                    message_box_any("the ACECM backend did not start - see data\\native_backend.log");
+                }
+            });
+            (format!("http://{}", s.addr), s.secret.clone())
         }
-    });
-    acecm::api::set_secret(&side.secret);
-    acecm::api::set_backend(&format!("http://{}", side.addr));
+        None => (String::new(), sidecar::secret()),
+    };
+    acecm::api::set_secret(&secret);
+    acecm::api::set_backend(&base);
     let backend = Arc::new(proxy::Backend {
-        base: format!("http://{}", side.addr),
-        secret: side.secret.clone(),
+        enabled: side.is_some(),
+        base,
+        secret,
         client: reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("http client"),
     });
-    let side = Arc::new(Mutex::new(Some(side)));
+    let side = Arc::new(Mutex::new(side));
     let start_background = || {
         // the pit button / key combination
         acecm::hotkey::watch();

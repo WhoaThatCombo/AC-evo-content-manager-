@@ -15,6 +15,8 @@ use axum::Router;
 use futures_util::TryStreamExt;
 
 pub struct Backend {
+    /// false: no Python backend behind the shell (release builds)
+    pub enabled: bool,
     pub base: String,
     pub secret: String,
     pub client: reqwest::Client,
@@ -65,6 +67,14 @@ async fn pass(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Response {
+    if !be.enabled {
+        // what the Python backend answered for a route it did not know
+        if req.uri().path().starts_with("/api/") {
+            return (StatusCode::NOT_FOUND, [("content-type", "application/json")],
+                    r#"{"error": "unknown endpoint"}"#).into_response();
+        }
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !wait_backend().await {
         return (StatusCode::BAD_GATEWAY, "ACECM backend did not start").into_response();
     }
