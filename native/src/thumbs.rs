@@ -132,7 +132,7 @@ pub fn resolve_folder(folder: &str) -> String {
 // ⚠ Rendering is serialised: each car costs a GPU context and ~2 s, and the
 // user may have the viewer open.
 use serde_json::json;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const SIZE: &str = "900x600";
 const BIG: &str = "1440x960";
@@ -168,6 +168,22 @@ pub fn cover_job() -> Value {
 
 /// One car rendered by evoview into the cache; `make=false` never launches
 /// it (a list GET must not spawn a console per row).
+/// Pictures that failed to render this session. ⚠ A car the viewer cannot
+/// load (a mod preset not in the base archive) failed again on EVERY Drive
+/// or Home visit - one viewer launch per such car, each time. Forced builds
+/// retry; a restart forgets the list (a game update may fix them).
+static FAILED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+
+fn failed(out: &Path) -> bool {
+    FAILED.lock().unwrap().as_ref().map(|f| f.contains(out)).unwrap_or(false)
+}
+
+fn mark_failed(out: &Path, yes: bool) {
+    let mut g = FAILED.lock().unwrap();
+    let f = g.get_or_insert_with(HashSet::new);
+    if yes { f.insert(out.to_path_buf()); } else { f.remove(out); }
+}
+
 pub fn render_car(car_id: &str, force: bool, make: bool, big: bool, visual: &str, paint: &str) -> Option<PathBuf> {
     if car_id.is_empty() {
         return None;
@@ -176,9 +192,16 @@ pub fn render_car(car_id: &str, force: bool, make: bool, big: bool, visual: &str
     if out.is_file() && !force {
         return Some(out);
     }
-    if !make {
+    if !make || (!force && failed(&out)) {
         return None;
     }
+    let r = render_car_now(car_id, big, visual, paint, &out);
+    mark_failed(&out, r.is_none());
+    r
+}
+
+fn render_car_now(car_id: &str, big: bool, visual: &str, paint: &str, out: &Path) -> Option<PathBuf> {
+    let out = out.to_path_buf();
     let exe = crate::viewer::viewer_exe()?;
     let pkg = crate::viewer::package_for(car_id)?;
     let mut c = std::process::Command::new(&exe);
@@ -259,6 +282,9 @@ pub fn build_all(force: bool) -> Value {
         *m = idle_job();
         m.insert("state".into(), json!("running"));
     }
+    if force {
+        *FAILED.lock().unwrap() = None;
+    }
     std::thread::spawn(move || {
         let jobs = render_jobs();
         job_set(&JOB, json!({"total": jobs.len()}));
@@ -284,7 +310,7 @@ pub fn ensure_renders() -> bool {
     if job_get(&JOB).get("state").and_then(|v| v.as_str()) == Some("running") {
         return false;
     }
-    if !render_jobs().iter().any(|j| !car_path(&j.2, false, &j.3, &j.4).is_file()) {
+    if !render_jobs().iter().any(|j| { let p = car_path(&j.2, false, &j.3, &j.4); !p.is_file() && !failed(&p) }) {
         return false;
     }
     build_all(false);
