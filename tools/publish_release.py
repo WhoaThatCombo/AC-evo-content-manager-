@@ -92,6 +92,23 @@ def main():
         f.write(f"{digest}  {os.path.basename(exe)}\n")
     print(f"sha256 {digest}")
 
+    # ⚠ The signature MUST go up with the exe. This script deletes every old
+    # asset of the tag below, and the in-app updater refuses a release whose
+    # ACECM.exe.sig is missing or does not verify - so publishing without it
+    # silently stops every install from updating. Check it against the exe
+    # being uploaded, with the app's own verifier, before touching GitHub.
+    sig = exe + ".sig"
+    if not os.path.isfile(sig):
+        raise SystemExit(f"missing {sig} - sign first:\n"
+                         f"  python tools/release_sign.py sign {exe} --version {VERSION}")
+    from acecm import version as _v
+    ok, why = _v.verify_release(os.path.basename(exe), VERSION, digest,
+                                open(sig, encoding="ascii").read())
+    if not ok:
+        raise SystemExit(f"{sig} does not verify for v{VERSION} of this exe "
+                         f"({why}) - re-sign it, nothing was published")
+    print(f"signature ok for v{VERSION}")
+
     # ⚠ Ship a ZIP as well as the bare exe. Chrome and Edge add their own
     # "isn't commonly downloaded / may be dangerous" block on a raw .exe
     # regardless of what is inside it, and that is where people were giving
@@ -143,7 +160,7 @@ def main():
         print(f"updating {rel['html_url']}")
 
     upload = rel["upload_url"].split("{")[0]
-    for path in (exe, sha, zip_path):
+    for path in (exe, sha, sig, zip_path):
         name = os.path.basename(path)
         with open(path, "rb") as f:
             blob = f.read()
