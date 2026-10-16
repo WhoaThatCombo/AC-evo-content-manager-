@@ -52,3 +52,23 @@ verify_out/
 
 # stray copy - the shipped viewer is staged into tools/ by build.py
 acecm/tools/
+
+# --- the old Python app: kept on the author's disk, not in the repo ----------
+# Windows ships the native app (native/). The Python app is what Linux 1.0.21
+# was built from; it stays local until Linux is ported. Only what the native
+# build and the release tools still use is tracked: the web UI and version.py
+# (release_sign / publish_release import its signature check).
+acecm/*.py
+!acecm/version.py
+launcher.py
+acecm_sync.py
+run.bat
+requirements.txt
+requirements-linux.txt
+setup-linux.sh
+tools/*.py
+!tools/release_sign.py
+!tools/publish_release.py
+tools/gencert.sh
+tools/srv_nodamage_revert.json
+native/tools/*.py

@@ -118,16 +118,6 @@ window instead. Nothing to install either way.
 * Reading wheel buttons needs membership of the `input` group:
   `sudo usermod -aG input $USER` (log out and in).
 
-#### Running from source
-
-```
-./setup-linux.sh
-.venv/bin/python -m acecm
-```
-
-The venv is created with `--system-site-packages` so the distro's WebKitGTK
-bindings are visible to it.
-
 ## Quick start
 
 1. Open ACECM. Confirm **Settings** shows a game exe and a dedicated-server exe.
@@ -217,8 +207,9 @@ The version lives in three places that must agree: `acecm/version.py`,
 `native/Cargo.toml` and `native/tauri.conf.json`. `build.py` refuses to build
 when they differ.
 
-The `acecm/` Python package is the older app the Linux build still uses
-(`./setup-linux.sh`, then `.venv/bin/python -m acecm`).
+The older Python app that Linux 1.0.21 was built from is no longer in this
+repository; it returns when Linux is ported. `acecm/version.py` stays
+because the release tools use its signature check.
 
 Windows releases are built and signed locally, then published with
 `tools/publish_release.py`, which refuses to upload without a signature that

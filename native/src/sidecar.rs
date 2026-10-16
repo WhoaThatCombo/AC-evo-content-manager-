@@ -50,7 +50,9 @@ pub fn wanted() -> bool {
     match std::env::var("ACECM_SIDECAR").as_deref() {
         Ok("1") => true,
         Ok("0") => false,
-        _ => cfg!(debug_assertions),
+        // ⚠ the Python app is no longer in the repo: a clone without the
+        // local copy has nothing to start
+        _ => cfg!(debug_assertions) && crate::paths::repo().join("acecm").join("app.py").is_file(),
     }
 }
 
