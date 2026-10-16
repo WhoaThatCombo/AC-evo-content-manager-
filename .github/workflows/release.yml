@@ -8,12 +8,17 @@
 # Two jobs, one release. The Windows build produces `ACECM.exe`; the Linux
 # build produces `ACECM` (no extension), which is the asset name the Linux
 # updater looks for. Neither is cross-compiled - each runs natively.
+#
+# ⚠ PARKED. Both jobs build the OLD Python app. Windows releases are now the
+# native Rust app, built and signed locally and published with
+# tools/publish_release.py, so a tag no longer runs this: the Windows job
+# only burned CI time (it skips upload when the release exists) and the
+# Linux job attached the Python build to native releases. Kept for when Linux
+# is ported; run it by hand meanwhile.
 name: release
 
 on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:          # lets you build without tagging, to test
+  workflow_dispatch:          # manual only - see PARKED above
 
 permissions:
   contents: write             # needed to create the release
