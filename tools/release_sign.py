@@ -8,9 +8,10 @@ Why: the updater used to trust ACECM.exe.sha256, which comes from the SAME
 GitHub release as the exe - it catches a corrupted download, not a swapped
 release (a hijacked account or token could upload both). The updater now
 also needs FILE.sig: an Ed25519 signature made with a private key that never
-touches GitHub, checked against public keys pinned in acecm/version.py.
+touches GitHub, checked against public keys pinned in tools/releasekey.py (and
+native/src/updater.rs).
 
-What is signed is version.release_message(): asset name + version + sha256.
+What is signed is releasekey.release_message(): asset name + version + sha256.
 Binding the version stops an OLD signed build being served as an "update";
 binding the asset name stops the Windows and Linux binaries being swapped.
 
@@ -27,7 +28,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from acecm import version  # noqa: E402
+import releasekey as version  # noqa: E402
 
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
@@ -58,7 +59,7 @@ def keygen(keyfile):
     pub = key.public_key().public_bytes(serialization.Encoding.Raw,
                                         serialization.PublicFormat.Raw)
     print(f"private key: {keyfile}  (back it up OFFLINE; never commit it)")
-    print("public key for version.RELEASE_PUBKEYS:")
+    print("public key for releasekey.RELEASE_PUBKEYS:")
     print("    " + base64.b64encode(pub).decode())
 
 

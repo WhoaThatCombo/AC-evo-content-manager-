@@ -203,13 +203,11 @@ python build.py --native   # -> dist/ACECM.exe (one file: UI, viewer and data em
 cd native && cargo run     # development build from this checkout
 ```
 
-The version lives in three places that must agree: `acecm/version.py`,
-`native/Cargo.toml` and `native/tauri.conf.json`. `build.py` refuses to build
-when they differ.
+The version lives in `native/Cargo.toml` and `native/tauri.conf.json`, which
+must agree; `build.py` refuses to build when they differ.
 
 The older Python app that Linux 1.0.21 was built from is no longer in this
-repository; it returns when Linux is ported. `acecm/version.py` stays
-because the release tools use its signature check.
+repository; it returns when Linux is ported.
 
 Windows releases are built and signed locally, then published with
 `tools/publish_release.py`, which refuses to upload without a signature that

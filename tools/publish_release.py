@@ -19,7 +19,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
-from acecm.version import VERSION                              # noqa: E402
+from releasekey import VERSION                                 # noqa: E402
 
 REPO = "WhoaThatCombo/AC-evo-content-manager-"
 API = "https://api.github.com"
@@ -101,7 +101,7 @@ def main():
     if not os.path.isfile(sig):
         raise SystemExit(f"missing {sig} - sign first:\n"
                          f"  python tools/release_sign.py sign {exe} --version {VERSION}")
-    from acecm import version as _v
+    import releasekey as _v
     ok, why = _v.verify_release(os.path.basename(exe), VERSION, digest,
                                 open(sig, encoding="ascii").read())
     if not ok:

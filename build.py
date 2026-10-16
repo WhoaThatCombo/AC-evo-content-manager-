@@ -604,16 +604,24 @@ def _signtool():
 
 
 def _native_versions():
-    """(acecm/version.py, native/Cargo.toml, native/tauri.conf.json)."""
+    """(acecm/version.py, native/Cargo.toml, native/tauri.conf.json).
+
+    acecm/version.py belongs to the old Python app, which is no longer in
+    the repository: when it is absent the Cargo.toml number stands in for it.
+    """
     import json
     import re
     sys.path.insert(0, HERE)
-    from acecm.version import VERSION
+    try:
+        from acecm.version import VERSION
+    except Exception:                              # noqa: BLE001
+        VERSION = None
     cargo = open(os.path.join(HERE, "native", "Cargo.toml"), encoding="utf-8").read()
     m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo)
     conf = json.load(open(os.path.join(HERE, "native", "tauri.conf.json"),
                           encoding="utf-8"))
-    return VERSION, (m.group(1) if m else ""), conf.get("version", "")
+    cv = m.group(1) if m else ""
+    return (cv if VERSION is None else VERSION), cv, conf.get("version", "")
 
 
 def build_native(out_dir=None):
