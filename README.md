@@ -1,9 +1,10 @@
 # Assetto Corsa EVO Content Manager
 
-ACECM is a desktop manager for [Assetto Corsa EVO](https://store.steampowered.com/app/3058630): install cars and tracks, run a dedicated server, join it from Drive, and share a live map. It is built for the same job Content Manager does for the original Assetto Corsa — content, hosting, and getting you on track without fighting the stock launcher.
+ACECM is a desktop manager for [Assetto Corsa EVO](https://store.steampowered.com/app/3058630): install cars and tracks, run a dedicated server, and join it from Drive. It is built for the same job Content Manager does for the original Assetto Corsa — content, hosting, and getting you on track without fighting the stock launcher.
 
-Current release: **1.0.0**. Windows 10/11 with Edge WebView2 (included with
-Windows 11), or Linux with Steam + Proton.
+Runs on Windows 10/11 with Edge WebView2 (included with Windows 11). The
+latest version is on the [Releases](https://github.com/WhoaThatCombo/AC-evo-content-manager-/releases/latest)
+page. Linux is on an older build for now - see [Linux](#linux).
 
 ## What it is
 
@@ -13,9 +14,19 @@ It does **not** ship the game, the dedicated server, or Kunos content. You alrea
 
 ## Install
 
-1. Download **[ACECM.exe](https://github.com/WhoaThatCombo/AC-evo-content-manager-/releases/latest)** (Windows) or **ACECM** (Linux) from the latest GitHub Release.
-2. Run it. There is no installer.
+1. Download **[ACECM.zip](https://github.com/WhoaThatCombo/AC-evo-content-manager-/releases/latest)**
+   from the latest release and unzip it (or take `ACECM.exe` directly - some
+   browsers warn about a bare `.exe`, the zip avoids that).
+2. Run `ACECM.exe`. The first run offers to install it to
+   `%LOCALAPPDATA%\Programs\ACECM` with Start Menu and Desktop shortcuts. Say
+   no to just run it from where it is.
 3. On first launch it locates the Steam game folder and `AssettoCorsaEVOServer.exe`. If either is missed, set it under **Settings**.
+
+ACECM is not code-signed, so Windows SmartScreen shows an "unknown publisher"
+warning. Each release lists the file's SHA-256 so you can check what you
+downloaded. ACECM updates itself from inside the app; every update is checked
+against a signature made with the project's release key before it is
+installed.
 
 Settings, server profiles, logs, and thumbnails live in `%LOCALAPPDATA%\ACECM`
 (`~/.local/share/ACECM` on Linux). Override the data folder with the
@@ -23,7 +34,12 @@ Settings, server profiles, logs, and thumbnails live in `%LOCALAPPDATA%\ACECM`
 
 ### Linux
 
-Download **ACECM** (no extension) from the latest release, make it executable,
+> **Linux is paused for now.** Windows moved to a rewritten native app in
+> 1.0.22. The Linux build is still the older Python app, last released as
+> [1.0.21](https://github.com/WhoaThatCombo/AC-evo-content-manager-/releases/tag/v1.0.21),
+> and does not have the fixes since. Everything below describes that build.
+
+Download **ACECM** (no extension) from the 1.0.21 release, make it executable,
 run it. It is one self-contained file — no Python, no pip, nothing to install.
 
 ```
@@ -167,16 +183,12 @@ New profiles start with **0 AI**. Stock servers do not run AI bots. Status is ba
 
 Leave **proxy** on unless you need a fully offline lobby.
 
-### Live
-
-`/live` is a read-only map and board anyone can open. It is not an admin surface. Share the link from the Live page.
-
 ### Other
 
 - **Game settings** — read, backup, export, and restore client settings files.
 - **Share** — other ACECM users can pull the cars and tracks a server needs.
 - **Logs** — ACECM and server output, with the noisy server time spam filtered.
-- **Updates** — GitHub Releases, checksum-verified.
+- **Updates** — from GitHub Releases, inside the app; each download is checked against the release signature and checksum before it replaces anything.
 
 ## Configuration
 
@@ -185,7 +197,6 @@ Leave **proxy** on unless you need a fully offline lobby.
 | Data | `%LOCALAPPDATA%\ACECM` (or `ACECM_DATA`) |
 | Config | `config.json` in that folder — local paths, never part of the git repo |
 | UI / API port | `ui_port` (default 8092) |
-| Telemetry | `telemetry_port` (default 8091) |
 | Lobby | `backend_port` (default 448) |
 | Dedicated TCP / HTTP | `default_tcp_port` 9700, `default_http_port` 8080 |
 
@@ -193,13 +204,25 @@ Detect walks Steam libraries for `AssettoCorsaEVO.exe` and `AssettoCorsaEVOServe
 
 ## Build from source
 
+The Windows app is Rust + [Tauri](https://tauri.app) in `native/`; the web UI
+it shows lives in `acecm/web`. You need the Rust MSVC toolchain and Python 3
+(the build script is Python).
+
 ```bash
-pip install pyinstaller protobuf numpy pywebview cryptography websockets capstone texture2ddecoder pillow
-python -m acecm           # run from this checkout
-python build.py           # -> dist/ACECM.exe
+python build.py --native   # -> dist/ACECM.exe (one file: UI, viewer and data embedded)
+cd native && cargo run     # development build from this checkout
 ```
 
-Releases are built by GitHub Actions on a version tag. The tag must match `VERSION` in `acecm/version.py` (for example `git tag v0.10.5 && git push origin v0.10.5`).
+The version lives in three places that must agree: `acecm/version.py`,
+`native/Cargo.toml` and `native/tauri.conf.json`. `build.py` refuses to build
+when they differ.
+
+The `acecm/` Python package is the older app the Linux build still uses
+(`./setup-linux.sh`, then `.venv/bin/python -m acecm`).
+
+Windows releases are built and signed locally, then published with
+`tools/publish_release.py`, which refuses to upload without a signature that
+verifies.
 
 Contributor rules so a feature works on a **fresh `ACECM.exe`**, not only the author’s PC: [PORTABILITY.md](PORTABILITY.md).
 
