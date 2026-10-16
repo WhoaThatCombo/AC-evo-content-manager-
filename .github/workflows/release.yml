@@ -97,6 +97,10 @@ jobs:
     # job runs would see the OTHER job's upload and skip its own. Serialising
     # costs a few minutes and removes both failure modes.
     needs: build
+    # ⚠ OFF while Linux is paused. This job builds the old Python app, and on
+    # 1.0.22-1.0.24 it attached that build to the native Windows releases
+    # under the new version number. Linux stays on 1.0.21 until it is ported.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     # ⚠ Build in an OLD distro, not on ubuntu-latest. A PyInstaller onefile
     # links against the glibc of the machine that built it and refuses to
