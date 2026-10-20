@@ -539,8 +539,15 @@ pub fn plan(base: &str, server_id: &str) -> Value {
         }
     }
     registry::flush_cache();
+    // compressed packages that cover some of what is missing (acemod.rs):
+    // what is actually downloaded shrinks by what they save
+    let acemods = crate::acemod::usable(&man, &need);
+    let saved: i64 = acemods.iter().map(|a| a.get("raw_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as i64
+        - a.get("size").and_then(|v| v.as_u64()).unwrap_or(0) as i64).sum();
+    let download = (bytes as i64 - saved.max(0)).max(0) as u64;
     json!({"ok": true, "server": man.get("server").cloned().unwrap_or(json!({})),
            "need": need, "have": have,
+           "acemods": acemods, "download_bytes": download,
            "needs_register": unregistered_tracks(&man),
            "bytes": bytes,
            "stale": stale_files(&man),
@@ -606,6 +613,43 @@ fn ranged_to_file(url: &str, size: u64, tmp: &Path, progress: Option<Progress>, 
     if let Some(Err(e)) = res.into_iter().find(|r| r.is_err()) {
         let _ = std::fs::remove_file(tmp);
         return Err(e);
+    }
+    Ok(())
+}
+
+/// Download a share package (acemod.rs) of exactly `size` bytes to `dest`:
+/// parallel ranges when it is big, one stream otherwise; never more than
+/// declared.
+pub fn download_to(url: &str, size: u64, dest: &Path, progress: Option<Progress>) -> Result<(), String> {
+    if !url.contains("/api/registry/acemod") {
+        return Err("refusing a content URL that is not this host's share".into());
+    }
+    if size >= RANGED_MIN && ranged_to_file(url, size, dest, progress, RANGED_PARTS).is_ok() {
+        return Ok(());
+    }
+    let mut r = client(600.0).get(url).send().map_err(|e| e.to_string())?;
+    if !r.status().is_success() {
+        return Err(format!("HTTP Error {}", r.status().as_u16()));
+    }
+    let mut f = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut done = 0u64;
+    loop {
+        let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        done += n as u64;
+        if done > size {
+            return Err("the package is larger than the host declared".into());
+        }
+        f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        if let Some(p) = progress {
+            p(done, size);
+        }
+    }
+    if done != size {
+        return Err(format!("the package arrived incomplete ({done} of {size} bytes)"));
     }
     Ok(())
 }
@@ -826,7 +870,50 @@ fn entry_base(e: &Value) -> String {
 /// Install a plan: one tar per track, then leftover files in parallel.
 /// `status` is the shared content job (state/detail/done/...).
 pub fn install_files(need: &[Value], status: &Mutex<Map<String, Value>>, register: &[String]) -> Vec<String> {
+    install_files_with(need, &[], status, register)
+}
+
+/// install_files(), trying the host's compressed packages (`acemods`, from
+/// plan()) first: what one of them rebuilds and verifies is not downloaded
+/// again; a package that fails leaves its files to the normal path.
+pub fn install_files_with(need: &[Value], acemods: &[Value], status: &Mutex<Map<String, Value>>, register: &[String]) -> Vec<String> {
     let set = |k: &str, v: Value| { status.lock().unwrap().insert(k.into(), v); };
+    let mut need: Vec<Value> = need.to_vec();
+    let mut register: Vec<String> = register.to_vec();
+    let mut moved: u64 = 0;
+    let mut installed: Vec<String> = Vec::new();
+    for a in acemods {
+        let covers: Vec<String> = a.get("covers").and_then(|v| v.as_array()).map(|c| c.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        let entries: Vec<Value> = need.iter().filter(|e| covers.contains(&sv(e, "path"))).cloned().collect();
+        if covers.is_empty() || entries.len() != covers.len() {
+            continue;
+        }
+        let raw: u64 = entries.iter().map(|e| e.get("size").and_then(|v| v.as_u64()).unwrap_or(0)).sum();
+        let size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0).max(1);
+        set("detail", json!(format!("{} {}: compressed package, {} MB -> {} MB", sv(a, "kind"), sv(a, "name"), raw >> 20, size >> 20)));
+        let base_n = moved;
+        // progress in the plan's (raw) bytes, so the bar's total still holds
+        let tick = |done: u64, _s: u64| { status.lock().unwrap().insert("done".into(), json!(base_n + done.min(size) * raw / size)); };
+        match crate::acemod::install(a, &entries, Some(&tick)) {
+            Ok(paths) => {
+                logs::info(format!("compressed package {} {}: {} file(s) rebuilt and verified, {} MB downloaded instead of {} MB",
+                    sv(a, "kind"), sv(a, "name"), paths.len(), size >> 20, raw >> 20));
+                moved += raw;
+                set("done", json!(moved));
+                need.retain(|e| !paths.contains(&sv(e, "path")));
+                if sv(a, "kind") == "track" && !register.contains(&sv(a, "name")) {
+                    register.push(sv(a, "name"));
+                }
+                installed.extend(paths);
+            }
+            Err(e) => {
+                logs::warn(format!("compressed package {} {} not used, downloading the files instead: {e}", sv(a, "kind"), sv(a, "name")));
+                set("done", json!(moved));
+            }
+        }
+    }
+    let need = &need[..];
+    let register = &register[..];
     let mut tracks: Vec<(String, Vec<Value>)> = Vec::new();
     let mut rest = Vec::new();
     for e in need {
@@ -845,8 +932,6 @@ pub fn install_files(need: &[Value], status: &Mutex<Map<String, Value>>, registe
             rest.push(e.clone());
         }
     }
-    let mut moved: u64 = 0;
-    let mut installed: Vec<String> = Vec::new();
     for (folder, files) in &tracks {
         let (sid, base) = (entry_sid(&files[0]), entry_base(&files[0]));
         let mut packed = false;

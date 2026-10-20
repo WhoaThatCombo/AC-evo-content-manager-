@@ -369,3 +369,81 @@ pub fn upsert_container_rows(blob: &[u8], display_name: &str, folder: &str, layo
     }
     Ok((emit_bytes(2, &kept), made))
 }
+
+/// Exact rows (development edition: converted AC1 tracks): drop every row
+/// `remove` matches, append `add` as given. Everything else stays
+/// byte-identical.
+pub fn replace_rows_exact(blob: &[u8], remove: &dyn Fn(&[u8]) -> bool, add: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let mut out = vec![];
+    for f in walk(unwrap(blob)?)? {
+        if f.wire == 2 && f.num == 3 && remove(f.val.bytes()) {
+            continue;
+        }
+        out.extend(emit(&f));
+    }
+    for r in add {
+        out.extend(emit_bytes(3, r));
+    }
+    Ok(emit_bytes(2, &out))
+}
+
+/// tracks.table row -> (display name, folder path)
+pub fn track_row_name_base(row: &[u8]) -> (Option<String>, Option<String>) {
+    (row_name(row).ok().flatten(), row_base(row).ok().flatten())
+}
+
+/// track_containers row -> (display name, container paths)
+pub fn container_row_name_paths(row: &[u8]) -> (Option<String>, Vec<String>) {
+    let mut paths = vec![];
+    if let Ok(fs) = walk(row) {
+        for g in fs {
+            if g.num == 8 && g.wire == 2 {
+                if let Ok(hs) = walk(g.val.bytes()) {
+                    for h in hs {
+                        if h.num == 11 && h.wire == 2 {
+                            paths.push(s(h.val.bytes()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (container_name(row).ok().flatten(), paths)
+}
+
+/// Every track_containers row's (event name f8.f1, layout name f8.f14).
+pub fn container_rows_named(blob: &[u8]) -> Result<Vec<(String, String)>, String> {
+    let mut out = vec![];
+    for f in walk(unwrap(blob)?)? {
+        if f.wire != 2 || f.num != 3 {
+            continue;
+        }
+        let (mut ev, mut lay) = (String::new(), String::new());
+        for g in walk(f.val.bytes())? {
+            if g.num != 8 || g.wire != 2 {
+                continue;
+            }
+            for h in walk(g.val.bytes())? {
+                if h.wire == 2 && h.num == 1 {
+                    ev = s(h.val.bytes());
+                } else if h.wire == 2 && h.num == 14 {
+                    lay = s(h.val.bytes());
+                }
+            }
+        }
+        out.push((ev, lay));
+    }
+    Ok(out)
+}
+
+/// Every tracks.table row's (display name, folder path).
+pub fn track_rows(blob: &[u8]) -> Result<Vec<(String, String)>, String> {
+    let mut out = vec![];
+    for f in walk(unwrap(blob)?)? {
+        if f.wire == 2 && f.num == 3 {
+            let (n, b) = track_row_name_base(f.val.bytes());
+            out.push((n.unwrap_or_default(), b.unwrap_or_default()));
+        }
+    }
+    Ok(out)
+}

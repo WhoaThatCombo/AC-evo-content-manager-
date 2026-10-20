@@ -1,0 +1,8 @@
+#!/bin/sh
+# Reject a commit message with a forbidden word (see forbidden.sh).
+pat=$(sh "$(git rev-parse --show-toplevel)/.githooks/forbidden.sh")
+if grep -q -i -E "$pat" "$1"; then
+    echo "commit-msg: forbidden word in the commit message" >&2
+    exit 1
+fi
+exit 0

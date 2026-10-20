@@ -171,12 +171,16 @@ async function contentFrom(s) {
   const files = wanted.reduce((a, x) => a + (x.p.need || []).length, 0);
   const fixing = wanted.reduce((a, x) => a + (x.p.needs_register || []).length, 0);
   const mb = (wanted.reduce((a, x) => a + (x.p.bytes || 0), 0) / 1e6).toFixed(0);
+  // compressed packages (the host builds them; this ACECM rebuilds them
+  // from the game): what actually comes down the wire
+  const dl = wanted.reduce((a, x) => a + (x.p.download_bytes === undefined ? (x.p.bytes || 0) : x.p.download_bytes), 0);
+  const size = (+mb > 0 && dl / 1e6 < +mb - 1) ? mb + ' MB -> ' + (dl / 1e6).toFixed(0) + ' MB to download (compressed)' : mb + ' MB';
   if (!files && fixing) {
     if (!await ask(fixing + ' track(s) are already downloaded but missing from '
         + "the game's track list.\n\nAdd them now? "
         + '(Assetto Corsa EVO must be closed.)')) return;
   } else if (!await ask(wanted.map(x => '• ' + x.e.name).join('\n')
-      + `\n\nMissing ${files} file(s), ${mb} MB.`
+      + `\n\nMissing ${files} file(s), ${size}.`
       + (fixing ? `\n${fixing} track(s) also need adding to the game.` : '')
       + `\n\nDownload from ${d.base} and install?`)) return;
   const r = await api('browser/install',

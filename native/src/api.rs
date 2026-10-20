@@ -249,6 +249,23 @@ async fn thumb(peer: IpAddr, req: Request, path: &str, query: &str) -> Result<Re
             None => json_resp(404, &json!({"error": "no image"})),
         });
     }
+    if path == "/api/convert/preview" || path == "/api/convert/track_preview" {
+        let car = q_get(query, "car").unwrap_or_default();
+        let track = path.ends_with("track_preview");
+        let small = q_flag(query, "thumb");
+        let (layout, outline) = (q_get(query, "layout").unwrap_or_default(), q_flag(query, "outline"));
+        let hit = tokio::task::spawn_blocking(move || {
+            let p = if track { crate::converttrack::image(&car, &layout, outline) } else { crate::convert::preview(&car) }?;
+            if small { crate::convert::thumb(&p).or(Some(p)) } else { Some(p) }
+        }).await.ok().flatten();
+        return Ok(match hit.and_then(|p| std::fs::read(&p).ok().map(|b| (p, b))) {
+            Some((p, b)) => {
+                let ct = if p.extension().map(|e| e.eq_ignore_ascii_case("png")).unwrap_or(false) { "image/png" } else { "image/jpeg" };
+                ([(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "max-age=3600")], b).into_response()
+            }
+            None => json_resp(404, &json!({"error": "no image"})),
+        });
+    }
     let folder = q_get(query, "folder").unwrap_or_default();
     let _ = req;
     let p = tokio::task::spawn_blocking(move || crate::thumbs::track_cover(&folder)).await.ok().flatten();
@@ -381,16 +398,18 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/profiles" | "/api/server/status" | "/api/server/log"
             | "/api/backend" | "/api/backend/log" | "/api/join/state" | "/api/browser/why"
             | "/api/browser" | "/api/drive/status"
-            | "/api/registry/list" | "/api/registry/manifest" | "/api/registry/file" | "/api/registry/pack"
+            | "/api/registry/list" | "/api/registry/manifest" | "/api/registry/file" | "/api/registry/pack" | "/api/registry/acemod"
             | "/api/browser/status" | "/api/browser/discover" | "/api/browser/tag" | "/api/browser/needs"
             | "/api/browser/plan" | "/api/share" | "/api/progress" | "/api/drop/status" | "/api/mods/scan"
             | "/api/library" | "/api/library/clip" | "/api/library/export" | "/api/pack/preview"
             | "/api/registry" | "/api/gamesettings/export" | "/api/models" | "/api/penalties"
-            | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/compress" | "/api/compress/status"
+            | "/api/thumbs/status" | "/api/viewer/job" | "/api/viewer/status" | "/api/viewer/liveries" | "/api/compress" | "/api/compress/status"
             | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"
             | "/api/events" | "/api/events/snapshot" | "/api/livery" | "/api/car/specs" | "/api/pit/devices"
             | "/api/patches" | "/api/patches/inspect"
-            | "/api/state" | "/api/install" | "/api/overview" | "/api/update/check"),
+            | "/api/state" | "/api/install" | "/api/overview" | "/api/update/check"
+            | "/api/convert" | "/api/convert/cars" | "/api/convert/status" | "/api/convert/tracks"
+            | "/api/convert/track_info" | "/api/convert/earlier"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -413,7 +432,9 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/pit/go" | "/api/pit/capture" | "/api/pit/bind" | "/api/hud/mph"
             | "/api/patches/save" | "/api/patches/apply" | "/api/patches/restore" | "/api/patches/delete" | "/api/hook/plan"
             | "/api/install/run" | "/api/install/remove" | "/api/update/apply" | "/api/app/restart"
-            | "/api/app/show" | "/api/server_shortcut"),
+            | "/api/app/show" | "/api/server_shortcut"
+            | "/api/convert/settings" | "/api/convert/start" | "/api/convert/cancel" | "/api/convert/uninstall"
+            | "/api/convert/track_start" | "/api/convert/track_uninstall" | "/api/convert/track_open" | "/api/convert/track_install"),
         _ => false,
     }
 }
@@ -432,7 +453,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
     if path.starts_with("/api/_native/") {
         return Ok(native_internal(peer, req, &path).await);
     }
-    if req.method() == Method::GET && (path == "/api/thumb/car" || path == "/api/thumb/track") {
+    if req.method() == Method::GET && (path == "/api/thumb/car" || path == "/api/thumb/track" || path == "/api/convert/preview" || path == "/api/convert/track_preview") {
         return thumb(peer, req, &path, &query).await;
     }
     if !ported(req.method(), &path) {
@@ -497,6 +518,27 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             json_resp(200, &crate::logs::tail(n, &f))
         }
         (false, "/api/logs/files") => json_resp(200, &crate::logs::files()),
+        // ---- AC1 car / track conversion (convert.rs, converttrack.rs)
+        (false, "/api/convert") => json_resp(200, &blocking(crate::convert::info).await),
+        (false, "/api/convert/cars") => json_resp(200, &blocking(crate::convert::cars).await),
+        (false, "/api/convert/status") => json_resp(200, &crate::convert::status()),
+        (true, "/api/convert/settings") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::save_settings(&b)).await) }
+        (true, "/api/convert/start") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::start(&b)).await) }
+        (true, "/api/convert/cancel") => json_resp(200, &crate::convert::cancel()),
+        (false, "/api/convert/earlier") => {
+            let (k, f) = (q_get(&query, "kind").unwrap_or_default(), q_get(&query, "folder").unwrap_or_default());
+            json_resp(200, &blocking(move || crate::convert::earlier_api(&k, &f)).await)
+        }
+        (false, "/api/convert/tracks") => json_resp(200, &blocking(crate::converttrack::tracks).await),
+        (false, "/api/convert/track_info") => {
+            let (t, src) = (q_get(&query, "track").unwrap_or_default(), q_get(&query, "source").unwrap_or_default());
+            json_resp(200, &blocking(move || crate::converttrack::info(&t, &src)).await)
+        }
+        (true, "/api/convert/track_open") => { let b = body.clone(); json_resp(200, &blocking(move || crate::converttrack::open(&b)).await) }
+        (true, "/api/convert/track_start") => { let b = body.clone(); json_resp(200, &blocking(move || crate::converttrack::start(&b)).await) }
+        (true, "/api/convert/track_install") => { let b = body.clone(); json_resp(200, &blocking(move || crate::converttrack::install_api(&b)).await) }
+        (true, "/api/convert/track_uninstall") => { let b = body.clone(); json_resp(200, &blocking(move || crate::converttrack::uninstall(&b)).await) }
+        (true, "/api/convert/uninstall") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::uninstall(&b)).await) }
         (false, "/api/mods") => {
             let side = q_get(&query, "side").unwrap_or_else(|| "server".into());
             json_resp(200, &blocking(move || crate::mods::installed(&side)).await)
@@ -703,6 +745,23 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                 None => json_resp(404, &json!({"error": "not a declared content file"})),
             }
         }
+        (false, "/api/registry/acemod") => {
+            // a compressed share package (acemod.rs) of a car mod or track
+            // this entry shares
+            let (id, kind, name) = (q_get(&query, "id").unwrap_or_default(), q_get(&query, "kind").unwrap_or_default(), q_get(&query, "name").unwrap_or_default());
+            let (k2, n2) = (kind.clone(), name.clone());
+            let hit = tokio::task::spawn_blocking(move || {
+                let shared = if k2 == "car" { crate::registry::shares_mod(&id, &n2) } else { crate::registry::shares_track(&id, &n2) };
+                if shared { crate::acemod::ready_file(&k2, &n2) } else { None }
+            }).await.ok().flatten();
+            match hit {
+                Some((p, sha)) => {
+                    let rng = h.get(header::RANGE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    serve_file(&p, &rng, "application/octet-stream", &format!("{name}.acemod"), &sha).await
+                }
+                None => json_resp(404, &json!({"error": "no package for that item"})),
+            }
+        }
         (false, "/api/registry/pack") => {
             let (id, folder) = (q_get(&query, "id").unwrap_or_default(), q_get(&query, "track").unwrap_or_default().trim().to_string());
             let (i2, f2) = (id.clone(), folder.clone());
@@ -859,7 +918,11 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (true, "/api/thumbs/covers") => { let f = bb("force"); json_resp(200, &crate::thumbs::build_covers(f)) }
         (false, "/api/viewer/job") => json_resp(200, &crate::viewer::job(&q_get(&query, "id").unwrap_or_default())),
         (false, "/api/viewer/status") => json_resp(200, &blocking(|| json!({"exe": crate::viewer::viewer_exe(), "package": crate::viewer::package()})).await),
-        (true, "/api/viewer/open") => { let (id, paint) = (bs("id"), bs("paint")); json_resp(200, &crate::viewer::start_open(&id, &paint)) }
+        (true, "/api/viewer/open") => { let (id, paint, liv) = (bs("id"), bs("paint"), bs("livery")); json_resp(200, &crate::viewer::start_open(&id, &paint, &liv)) }
+        (false, "/api/viewer/liveries") => {
+            let id = q_get(&query, "id").unwrap_or_default();
+            json_resp(200, &blocking(move || crate::viewer::liveries(&id)).await)
+        }
         (true, "/api/viewer/open_track") => {
             let f = { let f = bs("folder"); if f.is_empty() { bs("id") } else { f } };
             json_resp(200, &crate::viewer::start_open_track(&f))

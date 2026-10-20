@@ -385,6 +385,34 @@ fn apply_mode_fields(obj: &mut DynamicMessage, pick: &Map<String, Value>, mode: 
     }
 }
 
+/// A converted track's entry with the event name of this game mode (its
+/// declaration names one per mode); other entries unchanged.
+fn session_for_mode(ev: &Value, mode: &str) -> Value {
+    let mut ev = ev.clone();
+    if let Some(n) = ev.get("event_names").and_then(|e| crate::converttrack::event_for_mode(e, mode)) {
+        ev["name"] = json!(n);
+    }
+    ev
+}
+
+/// A converted track's (track, layout, event) must exist in the game's
+/// tables before a save names it: a stale or AC1-named selection has no
+/// starting position and the game crashes loading it.
+fn check_session(ev: &Value, mode: &str) -> Result<(), String> {
+    if ev.get("converted") != Some(&json!(true)) {
+        return Ok(());
+    }
+    let s = session_for_mode(ev, mode);
+    let (event, layout) = (s_or(s.get("name")), s_or(s.get("layout")));
+    if event.is_empty() || layout.is_empty() {
+        return Err(format!("{} has no {mode} session in its declaration - convert and install it again", s_or(s.get("track"))));
+    }
+    match crate::converttrack::tables_have_event(&event, &layout) {
+        Some(false) => Err(format!("\"{event}\" ({layout}) is not in the game's track list - install the track again from Convert")),
+        _ => Ok(()),
+    }
+}
+
 fn event(pick: &Map<String, Value>) -> Option<Value> {
     let tracks = content::tracks().get("tracks").and_then(|t| t.as_array()).cloned().unwrap_or_default();
     let name = s_or(get(pick, "custom_track")).trim().to_string();
@@ -478,6 +506,10 @@ pub fn write_gamemode_into(root: &Path, pick: &Map<String, Value>, check_game: b
         return json!({"ok": false, "error": "that track index is not in the list"});
     };
     let mode = mode_name(pick);
+    if let Err(e) = check_session(&ev, &mode) {
+        return json!({"ok": false, "error": e});
+    }
+    let ev = session_for_mode(&ev, &mode);
     let gmdir = root.join("GameModes");
     let _ = std::fs::create_dir_all(&gmdir);
     let save_path = gmdir.join(format!("{mode}.gamemodesave"));
@@ -1381,7 +1413,12 @@ fn enter_and_start(pick: &Map<String, Value>) -> Result<Value, Cancelled> {
     // ⚠ set the track HERE, like the car, instead of trusting
     // -startup_gamemode to have carried it in
     if let Some(ev) = event(pick) {
-        let tname = { let t = s_or(ev.get("track")); if t.is_empty() { "the track".into() } else { t } };
+        let mode = mode_name(pick);
+        if let Err(e) = check_session(&ev, &mode) {
+            return Ok(json!({"ok": false, "error": e}));
+        }
+        let ev = session_for_mode(&ev, &mode);
+        let tname ={ let t = s_or(ev.get("track")); if t.is_empty() { "the track".into() } else { t } };
         set(json!({"phase": "selecting_track", "hint": format!("setting {tname}")}));
         let evn = { let n = s_or(ev.get("name")); if n.is_empty() { s_or(ev.get("event_name")) } else { n } };
         match gameui::select_track(&s_or(ev.get("track")), &s_or(ev.get("layout")), &evn, int0(ev.get("length_m"))) {

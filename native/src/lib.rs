@@ -1,7 +1,11 @@
 //! ACECM native core: everything the shell does, as a library so the
 //! app binary and the dev tools in src/bin share one implementation.
 
+pub mod acemod;
 pub mod api;
+pub mod convert;
+pub mod converttrack;
+pub mod edition;
 pub mod archive;
 pub mod archlock;
 pub mod assists;

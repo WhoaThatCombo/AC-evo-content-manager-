@@ -183,6 +183,11 @@ const CHECK_TTL: u64 = 30 * 60;
 /// appear more than once every half hour. The Updater page passes force.
 /// A failure is never cached.
 pub fn check(force: bool) -> Value {
+    // the dev edition never updates itself: a release would replace it
+    if crate::edition::is_dev() {
+        let _ = force;
+        return json!({"ok": true, "current": VERSION, "checked": false, "hint": "development build: no updates"});
+    }
     if let Some((at, hit)) = CHECK.lock().unwrap().as_ref() {
         if !force && at.elapsed().as_secs() < CHECK_TTL {
             let mut v = hit.clone();
@@ -567,6 +572,9 @@ static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// then raced through the moves - one could put the NEW build onto .old,
 /// so a failed update "rolled back" to the very build that failed.
 pub fn apply() -> Value {
+    if crate::edition::is_dev() {
+        return json!({"ok": false, "error": "development build: no updates"});
+    }
     if !frozen() {
         return json!({"ok": false, "error": "running from source - update with git, not this"});
     }

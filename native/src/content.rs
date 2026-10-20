@@ -314,6 +314,29 @@ fn tracks_uncached() -> Value {
                         "mod": false}));
     }
     for (n, t) in trackimport::importable().iter().enumerate() {
+        // a converted track: its declared sessions, one per layout, named as
+        // its table rows name them (never the AC1 folder / layout names: a
+        // save naming those has no starting position and crashes the game)
+        let folder = t.get("folder").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(sess) = crate::converttrack::decl_sessions(folder) {
+            for (li, ss) in sess.iter().enumerate().take(20) {
+                let track = s(ss, "track", "");
+                let layout = s(ss, "layout", "");
+                if track.is_empty() || (li == 0 && seen.contains(&track.to_lowercase())) {
+                    break;
+                }
+                let practice = crate::converttrack::event_for_mode(&ss["event_names"], "GameModeType_PRACTICE").unwrap_or_default();
+                out.push(json!({"index": 10000 + n * 20 + li, "track": track, "layout": layout, "name": practice,
+                                "event_names": ss["event_names"], "label": format!("{track} - {layout}"),
+                                "length_m": ss.get("length_m").cloned().unwrap_or(Value::Null), "mod": true,
+                                "custom_track": if sess.len() > 1 { format!("{track} - {layout}") } else { track.clone() },
+                                "folder": folder, "converted": true}));
+            }
+            if let Some(first) = sess.first() {
+                seen.insert(s(first, "track", "").to_lowercase());
+            }
+            continue;
+        }
         let name = match t.get("display_name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
             Some(d) => d.trim().to_string(),
             None => t.get("folder").and_then(|v| v.as_str()).unwrap_or("").trim().to_string(),

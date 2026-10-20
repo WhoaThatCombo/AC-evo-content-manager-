@@ -1,0 +1,3 @@
+/target
+*.kspkg.part
+__pycache__/

@@ -1,0 +1,244 @@
+# 71 stock cars (tools/aifit_stock.tsv)
+
+## aero_hint (physics_hints 1) vs s = CL.A rho / (2 m g)
+fit on the 50 cars without CZ aero maps (AeroData 7 / 8): the other 21 make their downforce in maps the wings' CL.A does not see
+scatter (wing-only cars, sorted by s):  s*1e4  aero_hint
+    -1.015  0.9485  ks_caterham_485_csr
+    -0.304  0.9452  ks_caterham_academy
+    -0.236  0.9754  ks_datsun_240z_fairlady
+    -0.234  0.9494  ks_mazda_mx5_nd_cup
+    -0.224  1.0057  ks_lamborghini_countach
+    -0.204  0.9683  ks_mini_jcs_1990
+    -0.182  0.9750  ks_mazda_mx5_na
+    -0.150  0.9407  ks_alfa_romeo_giulia_gta_sprint
+    -0.133  0.9653  ks_audi_rs_3_sportback
+    -0.131  0.9678  ks_toyota_gr86
+    -0.127  0.9500  ks_volkswagen_golf_gti_mk1
+    -0.119  0.9993  ks_bmw_m2_coupe
+    -0.101  0.9494  ks_alfa_romeo_75_turbo_evo
+    -0.088  0.9472  ks_audi_rs_6_avant
+    -0.065  0.9646  ks_volkswagen_golf_r_mk8
+    -0.058  0.9260  ks_ford_escort_rs_cosworth
+    -0.056  0.9698  ks_ferrari_288_gto
+    -0.050  0.8963  ks_bmw_m2_cs_racing
+    -0.049  0.9185  ks_hyundai_i30_n_hb
+    -0.044  0.9302  ks_toyota_ae86_sprinter_trueno
+    -0.040  0.9607  ks_abarth_695_biposto
+    -0.039  1.0397  ks_bmw_m8_competition
+    -0.034  0.9820  ks_honda_nsx_r
+    -0.031  0.9123  ks_honda_s2000_ap1
+    -0.030  0.9338  ks_toyota_supra_mkiv
+    -0.029  0.9127  ks_alpine_a290_b
+    -0.027  0.9758  ks_bmw_m3_e46_csl
+    -0.024  0.9721  ks_mazda_rx7_fd
+    -0.004  0.9010  ks_bmw_m3_e30_evo_iii
+     0.000  0.9122  ks_renault_5_gt_turbo
+     0.013  0.9723  ks_audi_sport_quattro
+     0.016  0.9993  ks_bmw_m4_csl
+     0.023  0.9245  ks_porsche_964_turbo_3_6
+     0.027  0.9372  ks_alpine_a110_s
+     0.039  0.9584  ks_lancia_delta_hf_integrale_evo_ii
+     0.044  0.9327  ks_alfa_romeo_junior
+     0.100  0.9580  ks_audi_r8_v10_performance
+     0.125  0.9712  ks_peugeot_205_t16
+     0.126  0.9519  ks_lotus_emira
+     0.167  0.9773  ks_volkswagen_golf_gti_mk8
+     0.190  0.9803  ks_alfa_romeo_giulia_gtam
+     0.211  0.9292  ks_mercedes_190e_evo_ii
+     0.211  0.9962  ks_lotus_exige_v6_cup
+     0.381  1.0217  ks_ferrari_296_gtb
+     0.499  1.0702  ks_ferrari_daytona_sp3
+     0.668  1.0867  ks_ferrari_f40_lm
+     0.736  1.0157  ks_lamborghini_huracan_sto
+     1.064  0.9865  ks_porsche_992_gt3_rs
+     2.306  1.4416  ks_ferrari_f2004
+     6.573  1.5274  ks_ferrari_sf_25
+A  a + b s           a 0.9661846580562213 b 953.254076311785 s^2/m^2 (= x at 30.87 m/s)  median|res| 0.0262 rms 0.0522
+B  a (1 + s V^2)^n_y  a 0.9660119477187799 V 33.65 m/s (least squares over V)  median|res| 0.0259 rms 0.0520
+chosen: A
+stock aero_hint min 0.8946198225021362 max 1.5273633003234863 (all 71 cars) -> clamp 0.8313454747200012 .. 1.5906376481056212
+chosen model over the wing-only cars: median residual -0.0040, median|res| 0.0262, p10 / p90 residual -0.0543 / +0.0564
+  (aero-map cars, for reference: median residual +0.1039)
+
+## lateral_G_lowspeed_plateau_end (physics_hints 5.1) vs mu_y
+mu_y: the default compound's static-load lateral mu D_y (Fz/Fz0)^(n_y - 1), averaged over the axles by weight
+scatter (sorted by mu_y):  mu_y  plateau
+  1.0359  0.7723  ks_mazda_mx5_na
+  1.0399  1.0531  ks_abarth_695_biposto
+  1.1911  0.9253  ks_lancia_delta_hf_integrale_evo_ii
+  1.1995  1.0226  ks_alfa_romeo_giulia_gta_sprint
+  1.2012  1.0931  ks_volkswagen_golf_r_mk8
+  1.2032  0.9383  ks_datsun_240z_fairlady
+  1.2051  0.9889  ks_ford_escort_rs_cosworth
+  1.2056  0.9774  ks_bmw_m3_e30_evo_iii
+  1.2102  0.7908  ks_alfa_romeo_75_turbo_evo
+  1.2113  0.9858  ks_hyundai_i30_n_hb
+  1.2113  0.9844  ks_volkswagen_golf_gti_mk8
+  1.2130  0.8958  ks_audi_sport_quattro
+  1.2194  1.0113  ks_audi_rs_6_avant
+  1.2208  0.9893  ks_honda_s2000_ap1
+  1.2212  1.0554  ks_audi_rs_3_sportback
+  1.2239  0.9716  ks_porsche_964_turbo_3_6
+  1.2245  0.9089  ks_peugeot_205_t16
+  1.2284  0.9930  ks_mercedes_190e_evo_ii
+  1.2308  1.0216  ks_honda_nsx_r
+  1.2312  1.1064  ks_bmw_m3_e46_csl
+  1.2326  1.0011  ks_alpine_a290_b
+  1.2336  1.0732  ks_lamborghini_countach
+  1.2338  1.0309  ks_mazda_rx7_fd
+  1.2345  1.1413  ks_audi_r8_v10_performance
+  1.2365  0.8100  ks_volkswagen_golf_gti_mk1
+  1.2398  1.0477  ks_chevrolet_camaro_zl1
+  1.2429  0.9027  ks_toyota_ae86_sprinter_trueno
+  1.2461  0.8655  ks_renault_5_gt_turbo
+  1.2463  1.0740  ks_toyota_supra_mkiv
+  1.2518  1.0239  ks_alpine_a110_s
+  1.2527  1.0713  ks_ferrari_288_gto
+  1.2613  0.9732  ks_alfa_romeo_junior
+  1.2708  0.9901  ks_toyota_gr86
+  1.2848  1.2193  ks_porsche_992_gt3_rs
+  1.2930  1.0670  ks_alfa_romeo_giulia_gtam
+  1.2992  1.0332  ks_mini_jcs_1990
+  1.3113  1.1761  ks_lamborghini_huracan_sto
+  1.3115  1.0743  ks_lotus_exige_v6_cup
+  1.3124  1.1358  ks_porsche_718_cayman_gt4_rs
+  1.3235  1.0766  ks_caterham_academy
+  1.3462  1.0809  ks_bmw_m8_competition
+  1.3540  1.1189  ks_bmw_m2_coupe
+  1.3613  1.1537  ks_ferrari_296_gtb
+  1.3619  1.1189  ks_bmw_m4_csl
+  1.3825  1.1648  ks_caterham_485_csr
+  1.3844  1.0152  ks_lotus_emira
+  1.4073  1.2136  ks_ferrari_daytona_sp3
+  1.4311  1.1667  ks_dallara_stradale_coupe
+  1.4439  1.2761  ks_mazda_mx5_nd_cup
+  1.4511  1.2690  ks_bmw_m2_cs_racing
+  1.4804  1.3604  ks_audi_r8_lms_gt4_evo
+  1.4807  1.2989  ks_ferrari_488_challenge_evo
+  1.4875  1.3493  ks_porsche_935
+  1.4897  1.2968  ks_porsche_718_cayman_gt4_cs_mr
+  1.4904  1.3493  ks_porsche_991ii_gt2_rs_clubsport_evo
+  1.4920  1.3460  ks_mercedes_amg_gt2
+  1.4922  1.3595  ks_maserati_mc20_gt2
+  1.4933  1.3402  ks_lamborghini_huracan_st_evo2
+  1.4968  1.5151  ks_dallara_exp
+  1.5017  1.3266  ks_porsche_992_gt3_cup
+  1.5028  1.3914  ks_audi_r8_lms_gt2
+  1.5099  1.3806  ks_bmw_m4_gt3
+  1.5121  1.4500  ks_audi_r8_lms_gt3_evo_2
+  1.5129  1.4305  ks_porsche_992_gt3_r_rennsport
+  1.5130  1.4464  ks_ferrari_296_gt3
+  1.5131  1.4124  ks_ford_mustang_gt3
+  1.5155  1.4327  ks_ktm_x_bow_gt2
+  1.5321  1.4367  ks_ktm_x_bow_gt4
+  1.5362  1.4337  ks_ferrari_f40_lm
+  1.9746  1.8620  ks_ferrari_f2004
+  2.0278  2.0063  ks_ferrari_sf_25
+A  k mu_y            k 0.8525040077349786 (median ratio)  median|res| 0.0671 rms 0.1045
+B  a + b mu_y        a -0.5324522251768861 b 1.2523329716945453  median|res| 0.0388 rms 0.0796
+C  c mu_y^p          c 0.7487053782920808 p 1.4291870013562373 (least squares in logs)  median|res| 0.0410 rms 0.0799
+chosen: B
+stock plateau min 0.7723210453987122 max 2.006263494491577 -> clamp 0.6489268004894256 .. 2.1296577394008636
+chosen model: median residual +0.0003, median|res| 0.0388, p10 / p90 -0.0908 / +0.0841
+
+## plateau start / end and tyre slips (stock medians)
+  low start / end g (4.1 / 5.1)                    median 0.9936439966494767  p10 0.9854  p90 0.9985
+  high start / end g (6.1 / 7.1)                   median 0.9954129522668582  p10 0.9871  p90 0.9992
+  high end / low end / aero_hint (7.1 / 5.1 / 1)   median 0.9989696003197348  p10 0.9923  p90 1.0028
+  slip low start / low end (4.2 / 5.2)             median 0.8708935561156503  p10 0.7625  p90 0.9371
+  slip high start / low end (6.2 / 5.2)            median 0.7637807288034041  p10 0.6481  p90 0.9154
+  slip high end / low end (7.2 / 5.2)              median 0.9167709543311205  p10 0.7799  p90 0.9964
+  slip at the low-speed plateau end (5.2): best mu_y split 1.230845746819114: median 1.7680517435073853 at or below (19 cars), 1.1330105066299438 above (52 cars); median|res| 0.2316 (one median for all: 0.3849)
+
+## acceleration_G_braking (physics_hints 11) vs mu_x and T / (r m g)
+mu_x like mu_y; T the brake torque (BrakesData 1), r the mean tyre radius
+scatter (sorted by T/(r m g)):  T/(r m g)  mu_x  braking
+  0.3938  1.2578  0.5291  ks_datsun_240z_fairlady
+  0.4599  1.2300  0.6620  ks_alfa_romeo_giulia_gta_sprint
+  0.4854  1.2617  0.9214  ks_audi_sport_quattro
+  0.5120  1.2946  1.0437  ks_toyota_supra_mkiv
+  0.5264  1.2726  0.6489  ks_peugeot_205_t16
+  0.5270  1.2855  0.7633  ks_volkswagen_golf_gti_mk1
+  0.5455  1.2810  1.0913  ks_mazda_rx7_fd
+  0.5550  1.2881  0.8570  ks_toyota_ae86_sprinter_trueno
+  0.5585  1.2830  1.0994  ks_alpine_a290_b
+  0.5723  1.3558  0.6160  ks_caterham_academy
+  0.5773  1.2776  1.1371  ks_audi_rs_6_avant
+  0.5854  1.2850  0.7654  ks_lamborghini_countach
+  0.5942  1.2737  0.8415  ks_porsche_964_turbo_3_6
+  0.5998  1.4286  1.2884  ks_ferrari_296_gtb
+  0.6095  1.2863  1.0622  ks_audi_r8_v10_performance
+  0.6105  1.4106  0.7707  ks_caterham_485_csr
+  0.6119  1.4601  1.0566  ks_lotus_emira
+  0.6344  1.2697  0.9436  ks_honda_s2000_ap1
+  0.6371  1.3218  1.0436  ks_toyota_gr86
+  0.6429  1.3621  1.3184  ks_porsche_718_cayman_gt4_rs
+  0.6500  1.3372  0.7320  ks_mini_jcs_1990
+  0.6520  1.2975  0.8179  ks_ferrari_288_gto
+  0.6767  1.2529  1.1942  ks_volkswagen_golf_r_mk8
+  0.6813  1.4098  1.1353  ks_bmw_m8_competition
+  0.6822  1.2887  0.6596  ks_renault_5_gt_turbo
+  0.6922  1.2416  0.9724  ks_lancia_delta_hf_integrale_evo_ii
+  0.6932  1.4307  1.0936  ks_bmw_m4_csl
+  0.6942  1.2611  1.0501  ks_volkswagen_golf_gti_mk8
+  0.6942  1.2556  1.0030  ks_bmw_m3_e30_evo_iii
+  0.6943  1.4812  1.4115  ks_ferrari_daytona_sp3
+  0.6971  1.4205  1.0936  ks_bmw_m2_coupe
+  0.6989  1.5531  1.4302  ks_lamborghini_huracan_st_evo2
+  0.7055  1.2711  1.1282  ks_audi_rs_3_sportback
+  0.7106  1.2596  0.8072  ks_alfa_romeo_75_turbo_evo
+  0.7137  1.3168  1.0104  ks_alfa_romeo_junior
+  0.7196  1.3570  1.1059  ks_lotus_exige_v6_cup
+  0.7290  1.2611  1.0471  ks_hyundai_i30_n_hb
+  0.7318  1.2552  1.0194  ks_ford_escort_rs_cosworth
+  0.7360  1.5151  1.2499  ks_bmw_m2_cs_racing
+  0.7378  1.2946  1.0091  ks_alpine_a110_s
+  0.7390  1.3457  1.0742  ks_alfa_romeo_giulia_gtam
+  0.7471  1.0183  0.9417  ks_abarth_695_biposto
+  0.7540  1.5043  1.1556  ks_mazda_mx5_nd_cup
+  0.7559  1.2922  1.1424  ks_chevrolet_camaro_zl1
+  0.7653  1.2757  0.9458  ks_mercedes_190e_evo_ii
+  0.7711  1.5531  1.0224  ks_porsche_991ii_gt2_rs_clubsport_evo
+  0.7714  1.2783  0.9660  ks_bmw_m3_e46_csl
+  0.7737  1.3331  1.3457  ks_porsche_992_gt3_rs
+  0.7781  1.5504  1.0224  ks_porsche_935
+  0.7860  1.5429  1.4837  ks_audi_r8_lms_gt4_evo
+  0.8056  1.3614  1.2178  ks_lamborghini_huracan_sto
+  0.8109  1.5432  1.1983  ks_ferrari_488_challenge_evo
+  0.8160  1.5620  1.4091  ks_porsche_992_gt3_cup
+  0.8170  1.5623  1.4055  ks_audi_r8_lms_gt2
+  0.8357  0.9894  0.8233  ks_mazda_mx5_na
+  0.8625  1.5536  1.3933  ks_maserati_mc20_gt2
+  0.8683  1.5529  1.2776  ks_mercedes_amg_gt2
+  0.8713  1.5287  1.2842  ks_dallara_stradale_coupe
+  0.8793  1.5907  0.9022  ks_ferrari_f40_lm
+  0.8862  1.5498  1.4619  ks_dallara_exp
+  0.8972  1.2770  1.0258  ks_honda_nsx_r
+  0.8993  1.5692  1.3637  ks_bmw_m4_gt3
+  0.9175  1.5718  1.6387  ks_porsche_992_gt3_r_rennsport
+  0.9189  1.5717  1.6784  ks_ferrari_296_gt3
+  0.9189  1.5711  1.6174  ks_audi_r8_lms_gt3_evo_2
+  0.9189  1.5718  1.6745  ks_ford_mustang_gt3
+  0.9286  1.5722  1.5524  ks_ktm_x_bow_gt2
+  0.9374  1.5482  1.3918  ks_porsche_718_cayman_gt4_cs_mr
+  1.0745  1.5816  1.6067  ks_ktm_x_bow_gt4
+  1.4875  2.0247  1.2779  ks_ferrari_f2004
+  1.8559  2.0958  1.8076  ks_ferrari_sf_25
+A  k mu_x            k 0.812192904825356  median|res| 0.1282 rms 0.2120
+B  k T/(r m g)       k 1.5114000574269213  median|res| 0.1431 rms 0.2524
+C  min(a mu_x, b T/(r m g))  a 0.8945281017826807 b 1.5323931245658833 (least absolute deviation)  median|res| 0.1221 rms 0.1882
+D  c mu_x^p (T/(r m g))^q  c 1.0102467405745863 p 0.7053362227637959 q 0.502083954193691  median|res| 0.1239 rms 0.2070
+chosen: C
+stock braking min 0.5291200876235962 max 1.807584524154663 -> clamp 0.4012736439704895 .. 1.9354309678077697
+chosen model: median residual +0.0000, median|res| 0.1221, p10 / p90 -0.1813 / +0.2591
+
+## auto-shift rpm over the limiter
+aicardata (AiGears 1 / 5), 69 cars with a redline (electric cars: none):
+  upshift / redline      median 0.9835309617918313  min 0.9159  max 0.9889
+  downshift / redline    median 0.5716034271725826  min 0.4859  max 0.7123
+gearbox (GearBoxData.autoshifter.up / engine limiter), the same 69 cars:
+  up / limiter           median 0.9538461538461539  p10 0.8978  p90 0.9760  min 0.8333  max 0.9889
+  down_rpm_threshold (5): on 0 stock gearboxes
+
+## check.rs run: model top speed / shipped top speed (physics_hints 8)
+the 50 cars without aero maps (their drag is all in the wings): median -1.9 %, p10 -8.4 %, p90 +16.0 %

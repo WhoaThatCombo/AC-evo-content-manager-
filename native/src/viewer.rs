@@ -281,9 +281,8 @@ fn launch(args: &[String], env: &[(&str, &str)]) -> Result<(), String> {
     crate::procs::spawn_hidden_console(Path::new(&exe), args, &paths::data(), &log, env).map(|_| ())
 }
 
-/// Launch the viewer on a car, read straight out of its package.
-pub fn open_car(car_id: &str, paint: &str) -> Result<Value, String> {
-    viewer_exe().ok_or("evoview.exe not found. Put it in the tools folder next to ACECM, or set viewer_exe in Settings.")?;
+/// `<pkg> --car <id> [--base <content.kspkg>]` for a car in any package.
+fn car_args(car_id: &str) -> Result<(String, Vec<String>), String> {
     let pkg = package_for(car_id).ok_or("game install not found")?;
     let mut args = vec![pkg.clone(), "--car".into(), car_id.to_string()];
     if let Some(base) = package() {
@@ -292,10 +291,129 @@ pub fn open_car(car_id: &str, paint: &str) -> Result<Value, String> {
             args.push(base);
         }
     }
-    let env: Vec<(&str, &str)> = if paint.is_empty() { vec![] } else { vec![("EVOVIEW_PAINT", paint)] };
-    launch(&args, &env)?;
+    Ok((pkg, args))
+}
+
+/// The viewer ACECM launched last, kept with a pipe to its stdin: evoview
+/// reads `livery <stem>` lines there and switches in ~150 ms, instead of a
+/// relaunch that reloads the whole car.
+struct Running {
+    car: String,
+    paint: String,
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+}
+static RUNNING: std::sync::Mutex<Option<Running>> = std::sync::Mutex::new(None);
+
+/// Launch the viewer on a car, read straight out of its package. `livery` is
+/// a visual preset stem (EVOVIEW_VISUAL); "" = the car's default. When the
+/// viewer is already showing this car, it is switched in place.
+pub fn open_car(car_id: &str, paint: &str, livery: &str) -> Result<Value, String> {
+    let exe = viewer_exe().ok_or("evoview.exe not found. Put it in the tools folder next to ACECM, or set viewer_exe in Settings.")?;
+    let (pkg, args) = car_args(car_id)?;
+    let mut g = RUNNING.lock().unwrap();
+    if let Some(r) = g.as_mut() {
+        let alive = matches!(r.child.try_wait(), Ok(None));
+        if alive && r.car == car_id && r.paint == paint && !livery.is_empty() {
+            use std::io::Write;
+            if writeln!(r.stdin, "livery {livery}").and_then(|_| r.stdin.flush()).is_ok() {
+                set_job(car_id, "open", "");
+                return Ok(json!({"ok": true, "package": pkg, "switched": true}));
+            }
+        }
+        if !alive {
+            *g = None;
+        }
+    }
+    let log = crate::logs::log_dir().join("evoview.log");
+    let f = std::fs::File::create(&log).map_err(|e| format!("cannot open {}: {e}", log.display()))?;
+    let mut c = std::process::Command::new(&exe);
+    c.args(&args).current_dir(paths::data())
+        .stdin(std::process::Stdio::piped())
+        .stdout(f.try_clone().map_err(|e| e.to_string())?)
+        .stderr(f);
+    if !paint.is_empty() {
+        c.env("EVOVIEW_PAINT", paint);
+    }
+    if !livery.is_empty() {
+        c.env("EVOVIEW_VISUAL", livery);
+    }
+    crate::procs::hide(&mut c);
+    let mut child = c.spawn().map_err(|e| format!("could not start evoview: {e}"))?;
+    if let Some(stdin) = child.stdin.take() {
+        // an older viewer for another car keeps running, as before
+        *g = Some(Running { car: car_id.to_string(), paint: paint.to_string(), child, stdin });
+    }
     set_job(car_id, "open", "");
-    Ok(json!({"ok": true, "package": pkg}))
+    Ok(json!({"ok": true, "package": pkg, "switched": false}))
+}
+
+/// Does this evoview know --list-liveries? (its --help says so; cached per exe stamp)
+fn supports_liveries(exe: &str) -> bool {
+    static SEEN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+    let st = format!("{exe}|{}", stamp(exe));
+    if let Some((k, v)) = SEEN.lock().unwrap().as_ref() {
+        if *k == st {
+            return *v;
+        }
+    }
+    let mut c = std::process::Command::new(exe);
+    c.arg("--help").stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    crate::procs::hide(&mut c);
+    let ok = c.output().map(|o| String::from_utf8_lossy(&o.stdout).contains("--list-liveries")).unwrap_or(false);
+    *SEEN.lock().unwrap() = Some((st, ok));
+    ok
+}
+
+/// A car's liveries (visual presets): [{stem, name, number}], default first,
+/// from `evoview --list-liveries`. Cached in <data>/viewer/liveries.json on
+/// the package stamp and the viewer's, so the picker fills instantly after
+/// the first look (~0.3 s for the listing itself).
+pub fn liveries(car_id: &str) -> Value {
+    let Some(exe) = viewer_exe() else { return json!({"error": "evoview.exe not found", "liveries": []}) };
+    let (pkg, args) = match car_args(car_id) {
+        Ok(x) => x,
+        Err(e) => return json!({"error": e, "liveries": []}),
+    };
+    let key = format!("{}|{}|{}", stamp(&pkg), stamp(&exe), car_id);
+    let path = root().join("liveries.json");
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _l = LOCK.lock().unwrap();
+    let mut cache: Map<String, Value> = std::fs::read_to_string(&path).ok()
+        .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if let Some(v) = cache.get(car_id).filter(|v| v.get("key").and_then(|k| k.as_str()) == Some(key.as_str())) {
+        return json!({"liveries": v.get("liveries").cloned().unwrap_or(json!([]))});
+    }
+    // ⚠ An older evoview ignores --list-liveries and opens a window on the
+    // car instead (and output() would wait for it to close). Ask --help first.
+    if !supports_liveries(&exe) {
+        return json!({"error": "this evoview has no livery support - update it", "liveries": []});
+    }
+    let mut c = std::process::Command::new(&exe);
+    c.args(&args).arg("--list-liveries").current_dir(paths::data())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    crate::procs::hide(&mut c);
+    let out = match c.output() {
+        Ok(o) => o,
+        Err(e) => return json!({"error": format!("could not run evoview: {e}"), "liveries": []}),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    // stem<TAB>name<TAB>number; an old viewer without the flag prints none
+    let list: Vec<Value> = text.lines().filter_map(|l| {
+        let mut it = l.split('\t');
+        let stem = it.next()?.trim();
+        let name = it.next()?.trim();
+        if stem.is_empty() || stem.contains(' ') {
+            return None;
+        }
+        let number = it.next().map(str::trim).unwrap_or("");
+        Some(json!({"stem": stem, "name": name, "number": number}))
+    }).collect();
+    cache.insert(car_id.to_string(), json!({"key": key, "liveries": list}));
+    let _ = std::fs::write(&path, serde_json::to_string(&Value::Object(cache)).unwrap_or_default());
+    json!({"liveries": list})
 }
 
 /// Free-look on a track: a loose imported folder wins, else the archive.
@@ -324,11 +442,11 @@ pub fn open_track(folder: &str) -> Result<Value, String> {
     Ok(json!({"ok": true, "folder": folder, "source": src}))
 }
 
-pub fn start_open(car_id: &str, paint: &str) -> Value {
+pub fn start_open(car_id: &str, paint: &str, livery: &str) -> Value {
     set_job(car_id, "starting", "");
-    let (c, p) = (car_id.to_string(), paint.to_string());
+    let (c, p, l) = (car_id.to_string(), paint.to_string(), livery.to_string());
     std::thread::spawn(move || {
-        if let Err(e) = open_car(&c, &p) {
+        if let Err(e) = open_car(&c, &p, &l) {
             set_job(&c, "error", &e);
         }
     });

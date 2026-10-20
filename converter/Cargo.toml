@@ -1,0 +1,37 @@
+[package]
+name = "aceconv"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+description = "Assetto Corsa (AC1) -> Assetto Corsa EVO car and track converter"
+
+[dependencies]
+memmap2 = "0.9"
+anyhow = "1"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+meshopt = "0.4"
+memchr = "2"
+intel_tex_2 = "0.4"
+texture2ddecoder = "0.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tga"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+md-5 = "0.10"
+libloading = "0.8"
+indexmap = "2"
+rustc-hash = "2"
+flate2 = "1"
+lewton = { version = "0.10.2", default-features = false }
+liblzma = { version = "0.4.8", features = ["static"] }
+zstd = { version = "0.13", default-features = false }
+vorbis_rs = { version = "0.5.6", default-features = false }
+
+[[bin]]
+name = "aceconv"
+path = "src/bin/aceconv.rs"
+
+[profile.release]
+debug = 1

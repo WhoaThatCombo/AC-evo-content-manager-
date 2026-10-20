@@ -1,0 +1,6 @@
+# the converter runs on machines without the Visual C++ runtime: link it in.
+# intel_tex_2's prebuilt ASTC helper (never called here) was built against the
+# DLL runtimes: they are dropped and its one C++ import, std::_Xlength_error,
+# is defined in src/lib.rs.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/NODEFAULTLIB:msvcprt.lib", "-C", "link-arg=/NODEFAULTLIB:msvcrt.lib", "-C", "link-arg=/IGNORE:4217"]

@@ -67,6 +67,7 @@ pub fn install_content(body: &Value) -> Value {
         None => { let i = sv(body, "id"); if i.is_empty() { Vec::new() } else { vec![i] } }
     };
     let (mut need, mut seen, mut errors, mut stale, mut reg) = (Vec::new(), std::collections::HashSet::new(), Vec::new(), Vec::<String>::new(), Vec::<String>::new());
+    let mut acemods: Vec<Value> = Vec::new();
     for sid in &ids {
         let p = contentsync::plan(&base, sid);
         if p.get("ok") != Some(&json!(true)) {
@@ -76,6 +77,11 @@ pub fn install_content(body: &Value) -> Value {
         for e in p["need"].as_array().cloned().unwrap_or_default() {
             if seen.insert(sv(&e, "path")) {
                 need.push(e);
+            }
+        }
+        for a in p["acemods"].as_array().cloned().unwrap_or_default() {
+            if !acemods.iter().any(|x| x["kind"] == a["kind"] && x["name"] == a["name"]) {
+                acemods.push(a);
             }
         }
         for f in p["stale"].as_array().cloned().unwrap_or_default() {
@@ -120,7 +126,7 @@ pub fn install_content(body: &Value) -> Value {
     begin("starting", bytes);
     let n = need.len();
     std::thread::spawn(move || {
-        contentsync::install_files(&need, &JOB, &reg);
+        contentsync::install_files_with(&need, &acemods, &JOB, &reg);
         let err = JOB.lock().unwrap().get("_error").and_then(|e| e.as_str()).map(String::from);
         if let Some(e) = err {
             logs::warn(format!("content install failed: {e}"));

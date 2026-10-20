@@ -1,0 +1,12 @@
+name: word check
+# The repository must not gain the words listed in .githooks/forbidden.sh
+# (the same check the local hooks run: git config core.hooksPath .githooks).
+on:
+  push:
+  pull_request:
+jobs:
+  words:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh .githooks/check-tree.sh

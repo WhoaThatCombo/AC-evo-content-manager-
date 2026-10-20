@@ -72,6 +72,12 @@ fn cache_tag(web: &Path) -> String {
             }
         }
     }
+    // dev edition: rebuilt without a version bump, so the exe's own time too
+    if crate::edition::is_dev() {
+        if let Ok(exe) = std::env::current_exe() {
+            newest = newest.max(mtime(&exe));
+        }
+    }
     newest.to_string()
 }
 

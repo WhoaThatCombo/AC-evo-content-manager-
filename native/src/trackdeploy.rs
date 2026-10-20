@@ -342,7 +342,7 @@ pub fn deploy_native(pkg_dir: &Path, dry_run: bool, folder: Option<&str>, displa
     deploy_native_into(&server_kspkg(), pkg_dir, dry_run, folder, display_name, true)
 }
 
-fn read_entry(archive: &Path, path: &str) -> Option<Vec<u8>> {
+pub fn read_entry(archive: &Path, path: &str) -> Option<Vec<u8>> {
     let e = crate::kspkg::find_entry(archive, path).ok().flatten().or_else(|| {
         let t = path.to_lowercase();
         crate::kspkg::entries(archive).ok()?.into_iter().find(|e| e.path.to_lowercase() == t)
@@ -366,7 +366,7 @@ pub fn pack_meta(folder: &str) -> Value {
     json!({"folder": folder, "display_name": display, "layout": layout, "containers": containers})
 }
 
-fn table_write_ok(check: &Value) -> bool {
+pub fn table_write_ok(check: &Value) -> bool {
     // ⚠ only the records WE wrote are grounds to call our write bad; a
     // pre-existing header quirk elsewhere in the 120k-record client archive
     // is somebody else's
@@ -376,7 +376,7 @@ fn table_write_ok(check: &Value) -> bool {
     check["sorted"] == true && check["unique"] == true && !our_bad
 }
 
-fn forget_track_map() {
+pub fn forget_track_map() {
     let _ = std::fs::remove_file(paths::data().join("track_map.json"));
 }
 

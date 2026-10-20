@@ -33,10 +33,12 @@ pub fn defaults() -> Map<String, Value> {
         "update_repo": "",
         "update_url": "",
         "update_token": "",
-        "ui_port": 8092,
+        "ui_port": crate::edition::PORT,
         "listen": "0.0.0.0",
         "telemetry_port": 8091,
         "backend_port": 448,
+        // Convert page settings (convert.rs): ac1_root, out_dir, threads, memory_gb
+        "convert": {},
         "backend_listen": "127.0.0.1",
         "auto_proxy": true,
         "default_tcp_port": 9700,

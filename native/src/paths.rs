@@ -12,7 +12,7 @@ pub fn root() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
-    base.join("ACECM")
+    base.join(crate::edition::ROOT)
 }
 
 pub fn data() -> PathBuf {

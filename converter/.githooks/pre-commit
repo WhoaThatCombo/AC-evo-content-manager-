@@ -1,0 +1,12 @@
+#!/bin/sh
+# Reject a commit whose staged files contain a forbidden word (see forbidden.sh).
+pat=$(sh "$(git rev-parse --show-toplevel)/.githooks/forbidden.sh")
+hits=$(git diff --cached --name-only --diff-filter=ACMR -z | xargs -0 -r git grep --cached -I -n -i -E "$pat" -- 2>/dev/null)
+names=$(git diff --cached --name-only --diff-filter=ACMR | grep -i -E "$pat")
+if [ -n "$hits$names" ]; then
+    echo "pre-commit: forbidden words in the staged files:" >&2
+    [ -n "$hits" ] && echo "$hits" >&2
+    [ -n "$names" ] && echo "file names: $names" >&2
+    exit 1
+fi
+exit 0

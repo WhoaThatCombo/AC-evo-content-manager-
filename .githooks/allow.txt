@@ -1,0 +1,9 @@
+# Files that already name a third-party content directory / share protocol
+# for interoperability (its registry and share URLs, its manifest name, the
+# server-list source tag). They are checked line by line on commit like any
+# other file, but the whole-tree check skips them.
+native/src/evoreg.rs
+native/src/evoshare.rs
+acecm/web/js/02-drive.js
+acecm/web/js/09-content.js
+acecm/web/js/12-remote.js

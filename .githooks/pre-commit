@@ -1,0 +1,13 @@
+#!/bin/sh
+# Reject a commit that ADDS a forbidden word (see forbidden.sh) in any line or
+# file name. Lines that were already there are not re-judged.
+pat=$(sh "$(git rev-parse --show-toplevel)/.githooks/forbidden.sh")
+hits=$(git diff --cached -U0 --no-color --diff-filter=ACMR | grep '^+' | grep -v '^+++ ' | grep -i -E "$pat")
+names=$(git diff --cached --name-only --diff-filter=ACR | grep -i -E "$pat")
+if [ -n "$hits$names" ]; then
+    echo "pre-commit: forbidden words in the staged changes:" >&2
+    [ -n "$hits" ] && echo "$hits" >&2
+    [ -n "$names" ] && echo "file names: $names" >&2
+    exit 1
+fi
+exit 0

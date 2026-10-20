@@ -1,6 +1,6 @@
 # Assetto Corsa EVO Content Manager
 
-ACECM is a desktop manager for [Assetto Corsa EVO](https://store.steampowered.com/app/3058630): install cars and tracks, run a dedicated server, and join it from Drive. It is built for the same job Content Manager does for the original Assetto Corsa — content, hosting, and getting you on track without fighting the stock launcher.
+ACECM is a desktop manager for [Assetto Corsa EVO](https://store.steampowered.com/app/3058630): install cars and tracks, convert cars and tracks from the original Assetto Corsa, run a dedicated server, and join it from Drive. It is built for the same job Content Manager does for the original Assetto Corsa — content, hosting, and getting you on track without fighting the stock launcher.
 
 Runs on Windows 10/11 with Edge WebView2 (included with Windows 11). The
 latest version is on the [Releases](https://github.com/WhoaThatCombo/AC-evo-content-manager-/releases/latest)
@@ -124,6 +124,7 @@ window instead. Nothing to install either way.
 2. **Lobby** (Backend): start **proxy** and apply the redirect, then launch the game from ACECM. Steam “Verify integrity of game files” restores the original lobby URL; launch from ACECM again after that.
 3. **Drive**: pick a car and a track, then Drive for single-player, or start **My server** and join it from Drive.
 4. Drop a car or track archive onto any page to install. The same files again ask before overwrite.
+5. **Convert**: pick an Assetto Corsa car or track from the grid and press Convert. It is checked and put in the game, ready to drive.
 
 ## Features
 
@@ -149,9 +150,24 @@ Drop a car mod or a track pack onto **any** page.
 
 The library can delete items and export them, including tracks in the same multiplayer pack format you can drop back in. AI splines (`.ideal_line` / `.pitlane`) are copied next to the server when the client or the import has them.
 
+### Convert (Assetto Corsa → EVO)
+
+Turns cars and tracks from the original Assetto Corsa installed on your PC into AC EVO mods. The converter is built into ACECM and its source is in [`converter/`](converter/) (GPL-3.0-or-later).
+
+- **Cars**: body, LODs, materials and liveries, wheels and tyres, physics (engine, turbo, gearbox, RWD / FWD / AWD drivetrains, suspension, tyres, aero, setup ranges), lights, shift lights, dash and gauges, cameras, exhaust effects, the seated driver, car animations and sound (AC1 FMOD banks rebuilt as EVO banks).
+- **Tracks**: every layout, surfaces and collision, materials, AI lines, pits and the pit limiter, grid / pit / hotlap spots, timing, TV cameras, DRS zones, the dynamic (rubbering) track, baked lighting, 3D trees and grass, CSP lights, and the track pictures and maps.
+- Every conversion is checked before anything is installed, and the result (errors / warnings) is shown. Nothing that fails the check is put in the game.
+- Nothing from either game is shipped: the base car and the material / sound templates are built once from **your own** AC EVO install, the first time you convert.
+- Converting again replaces the earlier version, and earlier conversions of the same car or track are offered for replacement. Replacing a car also resets the game's saved cameras and mirrors for it (the settings files are backed up first).
+- A track is added to the game's track list only when you ask, with the game closed, using the same backed-up and verified writer as track deploy.
+- Cars and tracks protected by their authors (CSP encryption) are marked and not converted.
+- Runs in the background at low priority: half your CPU cores by default, fewer when memory is short (both adjustable).
+
+The converter is new: tracks have had less in-game testing than cars, and the result depends on the source car / track. Please report anything that looks or drives wrong, with the name and the newest log from `Saved Games\ACE\Logs`.
+
 ### Garage and tracks
 
-- **Cars** is the list the *dedicated server* can load. That is the list that matters for a join. Open a car in **evoview** (shipped inside `ACECM.exe`); it reads the `.kspkg` in place and does not extract the package.
+- **Cars** is the list the *dedicated server* can load. That is the list that matters for a join. Open a car in **evoview** (shipped inside `ACECM.exe`); it reads the `.kspkg` in place and does not extract the package. The viewer switches liveries in place (also from the car page), shows body kits and the seated driver, and has a drive / demo mode with suspension, lights, live dash and effects.
 - **Tracks** use the same index as the launcher’s `EVENT_IDX` (for example Touristenfahrten is 18, not 0). Custom tracks appear alongside stock layouts after install.
 
 ### Dedicated servers
@@ -176,7 +192,7 @@ Leave **proxy** on unless you need a fully offline lobby.
 ### Other
 
 - **Game settings** — read, backup, export, and restore client settings files.
-- **Share** — other ACECM users can pull the cars and tracks a server needs.
+- **Share** — other ACECM users can pull the cars and tracks a server needs. Hosts also offer a compressed copy of each: files identical to the game's own are not sent and are rebuilt from the joiner's game, so a converted car of ~580 MB downloads as ~45 MB. Every rebuilt file is checked against the host's checksums; if it cannot be rebuilt (a different game version), the normal files are downloaded instead.
 - **Logs** — ACECM and server output, with the noisy server time spam filtered.
 - **Updates** — from GitHub Releases, inside the app; each download is checked against the release signature and checksum before it replaces anything.
 
@@ -206,6 +222,13 @@ cd native && cargo run     # development build from this checkout
 The version lives in `native/Cargo.toml` and `native/tauri.conf.json`, which
 must agree; `build.py` refuses to build when they differ.
 
+The converter (`converter/`) is its own Rust crate; `native/build.rs` builds
+it and embeds `aceconv.exe` in the app. Its formats and rules are documented
+in [`converter/docs/FORMATS.md`](converter/docs/FORMATS.md), and it can be run
+on its own (`aceconv car <ac1 car> <out>`, `aceconv track <ac1 track> <out>`,
+`aceconv check-car` / `check-track`). Third-party crates and their licences
+are listed in [CREDITS.md](CREDITS.md).
+
 The older Python app that Linux 1.0.21 was built from is no longer in this
 repository; it returns when Linux is ported.
 
@@ -217,7 +240,7 @@ Contributor rules so a feature works on a **fresh `ACECM.exe`**, not only the au
 
 ## What this repository does not contain
 
-- The game, dedicated server, or any Kunos assets
+- The game, dedicated server, or any Kunos assets (the converter builds what it needs from your own install, on your machine)
 - Protobuf schemas extracted from the game binary (generated per machine on first use)
 - TLS keys (the lobby proxy creates a self-signed pair locally)
 - `config.json` and `data/` — those stay on the machine that runs ACECM

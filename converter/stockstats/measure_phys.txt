@@ -1,0 +1,19 @@
+track	collision_meshes	tris_p50	tris_p99	tris_max
+brands_hatch	0	-	-	-
+cota	0	-	-	-
+donington	0	-	-	-
+fuji	0	-	-	-
+imola	0	-	-	-
+kyalami	45	82	360	360
+laguna_seca	0	-	-	-
+monza	0	-	-	-
+mount_panorama	0	-	-	-
+nurburgring	0	-	-	-
+oulton_park	48	72	476	476
+paul_ricard	125	602	2412	2415
+redbull_ring	28	112	396	396
+sebring	47	88	358	358
+spa	264	2622	6077	6907
+suzuka	113	32	113	312
+watkins_glen	57	52	142	164
+ALL collision-only stock meshes: n 727 p50 96 p90 3550 p99 5652 max 6907

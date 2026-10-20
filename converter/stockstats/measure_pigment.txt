@@ -1,0 +1,20 @@
+track	texture	w	h	m_per_texel	lag_0.9_m	lag_1/e_m (mip <= 512)
+brands_hatch	content\tracks\brands_hatch\textures\pigment_3.texture	2048	2048	0.67	0.86	82.2
+cota	content\tracks\cota\textures\pigment_cota.texture	2048	2048	1.07	0.58	640.9
+donington	content\tracks\donington\textures\pigment.texture	2048	1024	0.78	0.98	21.8
+fuji	content\tracks\fuji\textures\pigment_fuji_2.texture	2048	2048	0.83	3.99	65.1
+imola	content\tracks\imola\textures\pigment_imola_b.texture	4096	2048	0.53	0.72	20.9
+kyalami	content\tracks\kyalami\textures\pigment.texture	2048	1024	0.93	1.73	26.4
+laguna_seca	content\tracks\common_assets\textures\terrain_variation\general_albedo.texture	(shared tiling texture, world aligned: not a map of the track)
+monza	content\tracks\monza\textures\pigment.texture	2048	4096	0.68	3.12	221.7
+mount_panorama	content\tracks\mount_panorama\textures\pigment_mount_panorama.texture	2048	2048	0.98	0.77	19.9
+nurburgring	content\tracks\common_assets\textures\terrain_variation\general_albedo.texture	(shared tiling texture, world aligned: not a map of the track)
+oulton_park	content\tracks\oulton_park\textures\pigment.texture	2048	4096	0.43	0.33	93.5
+paul_ricard	content\tracks\paul_ricard\textures\pigment.texture	4096	1024	0.63	0.66	45.8
+redbull_ring	content\tracks\redbull_ring\textures\pigment.texture	4096	2048	0.45	1.14	145.3
+sebring	content\tracks\sebring\textures\pigment.texture	2048	2048	0.73	2.13	70.9
+spa	content\tracks\spa\textures\pigment.texture	4096	4096	0.58	2.08	55.3
+suzuka	content\tracks\suzuka\textures\pigment.texture	4096	1024	0.66	1.16	39.5
+watkins_glen	content\tracks\watkins_glen\textures\pigment.texture	2048	4096	0.49	1.09	42.0
+ALL stock pigments, lag where the autocorrelation falls to 0.9 (m): n 15 min 0.33 p25 0.77 p50 1.09 p75 2.08 max 3.99
+ALL stock pigments, lag where it falls to 1/e (m): n 15 min 19.86 p25 39.55 p50 55.32 p75 93.50 max 640.90

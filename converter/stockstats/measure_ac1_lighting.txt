@@ -1,0 +1,22 @@
+colorCurves.ini (r, g, b 0..255, multiplier) -> luma x multiplier / 255
+  SUN LOW: [229.5, 168.3, 86.7, 18.0] -> 12.3826
+  SUN HIGH: [170.0, 170.0, 160.0, 20.0] -> 13.2767
+  AMBIENT LOW: [114.0, 124.0, 147.0, 8.0] -> 3.8756
+  AMBIENT HIGH: [85.0, 105.0, 128.0, 10.0] -> 4.0160
+ppfilters/default.ini TONEMAPPING EXPOSURE = 0.28
+SUN_PITCH_ANGLE over 68 track lighting.ini files (value: count):
+  35: 22
+  40: 15
+  25: 8
+  48: 7
+  0: 3
+  45: 3
+  -25: 2
+  30: 2
+  5: 1
+  6: 1
+  23: 1
+  38: 1
+  50: 1
+  160: 1
+  mode: 35

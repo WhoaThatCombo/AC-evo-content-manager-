@@ -1,0 +1,42 @@
+track	preset	extent	cells_span_x	cells_span_z	ai_span_x	ai_span_z	centre_off_ai_x	centre_off_ai_z	extent/ai_span
+brands_hatch	gp.dynamictrackpresetcompressed	6000.0	867	982	820	944	-53	60	6.358
+brands_hatch	indy.dynamictrackpresetcompressed	6000.0	867	982	820	944	-53	60	6.358
+cota	club.dynamictrackpresetcompressed	6000.0	1922	1172	1805	1069	-1434	231	3.325
+cota	national.dynamictrackpresetcompressed	6000.0	1922	1172	1805	1069	-1434	231	3.325
+cota	gp.dynamictrackpresetcompressed	6000.0	1922	1172	1805	1069	-1434	231	3.325
+donington	national.dynamictrackpresetcompressed	6000.0	1406	562	1364	528	-27	3	4.398
+donington	gp.dynamictrackpresetcompressed	6000.0	1406	562	1364	528	-27	3	4.398
+fuji	gp short.dynamictrackpresetcompressed	6000.0	1705	1640	1251	1284	-117	225	4.673
+fuji	gp.dynamictrackpresetcompressed	6000.0	1922	1781	1251	1284	-117	225	4.673
+imola	gp.dynamictrackpresetcompressed	6000.0	1856	1032	1812	1002	29	13	3.312
+kyalami	gp.dynamictrackpresetcompressed	6000.0	1523	867	1466	795	33	13	4.094
+laguna_seca	gp.dynamictrackpresetcompressed	6000.0	820	1047	787	971	11	-11	6.178
+monza	gp.dynamictrackpresetcompressed	6000.0	1382	2226	1259	2166	-230	42	2.771
+mount_panorama	gp.dynamictrackpresetcompressed	6000.0	1499	2198	1367	2156	34	3	2.783
+nurburgring	24h.dynamictrackpresetcompressed	6800.0	6109	6375	6085	6340	-191	31	1.073
+nurburgring	touristenfahrten.dynamictrackpresetcompressed	6800.0	6109	6375	6085	6340	-191	31	1.073
+nurburgring	nordschleife.dynamictrackpresetcompressed	6800.0	6109	6375	6085	6340	-191	31	1.073
+nurburgring	gp strecke.dynamictrackpresetcompressed	6800.0	6109	6375	6085	6340	-191	31	1.073
+nurburgring	sprint.dynamictrackpresetcompressed	6800.0	6109	6375	6085	6340	-191	31	1.073
+oulton_park	international.dynamictrackpresetcompressed	6000.0	750	1451	715	1429	-18	-30	4.198
+oulton_park	fosters.dynamictrackpresetcompressed	6000.0	750	1451	715	1429	-18	-30	4.198
+paul_ricard	layout 1c-v2.dynamictrackpresetcompressed	6000.0	2273	1336	2113	1224	-1558	1674	2.839
+paul_ricard	layout 1a-v2.dynamictrackpresetcompressed	6000.0	2273	1336	2113	1224	-1558	1674	2.839
+paul_ricard	layout 3c.dynamictrackpresetcompressed	6000.0	2273	1336	2113	1224	-1558	1674	2.839
+paul_ricard	layout 3a.dynamictrackpresetcompressed	6000.0	2273	1336	2113	1224	-1558	1674	2.839
+redbull_ring	national.dynamictrackpresetcompressed	6000.0	1369	885	1258	785	-28	-9	4.768
+redbull_ring	gp.dynamictrackpresetcompressed	6000.0	1369	885	1258	785	-28	-9	4.768
+sebring	gp.dynamictrackpresetcompressed	6000.0	1382	1125	1194	995	1	130	5.024
+spa	gp.dynamictrackpresetcompressed	6000.0	1530	2426	1265	2028	825	1192	2.959
+suzuka	west.dynamictrackpresetcompressed	6000.0	2230	621	2154	572	79	-7	2.785
+suzuka	gp.dynamictrackpresetcompressed	6000.0	2230	621	2154	572	79	-7	2.785
+suzuka	east.dynamictrackpresetcompressed	6000.0	2230	621	2154	572	79	-7	2.785
+watkins_glen	short inner loop.dynamictrackpresetcompressed	6000.0	750	1851	713	1756	-1435	-1075	3.417
+watkins_glen	short.dynamictrackpresetcompressed	6000.0	750	1851	713	1756	-1435	-1075	3.417
+watkins_glen	gp.dynamictrackpresetcompressed	6000.0	750	1851	713	1756	-1435	-1075	3.417
+watkins_glen	gp inner loop.dynamictrackpresetcompressed	6000.0	750	1851	713	1756	-1435	-1075	3.417
+ABOVE 6000: nurburgring/24h.dynamictrackpresetcompressed extent 6800.0 ai span 6340 extent - span 460 extent / span 1.073
+ABOVE 6000: nurburgring/touristenfahrten.dynamictrackpresetcompressed extent 6800.0 ai span 6340 extent - span 460 extent / span 1.073
+ABOVE 6000: nurburgring/nordschleife.dynamictrackpresetcompressed extent 6800.0 ai span 6340 extent - span 460 extent / span 1.073
+ABOVE 6000: nurburgring/gp strecke.dynamictrackpresetcompressed extent 6800.0 ai span 6340 extent - span 460 extent / span 1.073
+ABOVE 6000: nurburgring/sprint.dynamictrackpresetcompressed extent 6800.0 ai span 6340 extent - span 460 extent / span 1.073

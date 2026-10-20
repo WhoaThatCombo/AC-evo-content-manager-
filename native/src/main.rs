@@ -30,7 +30,7 @@ fn fail(msg: &str) -> ! {
 fn message_box(msg: &str) {
     // a GUI-subsystem exe has no console to print to
     let wide: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
-    let title: Vec<u16> = "ACECM".encode_utf16().chain(Some(0)).collect();
+    let title: Vec<u16> = acecm::edition::TITLE.encode_utf16().chain(Some(0)).collect();
     unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
             std::ptr::null_mut(), wide.as_ptr(), title.as_ptr(), 0x10);
@@ -118,6 +118,7 @@ fn main() {
     let relaunch = args.iter().any(|a| a == "--relaunch");
     let _ = take_opt(&mut args, "--updated");
     let has = |f: &str| args.iter().any(|a| a == f);
+    acecm::edition::seed_config();
 
     // setup steps: run and exit, they are not the app
     if has("--install") || has("--uninstall") {
@@ -167,7 +168,7 @@ fn main() {
                 }
                 let e = r["error"].as_str().unwrap_or("update failed").to_string();
                 acecm::logs::warn(format!("update failed: {e}"));
-                installer::messagebox(&e, "ACECM", false);
+                installer::messagebox(&e, acecm::edition::TITLE, false);
             }
         }
     }
@@ -229,6 +230,13 @@ fn main() {
     acecm::startup::run(listen.port);
     // leaked Python onefile folders from before the native build
     std::thread::spawn(|| { let _ = installer::sweep_bundles(); });
+    // fill the Convert page's car / track list caches once the window is up,
+    // so the first visit is as quick as the second (cold tracks list: ~0.5 s)
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let _ = acecm::convert::cars();
+        let _ = acecm::converttrack::tracks();
+    });
 
     // the Python backend: only for debug comparisons now (sidecar::wanted)
     let side = if sidecar::wanted() {
@@ -328,7 +336,7 @@ fn main() {
             start_background();
             WebviewWindowBuilder::new(app, "main",
                                       WebviewUrl::External(url.parse().unwrap()))
-                .title("ACECM")
+                .title(acecm::edition::TITLE)
                 .inner_size(1320.0, 860.0)
                 .min_inner_size(900.0, 600.0)
                 .build()?;

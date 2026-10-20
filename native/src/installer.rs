@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use crate::updater::{self, VERSION};
 
-const APP: &str = "ACECM";
+const APP: &str = crate::edition::APP;
 
 pub fn install_dir() -> PathBuf {
     // dev override: test installs never touch the real one

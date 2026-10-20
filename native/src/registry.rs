@@ -73,6 +73,11 @@ pub fn upsert(entry: &Value) -> Value {
     let v = Value::Object(e);
     items.push(v.clone());
     let _ = save(&items);
+    // hash what it shares and queue its compressed packages (acemod.rs) now,
+    // not when the first joiner asks
+    if let Some(sid) = id.as_str().map(String::from) {
+        std::thread::spawn(move || { let _ = manifest(&sid, "", true); });
+    }
     v
 }
 
@@ -249,13 +254,23 @@ fn track_files(folder: &str) -> Vec<(String, PathBuf)> {
         home().join("Downloads").join(folder),
     ];
     let mut out = Vec::new();
-    for root in roots {
-        if root.is_dir() {
-            walk_files(&root, &root, &mut out, folder);
-            break;
-        }
+    if let Some(root) = roots.into_iter().find(|r| r.is_dir()) {
+        walk_files(&root, &root, &mut out, folder);
     }
     out
+}
+
+/// The folder track_files() reads a track from.
+fn track_root(folder: &str) -> Option<PathBuf> {
+    if !plain_name(folder) || crate::install::safe_folder(folder) != folder {
+        return None;
+    }
+    [
+        home().join("Saved Games").join("ACE").join("mods").join("content").join("tracks").join(folder),
+        paths::data().join("track_packages").join(folder),
+        Path::new(&crate::detect::effective_server_dir()).join("track_packages").join(folder),
+        home().join("Downloads").join(folder),
+    ].into_iter().find(|r| r.is_dir())
 }
 
 fn find_entry(sid: &str) -> Option<Value> {
@@ -267,6 +282,7 @@ pub fn manifest(sid: &str, base_url: &str, digests: bool) -> Value {
     let Some(entry) = find_entry(sid) else { return json!({"ok": false, "error": "no such server"}) };
     let mut files = Vec::new();
     let mut missing = Vec::new();
+    let mut acemods = Vec::new();
     let mut total: u64 = 0;
     for (kind, names, finder) in [("mod", strs(&entry, "required_mods"), mod_files as fn(&str) -> Vec<(String, PathBuf)>),
                                   ("track", strs(&entry, "required_tracks"), track_files)] {
@@ -275,12 +291,30 @@ pub fn manifest(sid: &str, base_url: &str, digests: bool) -> Value {
             if got.is_empty() {
                 missing.push(format!("{kind} {name}"));
             }
+            // what a compressed package (acemod.rs) of this item would cover
+            let mut cover: Vec<(String, String, u64)> = Vec::new();
+            let mut pkg_src: Option<PathBuf> = None;
             for (rel, path) in got {
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 total += size;
                 let sha = if digests { file_digest(&path).unwrap_or_default() } else { String::new() };
+                if kind == "track" || rel.to_lowercase().ends_with(".kspkg") {
+                    if kind == "mod" {
+                        pkg_src = Some(path.clone());
+                    }
+                    cover.push((rel.clone(), sha.clone(), size));
+                }
                 files.push(json!({"path": rel, "size": size, "sha256": sha, "kind": kind,
                                   "url": format!("{base_url}/api/registry/file?id={sid}&path={rel}")}));
+            }
+            if digests && !cover.is_empty() {
+                let (akind, src) = if kind == "mod" { ("car", pkg_src) } else { ("track", track_root(&name)) };
+                if let Some(src) = src {
+                    let url = format!("{base_url}/api/registry/acemod?id={sid}&kind={akind}&name={name}");
+                    if let Some(a) = crate::acemod::advert(akind, &name, &src, &cover, &url) {
+                        acemods.push(a);
+                    }
+                }
             }
         }
     }
@@ -291,7 +325,7 @@ pub fn manifest(sid: &str, base_url: &str, digests: bool) -> Value {
     for k in ["id", "name", "description", "ip", "port"] {
         server.insert(k.into(), entry.get(k).cloned().unwrap_or(Value::Null));
     }
-    json!({"ok": true, "server": server, "files": files, "total_bytes": total, "missing_locally": missing})
+    json!({"ok": true, "server": server, "files": files, "total_bytes": total, "missing_locally": missing, "acemods": acemods})
 }
 
 /// Map a manifest path back to a real file; undeclared means not served.
@@ -404,6 +438,11 @@ pub fn track_pack_sha(folder: &str) -> String {
 /// Is this track folder shared on that entry? (pack requests must be)
 pub fn shares_track(sid: &str, folder: &str) -> bool {
     find_entry(sid).map(|e| strs(&e, "required_tracks").iter().any(|t| t == folder)).unwrap_or(false)
+}
+
+/// Is this car mod shared on that entry?
+pub fn shares_mod(sid: &str, name: &str) -> bool {
+    find_entry(sid).map(|e| strs(&e, "required_mods").iter().any(|t| t == name)).unwrap_or(false)
 }
 
 // ------------------------------------------------------------ public list --

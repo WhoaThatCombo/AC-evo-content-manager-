@@ -1,0 +1,7 @@
+# python tools/brightness_k.py <ks_brands_hatch convert log, ACECONV_BAKES=none ACECONV_VEGETATION=none (rendered median = class median measured as aceconv albedo does, / RENDER_TO_ALBEDO)> stockstats/measure_albedo.txt
+building: stock brands_hatch 0.296 / converted ks_brands_hatch rendered 0.208 = 1.423
+grass: stock brands_hatch 0.084 / converted ks_brands_hatch rendered 0.116 = 0.724
+kerb: stock brands_hatch 0.198 / converted ks_brands_hatch rendered 0.248 = 0.798
+other: stock brands_hatch 0.261 / converted ks_brands_hatch rendered 0.216 = 1.208
+road: stock brands_hatch 0.122 / converted ks_brands_hatch rendered 0.083 = 1.470
+K = geometric mean over 5 classes = 1.079

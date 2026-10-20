@@ -12,6 +12,7 @@ const PAGES = {
   gamesettings: ['Game settings', 'FFB, graphics, audio and bindings', gameSettingsPage],
   logs: ['Logs', 'What ACECM did, and every error in full', logsPage],
   settings: ['Settings', 'Paths and ports', settingsPage],
+  convert: ['Convert', 'Assetto Corsa cars and tracks into EVO mods', convertPage],
   // ⚠ Live map (telemetryPage, 13-telemetry.js) is deliberately NOT here:
   // telemetry is unfinished. The Servers page renders no telemetry controls
   // either, so nothing links to it - add it back here AND to Host below.
@@ -29,6 +30,7 @@ const SECTIONS = [
   { id: 'garage', label: 'Garage', pages: [['cars', 'Cars']] },
   { id: 'content', label: 'Content', pages: [['content', 'Install & share'],
                                              ['tracks', 'Tracks']] },
+  { id: 'convert', label: 'Convert', pages: [['convert', 'Cars & tracks']] },
 ];
 /* Sidebar icons: inline stroke SVG, no icon font or image to load. */
 const _ico = d => '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" '
@@ -45,6 +47,7 @@ const SECTION_ICON = {
   content: _ico('<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>'),
   settings: _ico('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/>'
     + '<circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>'),
+  convert: _ico('<path d="M4 7h12l-3-3M20 17H8l3 3"/>'),
   diagnostics: _ico('<path d="M3 12h4l3-8 4 16 3-8h4"/>'),
 };
 const SIDE_SECTIONS = [

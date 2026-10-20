@@ -1,0 +1,465 @@
+format	textures	field	headers_with_it	value	count
+2	7	f1	7	per texture	7
+2	7	f10	7	msg	7
+2	7	f10.f1	7	path drive=true sep=\ ext=png	4
+2	7	f10.f1	7	path drive=true sep=\ ext=dds	3
+2	7	f10.f2	7	per texture	7
+2	7	f10.f3	7	per texture	7
+2	7	f10.f4	7	v1	6
+2	7	f10.f4	7	v13	1
+2	7	f10.f5	7	v1	7
+2	7	f10.f6	7	v2	7
+2	7	f11	7	msg	7
+2	7	f12	7	msg	7
+2	7	f12.f1	7	v128	7
+2	7	f12.f2	7	v128	7
+2	7	f12.f3	7	v1	7
+2	7	f12.f4	7	per texture	7
+2	7	f12.f5	7	per texture	7
+2	7	f12.f7	7	list of [512]	7
+2	7	f13	7	v1	7
+2	7	f2	7	per texture	7
+2	7	f20	1	v1	1
+2	7	f3	7	per texture	7
+2	7	f4	7	v2	7
+2	7	f6	7	v1	7
+3	73	f1	73	per texture	73
+3	73	f10	73	msg	73
+3	73	f10.f1	73	path drive=true sep=\ ext=dds	39
+3	73	f10.f1	73	path drive=true sep=\ ext=png	34
+3	73	f10.f2	73	per texture	73
+3	73	f10.f3	73	per texture	73
+3	73	f10.f4	73	v1	36
+3	73	f10.f4	73	v11	13
+3	73	f10.f4	73	v12	11
+3	73	f10.f4	73	v13	8
+3	73	f10.f4	73	v10	4
+3	73	f10.f4	73	v9	1
+3	73	f10.f5	73	v1	73
+3	73	f10.f6	73	v2	71
+3	73	f10.f6	73	v3	2
+3	73	f11	73	msg	73
+3	73	f12	73	msg	73
+3	73	f12.f1	73	v128	73
+3	73	f12.f2	73	v128	73
+3	73	f12.f3	73	v1	73
+3	73	f12.f4	73	per texture	73
+3	73	f12.f5	73	per texture	73
+3	73	f12.f7	73	list of [512]	73
+3	73	f13	73	v1	73
+3	73	f2	73	per texture	73
+3	73	f20	1	v2	1
+3	73	f3	73	per texture	73
+3	73	f4	73	v3	73
+3	73	f6	73	v1	73
+5	108	f1	108	per texture	108
+5	108	f10	108	msg	108
+5	108	f10.f1	108	path drive=true sep=\ ext=png	106
+5	108	f10.f1	108	path drive=true sep=\ ext=dds	2
+5	108	f10.f2	108	per texture	108
+5	108	f10.f3	108	per texture	108
+5	108	f10.f4	108	v1	106
+5	108	f10.f4	108	v11	1
+5	108	f10.f4	108	v12	1
+5	108	f10.f5	108	v1	108
+5	108	f10.f6	108	v5	108
+5	108	f11	108	msg	108
+5	108	f12	108	msg	108
+5	108	f12.f1	108	v128	108
+5	108	f12.f2	108	v128	108
+5	108	f12.f3	108	v1	108
+5	108	f12.f4	108	per texture	108
+5	108	f12.f5	108	per texture	108
+5	108	f12.f7	108	list of [512]	108
+5	108	f13	108	v1	108
+5	108	f2	108	per texture	108
+5	108	f3	108	per texture	108
+5	108	f4	108	v5	108
+5	108	f6	108	v1	108
+6	232	f1	232	per texture	232
+6	232	f10	232	msg	232
+6	232	f10.f1	232	path drive=true sep=\ ext=png	226
+6	232	f10.f1	232	path drive=true sep=\ ext=dds	6
+6	232	f10.f2	232	per texture	232
+6	232	f10.f3	232	per texture	232
+6	232	f10.f4	232	v1	227
+6	232	f10.f4	232	v11	2
+6	232	f10.f4	232	v13	2
+6	232	f10.f4	232	v10	1
+6	232	f10.f5	232	v1	232
+6	232	f10.f6	232	v5	232
+6	232	f11	232	msg	232
+6	232	f12	232	msg	232
+6	232	f12.f1	232	v128	232
+6	232	f12.f2	232	v128	232
+6	232	f12.f3	232	v1	232
+6	232	f12.f4	232	per texture	232
+6	232	f12.f5	232	per texture	232
+6	232	f12.f7	232	list of [512]	232
+6	232	f13	232	v1	232
+6	232	f2	232	per texture	232
+6	232	f20	2	v2	2
+6	232	f3	232	per texture	232
+6	232	f4	232	v6	232
+6	232	f6	232	v1	232
+8	1	f1	1	per texture	1
+8	1	f10	1	msg	1
+8	1	f10.f1	1	path drive=true sep=\ ext=dds	1
+8	1	f10.f2	1	per texture	1
+8	1	f10.f3	1	per texture	1
+8	1	f10.f4	1	v1	1
+8	1	f10.f5	1	v1	1
+8	1	f10.f6	1	v8	1
+8	1	f11	1	msg	1
+8	1	f12	1	msg	1
+8	1	f12.f1	1	v128	1
+8	1	f12.f2	1	v128	1
+8	1	f12.f3	1	v1	1
+8	1	f12.f4	1	per texture	1
+8	1	f12.f5	1	per texture	1
+8	1	f12.f7	1	list of [512]	1
+8	1	f13	1	v1	1
+8	1	f2	1	per texture	1
+8	1	f3	1	per texture	1
+8	1	f4	1	v8	1
+8	1	f6	1	v1	1
+12	1072	f1	1072	per texture	1072
+12	1072	f10	1072	msg	1072
+12	1072	f10.f1	1072	path drive=true sep=\ ext=png	900
+12	1072	f10.f1	1072	path drive=true sep=\ ext=jpg	141
+12	1072	f10.f1	1072	path drive=true sep=\ ext=dds	30
+12	1072	f10.f1	1072	path drive=true sep=\ ext=tif	1
+12	1072	f10.f2	1072	per texture	1072
+12	1072	f10.f3	1072	per texture	1072
+12	1072	f10.f4	1072	v1	1042
+12	1072	f10.f4	1072	v13	14
+12	1072	f10.f4	1072	v12	12
+12	1072	f10.f4	1072	v11	3
+12	1072	f10.f4	1072	v14	1
+12	1072	f10.f5	1072	v1	1072
+12	1072	f10.f6	1072	v2	534
+12	1072	f10.f6	1072	v3	245
+12	1072	f10.f6	1072	v5	152
+12	1072	f10.f6	1072	v25	140
+12	1072	f10.f6	1072	v1	1
+12	1072	f11	1072	msg	1072
+12	1072	f12	1072	msg	1072
+12	1072	f12.f1	1072	v512	1072
+12	1072	f12.f2	1072	v256	1072
+12	1072	f12.f3	1072	v1	1072
+12	1072	f12.f4	1072	per texture	1072
+12	1072	f12.f5	1072	per texture	1072
+12	1072	f12.f7	1072	list of [1024]	1072
+12	1072	f13	1072	v1	1072
+12	1072	f2	1072	per texture	1072
+12	1072	f20	44	v1	43
+12	1072	f20	44	v2	1
+12	1072	f3	1072	per texture	1072
+12	1072	f4	1072	v12	1072
+12	1072	f6	1072	v1	1072
+13	2717	f1	2717	per texture	2717
+13	2717	f10	2717	msg	2717
+13	2717	f10.f1	2737	path drive=true sep=\ ext=png	2497
+13	2717	f10.f1	2737	path drive=true sep=\ ext=jpg	190
+13	2717	f10.f1	2737	path drive=true sep=\ ext=dds	49
+13	2717	f10.f1	2737	path drive=true sep=\ ext=tif	1
+13	2717	f10.f2	2717	per texture	2717
+13	2717	f10.f3	2717	per texture	2717
+13	2717	f10.f4	2717	v1	2669
+13	2717	f10.f4	2717	v13	31
+13	2717	f10.f4	2717	v12	12
+13	2717	f10.f4	2717	v11	5
+13	2717	f10.f5	2717	v1	2713
+13	2717	f10.f5	2717	v6	4
+13	2717	f10.f6	2717	v5	1292
+13	2717	f10.f6	2717	v2	1198
+13	2717	f10.f6	2717	v3	206
+13	2717	f10.f6	2717	v1	9
+13	2717	f10.f6	2717	v25	6
+13	2717	f10.f6	2717	v6	5
+13	2717	f11	2717	msg	2717
+13	2717	f12	2717	msg	2717
+13	2717	f12.f1	2717	v512	2715
+13	2717	f12.f1	2717	v256	2
+13	2717	f12.f2	2717	v256	2717
+13	2717	f12.f3	2717	v1	2717
+13	2717	f12.f4	2717	per texture	2717
+13	2717	f12.f5	2717	per texture	2717
+13	2717	f12.f6	2	v1024	2
+13	2717	f12.f7	2715	list of [1024]	2715
+13	2717	f13	2714	v1	2714
+13	2717	f2	2717	per texture	2717
+13	2717	f20	116	v2	100
+13	2717	f20	116	v1	16
+13	2717	f3	2717	per texture	2717
+13	2717	f4	2717	v13	2717
+13	2717	f6	2717	v1	2713
+13	2717	f6	2717	v6	4
+13	2717	f7	4	v1	4
+16	2	f1	2	per texture	2
+16	2	f10	2	msg	2
+16	2	f10.f1	2	path drive=true sep=\ ext=png	2
+16	2	f10.f2	2	per texture	2
+16	2	f10.f3	2	per texture	2
+16	2	f10.f4	2	v1	2
+16	2	f10.f5	2	v1	2
+16	2	f10.f6	2	v2	1
+16	2	f10.f6	2	v5	1
+16	2	f11	2	msg	2
+16	2	f12	2	msg	2
+16	2	f12.f1	2	v256	2
+16	2	f12.f2	2	v256	2
+16	2	f12.f3	2	v1	2
+16	2	f12.f4	2	per texture	2
+16	2	f12.f5	2	per texture	2
+16	2	f12.f7	2	list of [1024]	2
+16	2	f13	2	v1	2
+16	2	f2	2	per texture	2
+16	2	f20	1	v2	1
+16	2	f3	2	per texture	2
+16	2	f4	2	v16	2
+16	2	f6	2	v1	2
+17	70	f1	70	per texture	70
+17	70	f10	70	msg	70
+17	70	f10.f1	70	path drive=true sep=\ ext=png	66
+17	70	f10.f1	70	path drive=true sep=\ ext=dds	4
+17	70	f10.f2	70	per texture	70
+17	70	f10.f3	70	per texture	70
+17	70	f10.f4	70	v1	66
+17	70	f10.f4	70	v13	4
+17	70	f10.f5	70	v1	70
+17	70	f10.f6	70	v5	70
+17	70	f11	70	msg	70
+17	70	f12	70	msg	70
+17	70	f12.f1	70	v256	70
+17	70	f12.f2	70	v256	70
+17	70	f12.f3	70	v1	70
+17	70	f12.f4	70	per texture	70
+17	70	f12.f5	70	per texture	70
+17	70	f12.f7	70	list of [1024]	70
+17	70	f13	70	v1	70
+17	70	f2	70	per texture	70
+17	70	f20	3	v2	3
+17	70	f3	70	per texture	70
+17	70	f4	70	v17	70
+17	70	f6	70	v1	70
+25	38	f1	38	per texture	38
+25	38	f10	38	msg	38
+25	38	f10.f1	38	path drive=true sep=\ ext=png	38
+25	38	f10.f2	38	per texture	38
+25	38	f10.f3	38	per texture	38
+25	38	f10.f4	38	v1	38
+25	38	f10.f5	38	v1	38
+25	38	f10.f6	38	v25	38
+25	38	f11	38	msg	38
+25	38	f12	38	msg	38
+25	38	f12.f1	38	v128	38
+25	38	f12.f2	38	v64	38
+25	38	f12.f3	38	v1	38
+25	38	f12.f4	38	per texture	38
+25	38	f12.f5	38	per texture	38
+25	38	f12.f7	38	list of [1024]	38
+25	38	f13	38	v1	38
+25	38	f2	38	per texture	38
+25	38	f3	38	per texture	38
+25	38	f4	38	v25	38
+25	38	f6	38	v1	38
+26	1971	f1	1971	per texture	1971
+26	1971	f10	1971	msg	1971
+26	1971	f10.f1	2006	path drive=true sep=\ ext=png	1730
+26	1971	f10.f1	2006	path drive=true sep=\ ext=jpg	133
+26	1971	f10.f1	2006	path drive=true sep=\ ext=dds	84
+26	1971	f10.f1	2006	path drive=true sep=\ ext=hdr	56
+26	1971	f10.f1	2006	path drive=true sep=\ ext=tif	3
+26	1971	f10.f2	1971	per texture	1971
+26	1971	f10.f3	1971	per texture	1971
+26	1971	f10.f4	1971	v1	1889
+26	1971	f10.f4	1971	v11	24
+26	1971	f10.f4	1971	v13	24
+26	1971	f10.f4	1971	v12	21
+26	1971	f10.f4	1971	v10	10
+26	1971	f10.f4	1971	v9	2
+26	1971	f10.f5	1971	v1	1964
+26	1971	f10.f5	1971	v6	7
+26	1971	f10.f6	1971	v5	933
+26	1971	f10.f6	1971	v2	689
+26	1971	f10.f6	1971	v25	167
+26	1971	f10.f6	1971	v3	156
+26	1971	f10.f6	1971	v11	21
+26	1971	f10.f6	1971	v28	3
+26	1971	f11	1971	msg	1971
+26	1971	f12	1971	msg	1971
+26	1971	f12.f1	1971	v256	1971
+26	1971	f12.f2	1971	v256	1971
+26	1971	f12.f3	1971	v1	1971
+26	1971	f12.f4	1971	per texture	1971
+26	1971	f12.f5	1971	per texture	1971
+26	1971	f12.f6	5	v1024	5
+26	1971	f12.f7	1966	list of [1024]	1966
+26	1971	f13	1970	v1	1970
+26	1971	f2	1971	per texture	1971
+26	1971	f20	53	v1	53
+26	1971	f3	1971	per texture	1971
+26	1971	f4	1971	v26	1971
+26	1971	f6	1971	v1	1964
+26	1971	f6	1971	v6	7
+26	1971	f7	7	v1	7
+27	5346	f1	5346	per texture	5346
+27	5346	f10	5346	msg	5346
+27	5346	f10.f1	5351	path drive=true sep=\ ext=png	4716
+27	5346	f10.f1	5351	path drive=true sep=\ ext=jpg	580
+27	5346	f10.f1	5351	path drive=true sep=\ ext=dds	46
+27	5346	f10.f1	5351	path drive=true sep=\ ext=tif	5
+27	5346	f10.f1	5351	path drive=true sep=\ ext=hdr	4
+27	5346	f10.f2	5346	per texture	5346
+27	5346	f10.f3	5346	per texture	5346
+27	5346	f10.f4	5346	v1	5302
+27	5346	f10.f4	5346	v13	19
+27	5346	f10.f4	5346	v12	13
+27	5346	f10.f4	5346	v11	8
+27	5346	f10.f4	5346	v8	2
+27	5346	f10.f4	5346	v10	1
+27	5346	f10.f5	5346	v1	5345
+27	5346	f10.f5	5346	v6	1
+27	5346	f10.f6	5346	v2	1810
+27	5346	f10.f6	5346	v5	1487
+27	5346	f10.f6	5346	v1	1132
+27	5346	f10.f6	5346	v3	612
+27	5346	f10.f6	5346	v28	204
+27	5346	f10.f6	5346	v25	97
+27	5346	f11	5346	msg	5346
+27	5346	f12	5346	msg	5346
+27	5346	f12.f1	5346	v512	5345
+27	5346	f12.f1	5346	v256	1
+27	5346	f12.f2	5346	v256	5346
+27	5346	f12.f3	5346	v1	5346
+27	5346	f12.f4	5346	per texture	5346
+27	5346	f12.f5	5346	per texture	5346
+27	5346	f12.f6	1	v1024	1
+27	5346	f12.f7	5345	list of [1024]	5345
+27	5346	f13	5345	v1	5345
+27	5346	f2	5346	per texture	5346
+27	5346	f20	313	v1	303
+27	5346	f20	313	v2	10
+27	5346	f3	5346	per texture	5346
+27	5346	f4	5346	v27	5346
+27	5346	f6	5346	v1	5345
+27	5346	f6	5346	v6	1
+27	5346	f7	1	v1	1
+33	461	f1	461	per texture	461
+33	461	f10	461	msg	461
+33	461	f10.f1	471	path drive=true sep=\ ext=png	430
+33	461	f10.f1	471	path drive=true sep=\ ext=dds	32
+33	461	f10.f1	471	path drive=true sep=\ ext=jpg	7
+33	461	f10.f1	471	path drive=true sep=\ ext=hdr	1
+33	461	f10.f1	471	path drive=true sep=\ ext=tif	1
+33	461	f10.f2	461	per texture	461
+33	461	f10.f3	461	per texture	461
+33	461	f10.f4	461	v1	430
+33	461	f10.f4	461	v13	13
+33	461	f10.f4	461	v11	6
+33	461	f10.f4	461	v12	5
+33	461	f10.f4	461	v14	5
+33	461	f10.f4	461	v10	1
+33	461	f10.f5	461	v1	459
+33	461	f10.f5	461	v6	2
+33	461	f10.f6	461	v2	268
+33	461	f10.f6	461	v5	103
+33	461	f10.f6	461	v25	45
+33	461	f10.f6	461	v3	36
+33	461	f10.f6	461	v28	6
+33	461	f10.f6	461	v1	2
+33	461	f11	461	msg	461
+33	461	f12	461	msg	461
+33	461	f12.f1	461	v256	461
+33	461	f12.f2	461	v256	461
+33	461	f12.f3	461	v1	461
+33	461	f12.f4	461	per texture	461
+33	461	f12.f5	461	per texture	461
+33	461	f12.f6	2	v1024	2
+33	461	f12.f7	459	list of [1024]	459
+33	461	f13	459	v1	459
+33	461	f2	461	per texture	461
+33	461	f20	15	v1	15
+33	461	f3	461	per texture	461
+33	461	f4	461	v33	461
+33	461	f6	461	v1	459
+33	461	f6	461	v6	2
+33	461	f7	2	v1	2
+34	5186	f1	5186	per texture	5186
+34	5186	f10	5186	msg	5186
+34	5186	f10.f1	4934	path drive=true sep=\ ext=png	4515
+34	5186	f10.f1	4934	path drive=true sep=\ ext=dds	236
+34	5186	f10.f1	4934	path drive=true sep=\ ext=jpg	164
+34	5186	f10.f1	4934	path drive=false sep=\ ext=ai	9
+34	5186	f10.f1	4934	path drive=false sep=\ ext=png	7
+34	5186	f10.f1	4934	path drive=true sep=\ ext=bmp	2
+34	5186	f10.f2	5186	per texture	5186
+34	5186	f10.f3	5186	per texture	5186
+34	5186	f10.f4	5186	v1	4961
+34	5186	f10.f4	5186	v12	70
+34	5186	f10.f4	5186	v13	53
+34	5186	f10.f4	5186	v11	50
+34	5186	f10.f4	5186	v10	28
+34	5186	f10.f4	5186	v9	12
+34	5186	f10.f5	5186	v1	5185
+34	5186	f10.f5	5186	v6	1
+34	5186	f10.f6	5186	v5	3033
+34	5186	f10.f6	5186	v2	1401
+34	5186	f10.f6	5186	v3	499
+34	5186	f10.f6	5186	v6	182
+34	5186	f10.f6	5186	v25	51
+34	5186	f10.f6	5186	v1	11
+34	5186	f11	5186	msg	5186
+34	5186	f12	5186	msg	5186
+34	5186	f12.f1	5186	v256	5186
+34	5186	f12.f2	5186	v256	5186
+34	5186	f12.f3	5186	v1	5186
+34	5186	f12.f4	5186	per texture	5186
+34	5186	f12.f5	5186	per texture	5186
+34	5186	f12.f6	1	v1024	1
+34	5186	f12.f7	5185	list of [1024]	5185
+34	5186	f13	5185	v1	5185
+34	5186	f2	5186	per texture	5186
+34	5186	f20	148	v2	104
+34	5186	f20	148	v1	44
+34	5186	f3	5186	per texture	5186
+34	5186	f4	5186	v34	5186
+34	5186	f6	5186	v1	5185
+34	5186	f6	5186	v6	1
+34	5186	f7	1	v1	1
+35	81	f1	81	per texture	81
+35	81	f10	81	msg	81
+35	81	f10.f1	81	path drive=true sep=\ ext=png	74
+35	81	f10.f1	81	path drive=true sep=\ ext=jpg	7
+35	81	f10.f2	81	per texture	81
+35	81	f10.f3	81	per texture	81
+35	81	f10.f4	81	v1	81
+35	81	f10.f5	81	v1	81
+35	81	f10.f6	81	v2	42
+35	81	f10.f6	81	v5	21
+35	81	f10.f6	81	v3	10
+35	81	f10.f6	81	v25	8
+35	81	f11	81	msg	81
+35	81	f12	81	msg	81
+35	81	f12.f1	81	v256	81
+35	81	f12.f2	81	v256	81
+35	81	f12.f3	81	v1	81
+35	81	f12.f4	81	per texture	81
+35	81	f12.f5	81	per texture	81
+35	81	f12.f7	81	list of [1024]	81
+35	81	f13	81	v1	81
+35	81	f2	81	per texture	81
+35	81	f20	1	v1	1
+35	81	f3	81	per texture	81
+35	81	f4	81	v35	81
+35	81	f6	81	v1	81
+
+# example path drive=false sep=\ ext=ai: content\tracks\rally_munstr\ai\fast_lane.ai
+# example path drive=false sep=\ ext=png: content\tracks\tail_of_t_33\ui\preview.png
+# example path drive=true sep=\ ext=bmp: D:\Temp\tyre_marks_car.BMP
+# example path drive=true sep=\ ext=dds: X:\resources\vegetation\trees\LagunaCypress\lagunacypress_albedo.dds
+# example path drive=true sep=\ ext=hdr: X:\resources\tracks\common_assets\textures\asphalt\asphalt_rough_2\asphalt_rough_2_Displacement.hdr
+# example path drive=true sep=\ ext=jpg: X:\resources\tracks\common_assets\textures\roads\lines\alphas\white_lines_alpha_2b.jpg
+# example path drive=true sep=\ ext=png: W:\Kunos Simulazioni Dropbox\3D\3D_AC_Assets\ACE_3D_Cars_Source\0_Common\Parts\Tyres\Textures\Racing_F1_GoodYear\Tyre_Racing_GoodYear_F1_1_NM.png
+# example path drive=true sep=\ ext=tif: X:\resources\tracks\common_assets\textures\pavements\cobblestone_street_3x3\TexturesCom_Pavement_CobblestoneStreet2_3x3_4K_normal.tif

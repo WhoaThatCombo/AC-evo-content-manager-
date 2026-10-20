@@ -1,11 +1,15 @@
 [package]
 name = "acecm"
-version = "1.0.24"
+version = "1.1.0"
 edition = "2021"
 description = "Assetto Corsa EVO Content Manager - native shell"
 license = "GPL-3.0-or-later"
 publish = false
 default-run = "acecm"
+
+[features]
+# "ACECM Dev": installs and runs beside the normal ACECM (see src/edition.rs)
+dev-edition = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -37,6 +41,7 @@ md-5 = "0.10"
 ed25519-dalek = "2"
 iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel"] }
 png = "0.17"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 texture2ddecoder = "0.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = { version = "0.4", default-features = false }
@@ -57,5 +62,5 @@ panic = "abort"
 strip = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_ProcessStatus", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_ProcessStatus", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_SystemInformation"] }
 winreg = "0.55"

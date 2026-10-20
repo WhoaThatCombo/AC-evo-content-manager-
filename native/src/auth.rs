@@ -25,6 +25,7 @@ pub const SHARE_GET: &[&str] = &[
     "/api/registry/manifest",
     "/api/registry/file",
     "/api/registry/pack",
+    "/api/registry/acemod",
     "/live",
     "/live.html",
 ];

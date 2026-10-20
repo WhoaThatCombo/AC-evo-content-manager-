@@ -6,6 +6,42 @@
    a different set from cars.json above: that lists what the dedicated server
    can load, this lists what actually has geometry to show. */
 let viewFilter = '';
+
+/* Livery chips for the 3D viewer: the car's visual presets (trims / skins),
+   from `evoview --list-liveries` - cached on disk by the backend and here per
+   session, so a second look is instant. Picking one switches the viewer that
+   is already showing this car in place (evoview reads `livery <stem>` on its
+   stdin, ~150 ms), or opens it wearing that livery. The game's UI name is the
+   label; the preset stem and race number are the tooltip. */
+const liveryCache = {};
+function liveryPicker(carId, label) {
+  const box = el('div', 'livery-picker');
+  box.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px';
+  const load = liveryCache[carId]
+    || (liveryCache[carId] = api('viewer/liveries?id=' + encodeURIComponent(carId)));
+  load.then(d => {
+    const list = (d && d.liveries) || [];
+    if (list.length < 2) {
+      if (d && d.error) box.append(el('span', 'tiny dim', esc(d.error)));
+      return;
+    }
+    box.append(el('span', 'tiny dim', 'Livery'));
+    list.forEach((l, i) => {
+      const c = el('a', 'chip', esc(l.name || l.stem));
+      c.title = l.stem + (l.number ? '  ·  #' + l.number : '') + (i === 0 ? '  ·  default' : '');
+      c.onclick = async () => {
+        box.querySelectorAll('.chip').forEach(x => x.classList.remove('on'));
+        c.classList.add('on');
+        const r = await api('viewer/open', { id: carId, livery: l.stem });
+        toast(r && r.ok ? (label || carId) + ' · ' + (l.name || l.stem)
+                        : ((r && r.error) || 'could not open the viewer'), !(r && r.ok));
+      };
+      box.append(c);
+    });
+  });
+  return box;
+}
+
 async function viewerCard(p) {
   const card = el('div', 'card');
   card.innerHTML = '<h2>3D viewer</h2>'
@@ -79,7 +115,19 @@ async function viewerCard(p) {
           }
         }, 700);
       };
-      r.append(b);
+      // liveries on demand: listing every row up front would run evoview
+      // once per car on the first visit
+      const lv = el('button', 'small', 'Liveries');
+      lv.title = 'Pick a livery (visual preset) to view';
+      let picker = null;
+      lv.onclick = () => {
+        if (picker) { picker.remove(); picker = null; return; }
+        picker = liveryPicker(car.id, car.label);
+        picker.style.flexBasis = '100%';
+        r.style.flexWrap = 'wrap';
+        r.append(picker);
+      };
+      r.append(lv, b);
       list.append(r);
     });
   }
@@ -530,6 +578,7 @@ async function carsPage() {
     };
     acts.append(view, shoot);
     rightCol.append(acts);
+    if (renderable.has(m.model)) rightCol.append(liveryPicker(m.model, m.label));
 
     // ---- allowed on a server -------------------------------------------
     const pol = el('div', 'card');

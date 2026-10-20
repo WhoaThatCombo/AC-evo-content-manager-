@@ -129,6 +129,12 @@ fn autostart_proxy() {
     if !on {
         return;
     }
+    // the dev edition never takes the lobby backend away from the normal
+    // ACECM: it only starts one when nothing is listening
+    if crate::edition::is_dev() && crate::backend::state().get("listening").and_then(|v| v.as_bool()).unwrap_or(false) {
+        logs::info("auto proxy: one is already listening (left alone by the dev edition)");
+        return;
+    }
     std::thread::spawn(|| {
         let r = crate::drive::ensure_backend();
         if r["already"] == true {
