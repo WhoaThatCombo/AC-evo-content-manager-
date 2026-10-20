@@ -72,3 +72,6 @@ tools/*.py
 tools/gencert.sh
 tools/srv_nodamage_revert.json
 native/tools/*.py
+
+# the converter ships its own data tables (the data/ rule above is for ACECM runtime data)
+!converter/data/

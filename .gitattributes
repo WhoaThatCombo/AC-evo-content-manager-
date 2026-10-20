@@ -1,3 +1,6 @@
 # shell scripts and hooks run under sh: LF whatever core.autocrlf says
 *.sh text eol=lf
 .githooks/* text eol=lf
+converter/data/*.tsv text eol=lf
+converter/stockstats/*.json text eol=lf
+converter/tools/*.tsv text eol=lf

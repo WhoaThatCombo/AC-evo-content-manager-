@@ -240,7 +240,17 @@ async function convertPage() {
     mark.style.color = ok ? 'var(--accent)' : 'var(--red)';
     sg.append(el('div', 'tiny', esc(label)), el('div', 'tiny dim', text), mark);
   };
-  row3('EVO game', esc(info.game_dir || 'not found'), have.game_content);
+  {
+    const i = el('input');
+    i.value = info.game_dir || '';
+    i.placeholder = 'not found - e.g. C:\\Program Files (x86)\\Steam\\steamapps\\common\\Assetto Corsa EVO';
+    i.spellcheck = false;
+    i.title = 'The Assetto Corsa EVO install folder (the one holding content.kspkg). Same setting as in Settings.';
+    inputs.game_dir = i;
+    const mark = el('div', '', have.game_content ? '✓' : '✗');
+    mark.style.color = have.game_content ? 'var(--accent)' : 'var(--red)';
+    sg.append(el('div', 'tiny', 'EVO game folder'), i, mark);
+  }
   row3('Converter', esc(have.aceconv ? ('aceconv' + (info.converter_rev ? ' ' + info.converter_rev : '') + ' · ' + (info.threads_why || '')) : 'missing from this build'), have.aceconv);
   row3('From your game', have.donor ? 'the donor car and templates are built'
     : 'built on the first conversion from your EVO install (a minute or two, once)', true);
@@ -250,7 +260,7 @@ async function convertPage() {
     const body = {};
     for (const k in inputs) body[k] = inputs[k].value;
     const r = await api('convert/settings', body);
-    if (r.ok) { toast('Saved'); convertPage(); }
+    if (r.ok) { toast('Saved'); convertPage(); } else toast(r.error || 'could not save', true);
   };
   srow.append(save, el('span', 'tiny dim', 'Cars go to ' + esc(info.client_mods || '?')
     + ' · server: ' + esc(info.server_mods || '?')));

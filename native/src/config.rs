@@ -26,6 +26,8 @@ pub fn defaults() -> Map<String, Value> {
         "server_exe": "",
         "tools_dir": "",
         "game_exe": "",
+        // the EVO install folder (content.kspkg); empty = detected
+        "game_dir": "",
         "ace_dir": "",
         "mods_dir": "",
         "client_mods_dir": "",
