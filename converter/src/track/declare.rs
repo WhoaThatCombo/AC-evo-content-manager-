@@ -55,8 +55,21 @@ use serde_json::{json, Value};
 use super::geo::Geo;
 use crate::io::pb::{Msg, Val};
 
-/// The shared camera sequence every stock No Game Mode row lists.
+/// The shared camera sequence the newer stock circuits' No Game Mode rows
+/// list (oulton_park, paul_ricard, sebring, watkins_glen; kyalami the
+/// `_right` one; the older ones list their own world-placed
+/// `camera_sequence_practice` in the Race / Time Attack rows, which nests
+/// this one). It is what the pit menu (camera mode 10) plays: Camera
+/// entities tagged `camera_sequence` following Splines tagged
+/// `camera_spline`, with CamSeqData f5 spline_local, i.e. relative to the
+/// focused car (the exe's CameraSequence update multiplies the spline
+/// point and the camera matrix by the target's matrix). The game loads it
+/// only through a main-scene Container entity with its path (see
+/// `SceneBuilder::external`).
 pub const CAMERA_SEQUENCE: &str = "content\\tracks\\common_assets\\containers\\common_camera_sequences\\common_car_cam_sequence_left.scene";
+/// The kinds that file holds (stock brands_hatch declares the same on its
+/// `camera_sequence_car` Container entity).
+pub const CAMERA_SEQUENCE_KINDS: [&str; 4] = ["Camera", "Spline", "camera_sequence", "camera_spline"];
 
 #[derive(Clone, Debug)]
 pub struct LayoutDecl {

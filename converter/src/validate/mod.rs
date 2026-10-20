@@ -767,6 +767,8 @@ pub fn track(dir: &Path, id: &str, game: &Game) -> Result<Report> {
     check_probes(&scene, &files, &mut r);
     // containers: declared types vs what each holds
     let mut declared: Vec<String> = Vec::new();
+    // every Container entity of the main scene, own or shared: path -> kinds
+    let mut entity_kinds: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for e in entities(&scene) {
         if entity_kind(&e).as_deref() != Some("Container") {
             continue;
@@ -774,6 +776,7 @@ pub fn track(dir: &Path, id: &str, game: &Game) -> Result<Report> {
         let types: Vec<String> = e.fields.iter().filter(|f| f.num == 3).skip(1).filter_map(|f| match &f.val { Val::Bytes(b) => Some(String::from_utf8_lossy(b).into_owned()), _ => None }).collect();
         let Some(path) = e.sub(50).and_then(|p| p.sub(121)).and_then(|c| c.str(1)) else { continue };
         let pl = path.to_lowercase();
+        entity_kinds.insert(pl.clone(), types.clone());
         if !pl.starts_with(&prefix.to_lowercase()) {
             continue; // common assets (camera sequence)
         }
@@ -824,8 +827,13 @@ pub fn track(dir: &Path, id: &str, game: &Game) -> Result<Report> {
                 if l.starts_with(&prefix.to_lowercase()) && !files.keys().any(|k| k.to_lowercase() == *l) {
                     r.err(format!("row {i} lists {l}, which is not in the folder"));
                 }
-                if l.starts_with(&prefix.to_lowercase()) && !declared.contains(l) {
-                    r.err(format!("row {i} lists {l}, which the scene has no Container entity for"));
+                // the game enables only the main-scene Container entities whose
+                // path a row lists (log "[WorldGrid] Enabled Container <guid>"):
+                // a shared file without one is never loaded either
+                if !entity_kinds.contains_key(l) {
+                    r.err(format!("row {i} lists {l}, which the scene has no Container entity for - the game never loads it"));
+                } else if !l.starts_with(&prefix.to_lowercase()) && !game.has(l) {
+                    r.err(format!("row {i} lists {l}, which is neither in the folder nor in the game"));
                 }
             }
         }
@@ -874,6 +882,21 @@ pub fn track(dir: &Path, id: &str, game: &Game) -> Result<Report> {
         if let Some(o) = parsed.iter().find(|x| x.track != track_name) {
             r.err(format!("row {:?} names track {:?}, the track row {:?}", o.event, o.track, track_name));
         }
+        // the pit menu (camera mode 10) plays the `camera_sequence` cameras of
+        // the session's containers (base row + mode row): none and it shows
+        // the world from the origin, under the ground. Stock: a track's own
+        // camera_sequence_practice in the Race / Time Attack rows, or the
+        // shared car-relative sequence in No Game Mode.
+        for layout in parsed.iter().map(|x| x.layout.clone()).collect::<std::collections::BTreeSet<_>>() {
+            let base: Vec<&String> = parsed.iter().filter(|x| x.layout == layout && x.base).flat_map(|x| x.containers.iter()).collect();
+            for (mode, is) in [("Race", (|x: &decl::Row| x.race) as fn(&decl::Row) -> bool), ("Time Attack", |x: &decl::Row| x.time_attack)] {
+                let Some(row) = parsed.iter().find(|x| x.layout == layout && is(x)) else { continue };
+                let cams = base.iter().copied().chain(row.containers.iter()).any(|c| entity_kinds.get(&c.to_lowercase()).map(|k| k.iter().any(|t| t == "camera_sequence")).unwrap_or(false));
+                if !cams {
+                    r.err(format!("layout {layout:?} / {mode}: no loaded container declares camera_sequence - the pit menu has no camera (it looks out of the world origin)"));
+                }
+            }
+        }
         let lower: BTreeMap<String, &Vec<u8>> = files.iter().map(|(k, b)| (k.to_lowercase(), b)).collect();
         let read = |p: &str| -> Option<Vec<u8>> { lower.get(&p.to_lowercase()).map(|b| b.to_vec()).or_else(|| game.read(p)) };
         let _ = decl::check(&track_name, &parsed, &read, true, &mut r);
@@ -914,6 +937,7 @@ pub fn track(dir: &Path, id: &str, game: &Game) -> Result<Report> {
         r.warn(format!("{instances} ISMesh instances: more than the largest stock track ({ISMESH_TRACK_MAX})"));
     }
     check_dynamic_track(&files, &prefix, id, &mut r);
+    check_albedo(dir, &files, game, &mut r);
     check_ai_splines(&files, &prefix, &mut r);
     // lighting invariants of the static meshes + entity boxes
     let mut b2b: Vec<(usize, String)> = Vec::new();
@@ -949,6 +973,84 @@ pub fn track(dir: &Path, id: &str, game: &Game) -> Result<Report> {
         r.err("the layout container has no collision meshes - nothing to drive on".into());
     }
     Ok(r)
+}
+
+/// Material brightness against stock (`aceconv albedo`, the class rule of
+/// stats/albedo.rs and the stock bounds of track::materials::STOCK_CLASS):
+/// a material more than 20 % above its class's stock p95 is an error (the
+/// fit holds every material to p05..p95), above p95 or far below p05 a
+/// warning. And the DynamicTrack rubber layer: the shader adds the dynamic
+/// track's rubber to the Blue weight, so an unused Blue layer must be dark
+/// (a white one turns rubbered tarmac white in game).
+fn check_albedo(dir: &Path, files: &BTreeMap<String, Vec<u8>>, game: &Game, r: &mut Report) {
+    use crate::track::materials::STOCK_CLASS;
+    if let Ok(rep) = crate::stats::albedo::measure_dir(dir, Some(&game.pkg)) {
+        let (mut high, mut over, mut under) = (Vec::new(), Vec::new(), Vec::new());
+        for (name, _, class, y) in &rep.rows {
+            let Some(&(_, _, _, lo, hi)) = STOCK_CLASS.iter().find(|x| x.0 == *class) else { continue };
+            if *y > hi * 1.2 {
+                high.push(format!("{name} ({class}) {y:.3} > {:.3}", hi * 1.2));
+            } else if *y > hi + 0.002 {
+                over.push(format!("{name} ({class}) {y:.3}"));
+            } else if *y < lo * 0.8 && *y > 0.0 {
+                under.push(format!("{name} ({class}) {y:.3}"));
+            }
+        }
+        if !high.is_empty() {
+            r.err(format!("{} material(s) far brighter than any stock material of their class (stock p95 x 1.2): {}", high.len(), high.join(", ")));
+        }
+        if !over.is_empty() {
+            r.warn(format!("{} material(s) above their class's stock p95: {}", over.len(), over.join(", ")));
+        }
+        if !under.is_empty() {
+            r.warn(format!("{} material(s) well below their class's stock p05: {}", under.len(), under.join(", ")));
+        }
+    }
+    let (white, flat, lost) = road_colour_problems(files);
+    if !white.is_empty() {
+        r.err(format!("{} DynamicTrackMultilayer material(s) with an unused, bright Blue layer - the shader adds the rubber to Blue, so rubbered surfaces show it (white roads in game): {}", white.len(), white.join(", ")));
+    }
+    if !flat.is_empty() {
+        r.err(format!("{} DynamicTrack material(s) without Base_HasMap / Detail_HasMap: the shader draws them a flat Base_Basecolor (white roads in game): {}", flat.len(), flat.join(", ")));
+    }
+    if !lost.is_empty() {
+        r.err(format!("{} DynamicTrack material(s) with track textures in slots that shader never samples (Base_BaseColorMap / txDiffuse / layers / SpatMap; the road texture and its painted lines are lost): {}", lost.len(), lost.join(", ")));
+    }
+}
+
+/// The road colour checks of [`check_albedo`] on the written materials,
+/// by the game's shaders (stats/albedo.rs dynamic_track_albedo):
+/// (multilayer materials with a bright unused Blue layer, DynamicTrack
+/// materials with a flat bright colour, DynamicTrack materials carrying the
+/// track's own textures in slots the DynamicTrack shader does not read).
+pub fn road_colour_problems(files: &BTreeMap<String, Vec<u8>>) -> (Vec<String>, Vec<String>, Vec<String>) {
+    use crate::io::material::{get_prop, get_slot};
+    let (mut white, mut flat, mut lost) = (Vec::new(), Vec::new(), Vec::new());
+    let lum = |c: &[f32]| c.first().copied().unwrap_or(0.0) * 0.2126 + c.get(1).copied().unwrap_or(0.0) * 0.7152 + c.get(2).copied().unwrap_or(0.0) * 0.0722;
+    for (k, b) in files.iter().filter(|(k, _)| k.to_lowercase().ends_with(".material")) {
+        let Ok(m) = Msg::parse(b) else { continue };
+        let name = k.rsplit('\\').next().unwrap_or("").trim_end_matches(".material").to_string();
+        let on = |n: &str| get_prop(&m, n, 1).map(|v| v[0] != 0.0).unwrap_or(false);
+        match m.str(1).as_deref() {
+            Some("DynamicTrackMultilayer") => {
+                if !on("Blue_Enable") && lum(&get_prop(&m, "Blue_Basecolor", 4).unwrap_or_default()) > 0.5 {
+                    white.push(name);
+                }
+            }
+            Some("DynamicTrack") => {
+                if !on("Base_HasMap") && !on("Detail_HasMap") && lum(&get_prop(&m, "Base_Basecolor", 4).unwrap_or_default()) > 0.5 {
+                    flat.push(name.clone());
+                }
+                let own = ["Base_BaseColorMap", "txDiffuse", "Red_BaseColorMap", "Green_BaseColorMap", "Blue_BaseColorMap", "SpatMap"]
+                    .iter().any(|s| get_slot(&m, s).map(|p| !p.to_lowercase().contains("\\common_assets\\")).unwrap_or(false));
+                if own {
+                    lost.push(name);
+                }
+            }
+            _ => {}
+        }
+    }
+    (white, flat, lost)
 }
 
 pub fn print(r: &Report, what: &str) {
@@ -1055,5 +1157,33 @@ fn check_dynamic_track(files: &BTreeMap<String, Vec<u8>>, prefix: &str, id: &str
     }
     if n == 0 && frame.map(|f| f.0.is_some()).unwrap_or(false) {
         r.warn(format!("{id}.track carries a dynamic-track frame but there is no dynamic_track preset"));
+    }
+}
+
+#[cfg(test)]
+mod road_tests {
+    use super::*;
+    use crate::io::material::{set_prop, set_slot};
+
+    #[test]
+    fn white_dynamic_track_road_is_caught() {
+        // what the converter wrote before: a DynamicTrack road with the AC1
+        // texture on Base_BaseColorMap (never sampled) and Base_HasMap off
+        let mut m = Msg::default();
+        m.set_str(1, "DynamicTrack");
+        for (k, v) in [("Base_HasMap", 0.0), ("Detail_HasMap", 0.0)] {
+            set_prop(&mut m, k, &[v]);
+        }
+        set_prop(&mut m, "Base_Basecolor", &[1.0, 1.0, 1.0, 1.0]);
+        set_slot(&mut m, "Base_BaseColorMap", "content\\tracks\\x\\textures\\asph.texture");
+        let mut files = BTreeMap::new();
+        files.insert("content\\tracks\\x\\materials\\asph4.material".to_string(), m.encode());
+        let (white, flat, lost) = road_colour_problems(&files);
+        assert!(white.is_empty());
+        assert_eq!(flat, vec!["asph4".to_string()]);
+        assert_eq!(lost, vec!["asph4".to_string()]);
+        // the shader's colour for it: flat white
+        let a = crate::stats::albedo::material_albedo(&m, &|_| Some([0.2; 4])).unwrap();
+        assert_eq!(a, [1.0; 3]);
     }
 }

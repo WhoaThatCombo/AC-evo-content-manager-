@@ -176,8 +176,7 @@ fn spline_entity(name: &str, kinds: &[&str], points: &[[f32; 3]], closed: bool, 
 ///   AISplineData f5 layout_path of `layouts\<stem>.ideal_line.aisplinedata`,
 ///   the file it then loads); without it: "scene_actors collection
 ///   doesn't contain track_limits_left splines", no AI spline is loaded and
-///   the session has "no ideal line" (no simulated reference, and the pit
-///   menu's car-relative camera sequence sits at the world origin);
+///   the session has "no ideal line" (no simulated reference);
 /// - `<stem>_ideal_line` (tag `ideal_line`; stock monza / oulton tag theirs
 ///   `center_spline`, so the name is what counts): the ideal line's own
 ///   points, f11 1.055 as stock;
@@ -601,6 +600,11 @@ pub fn convert(src_dir: &Path, out_root: &Path, opt: &Options) -> Result<Convert
         let ui_dir = scan.src.layouts.get(li).and_then(|d| d.ui_json.as_ref()).and_then(|p| p.parent().map(|d| d.to_path_buf()));
         ui_files.extend(super::uiimages::write(&out, &display, &layout_names[li], ui_dir.as_deref(), &lw.line, lw.closed, lw.bounds, &mut notes)?);
     }
+    // ---- the pit menu's camera: the shared car-relative sequence every No
+    // Game Mode row lists (declare.rs) needs its Container entity here, as
+    // stock declares it (oulton_park `camera_sequence_1`; brands_hatch nests
+    // it as `camera_sequence_car` in its practice sequence)
+    b.external("camera_sequence_car", declare::CAMERA_SEQUENCE, &declare::CAMERA_SEQUENCE_KINDS);
     // ---- lighting bakes: vertex AO, irradiance volumes, pigment (bakes.rs)
     let canopies = cat.as_ref().map(|c| super::vegetation::canopies(&veg, c)).unwrap_or_default();
     let bake_lines = bake(&scan, &id, &out, &mo, &mats, &looks, &track_flags, &work.iter().map(|w| w.bounds).collect::<Vec<_>>(), canopies, &mut b)?;

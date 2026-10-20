@@ -223,6 +223,9 @@ pub fn material_albedo(m: &Msg, tex: &dyn Fn(&str) -> Option<[f32; 4]>) -> Optio
             _ => bc.unwrap_or([0.5; 3]),
         }
     };
+    if m.str(1).as_deref() == Some("DynamicTrack") {
+        return Some(dynamic_track_albedo(m, tex));
+    }
     if get_prop(m, "Base_HasBaseColorMap", 1).is_none() {
         // the simple shaders (DefaultMaterial, ...)
         return Some(colour("", "txDiffuse", "HasBaseColorMap", "Modulation_BaseColor"));
@@ -267,15 +270,60 @@ pub fn material_albedo(m: &Msg, tex: &dyn Fn(&str) -> Option<[f32; 4]>) -> Optio
     Some(a)
 }
 
+/// Clean (unrubbered, dry) mean albedo of a DynamicTrack material, as the
+/// game's DynamicTrack pixel shaders compute it (DXIL 036c4720, same
+/// Material cbuffer in 039cb520 / 03cd0bc0 / 03ff2160 / 042cd350). The
+/// shader has no albedo map of its own: no Base_BaseColorMap, txDiffuse,
+/// Red / Green / Blue layers or SpatMap (those variables are in stock
+/// DynamicTrack files but the shader never reads them). Its colour is
+///   c = Base_Basecolor, x Base_BaseMap.b when Base_HasMap (Base_BaseMap.b
+///       alone when Base_ModulateBaseColor is off; the packed "nnar" map:
+///       normal x / y, albedo, roughness),
+///   x Detail_Map.r when Detail_HasMap (x Detail_Basecolor when
+///       Detail_ModulateBaseColor),
+///   x Variation_Map.r when Variation_Enable (x Variation_Basecolor when
+///       Variation_ModulateBaseColor),
+///   x Imperfections_Map.b when Imperfections_Enable (x
+///       Imperfections_Basecolor when Imperfections_ModulateBaseColor),
+/// then lerp to Rubbering_Basecolor by the rubber and darkened when wet. So
+/// without Base_HasMap / Detail_HasMap the road is a flat Base_Basecolor
+/// (white at the default 1).
+pub fn dynamic_track_albedo(m: &Msg, tex: &dyn Fn(&str) -> Option<[f32; 4]>) -> [f32; 3] {
+    let p1 = |n: &str| get_prop(m, n, 1).map(|v| v[0]).unwrap_or(0.0);
+    let on = |n: &str| p1(n) != 0.0;
+    let rgb = |n: &str| get_prop(m, n, 4).map(|c| [c[0], c[1], c[2]]).unwrap_or([1.0; 3]);
+    let map = |slot: &str| get_slot(m, slot).filter(|s| !s.is_empty()).and_then(|s| tex(&s));
+    let mut c = rgb("Base_Basecolor");
+    if on("Base_HasMap") {
+        let a = map("Base_BaseMap").map(|t| t[2]).unwrap_or(1.0);
+        c = if on("Base_ModulateBaseColor") { c.map(|x| x * a) } else { [a; 3] };
+    }
+    let mut step = |enable: &str, slot: &str, ch: usize, modul: &str, tint: &str| {
+        if on(enable) {
+            let t = map(slot).map(|t| t[ch]).unwrap_or(1.0);
+            let k = if on(modul) { rgb(tint) } else { [1.0; 3] };
+            for i in 0..3 {
+                c[i] *= t * k[i];
+            }
+        }
+    };
+    step("Detail_HasMap", "Detail_Map", 0, "Detail_ModulateBaseColor", "Detail_Basecolor");
+    step("Variation_Enable", "Variation_Map", 0, "Variation_ModulateBaseColor", "Variation_Basecolor");
+    step("Imperfections_Enable", "Imperfections_Map", 2, "Imperfections_ModulateBaseColor", "Imperfections_Basecolor");
+    c.map(|x| x.clamp(0.0, 1.0))
+}
+
 /// A material with a parent (f20 baseMaterialPath) takes the parent's
-/// variables and slots except the ones its f21 / f22 override lists name
-/// (Renderer.proto MaterialData; stock child materials keep stale copies of
-/// everything else).
+/// variables and slots except the ones its f21 / f22 override lists flag
+/// as overridden (entry f2 = 1; Renderer.proto MaterialData). An entry with
+/// f2 = 0 is inherited: stock child materials keep stale copies, or none,
+/// of those (brands_hatch asph4 lists Base_Basecolor 1 - its own 0.342 -
+/// and Base_BaseMap 0, which it does not carry: the parent's slot holds).
 pub fn resolve(m: Msg, read: &dyn Fn(&str) -> Option<Vec<u8>>, depth: u32) -> Msg {
     let Some(parent) = m.str(20).filter(|p| !p.is_empty() && depth < 4) else { return m };
     let Some(pm) = read(&parent).and_then(|b| Msg::parse(&b).ok()) else { return m };
     let mut pm = resolve(pm, read, depth + 1);
-    let names = |f: u32| -> Vec<String> { m.subs(f).iter().filter_map(|e| e.str(1)).collect() };
+    let names = |f: u32| -> Vec<String> { m.subs(f).iter().filter(|e| e.varint(2).unwrap_or(0) != 0).filter_map(|e| e.str(1)).collect() };
     let entry_name = |v: &crate::io::pb::Val| -> Option<String> {
         match v {
             crate::io::pb::Val::Bytes(b) => Msg::parse(b).ok().and_then(|s| s.str(1)),

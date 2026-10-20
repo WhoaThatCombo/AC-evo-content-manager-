@@ -168,7 +168,7 @@ fn keywords() -> &'static HashMap<String, (Func, f64)> {
     static K: std::sync::OnceLock<HashMap<String, (Func, f64)>> = std::sync::OnceLock::new();
     K.get_or_init(|| {
         let mut k = HashMap::new();
-        for l in include_str!("../../data/lamp_tokens.tsv").lines().filter(|l| !l.starts_with('#')).skip(1) {
+        for l in include_str!("../../data/lamp_tokens.tsv").lines().map(|l| l.trim_end_matches('\r')).filter(|l| !l.starts_with('#')).skip(1) {
             let c: Vec<&str> = l.split('\t').collect();
             let (Some(kw), Some(prec)) = (c.last(), c.len().checked_sub(2).and_then(|i| c[i].parse::<f64>().ok())) else { continue };
             let f = match *kw {

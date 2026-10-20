@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | opaque, alpha-tested, blended, decal, emissive | DefaultMaterial | `common_assets\meshes\props\road_signs\common\materials\276.material` (Basecolor + Modulation_BaseColor, Emissive*, cullMode) |
 //! | AC1 multilayer | DynamicTrackMultilayer | `brands_hatch\materials\curb-grass.material` (Base / Red / Green / Blue, Splatmap_*, Detail_*) |
-//! | tarmac (road, pit) | DynamicTrack | `common_assets\materials\asphalt_dynamic_new.material` (the game's road shader: rubber, wetness) |
+//! | tarmac (road, pit) | DynamicTrackMultilayer | the same template: the AC1 road texture on Base, an unused Blue layer dark (the shader adds rubber to Blue); not DynamicTrack, which reads no albedo map of a material (see build_all) |
 //! | flashing CSP lamp | Particle | `common_assets\meshes\props\airplanes\small_plane\navigation_lights.material` (Flipbook_*) |
 //! | AC1 semaphore lamp | Semaphore | `common_assets\materials\starting_lights.material` |
 //!
@@ -41,14 +41,12 @@ use crate::io::pb::{Msg, Val};
 
 pub const T_DEFAULT: &str = "content\\tracks\\common_assets\\meshes\\props\\road_signs\\common\\materials\\276.material";
 pub const T_MULTI: &str = "content\\tracks\\brands_hatch\\materials\\curb-grass.material";
-pub const T_ROAD: &str = "content\\tracks\\common_assets\\materials\\asphalt_dynamic_new.material";
 pub const T_PARTICLE: &str = "content\\tracks\\common_assets\\meshes\\props\\airplanes\\small_plane\\navigation_lights.material";
 pub const T_SEMAPHORE: &str = "content\\tracks\\common_assets\\materials\\starting_lights.material";
 
 pub struct Templates {
     pub default: Msg,
     pub multi: Msg,
-    pub road: Msg,
     pub particle: Msg,
     pub semaphore: Msg,
     /// templates that came from the built-in fallback
@@ -104,7 +102,6 @@ impl Templates {
             m
         });
         let multi = read(T_MULTI, "DynamicTrackMultilayer").unwrap_or_else(|| builtin_layered("DynamicTrackMultilayer"));
-        let road = read(T_ROAD, "DynamicTrack").unwrap_or_else(|| builtin_layered("DynamicTrack"));
         let particle = read(T_PARTICLE, "Particle").unwrap_or_else(|| {
             let mut m = builtin("Particle", &["HasBaseColorMap", "Flipbook_Enable", "Flipbook_Columns", "Flipbook_Rows", "Flipbook_Duration", "Emissive_Intensity", "Emissive_UseBaseColorAsEmissive"]);
             set_slot(&mut m, "txDiffuse", "");
@@ -118,7 +115,7 @@ impl Templates {
             m.set_varint(2, 2);
             m
         });
-        Templates { default, multi, road, particle, semaphore, builtin: builtin_used }
+        Templates { default, multi, particle, semaphore, builtin: builtin_used }
     }
 }
 
@@ -423,7 +420,15 @@ fn layered_material(tpl: &Msg, tx: &Textures, p: &Planned, rough: f32) -> Msg {
             ("NormalScale", 1.0), ("BlendContrast", 0.0), ("HeightPow", 0.0)] {
             var(&mut m, &format!("{l}_{k}"), &[x]);
         }
-        var(&mut m, &format!("{l}_Basecolor"), &[1.0, 1.0, 1.0, 1.0]);
+        // the DynamicTrackMultilayer shader adds the dynamic track's rubber
+        // to the Blue weight (splat.z + rubber, pixel shader 036d7ad0): an unused
+        // Blue layer is what rubbered tarmac shows, so it must not be white
+        // (the default 1 made every rubbered road - a "FAST" track, the
+        // whole pit lane - near-white in game). Every multilayer we write
+        // gets it: kerbs and AC1 multilayer roads (Barber `roadtr`) are
+        // rubbered too, and an unused Blue only ever shows through rubber
+        let bc = if i == 2 && !on { RUBBER_TONE * LAYER_MEAN } else { 1.0 };
+        var(&mut m, &format!("{l}_Basecolor"), &[bc, bc, bc, 1.0]);
         if !(on && p.uv_layers) {
             var(&mut m, &format!("{l}_UVscale"), &[1.0, 1.0]);
         }
@@ -551,6 +556,12 @@ fn estimate(tx: &Textures, p: &Planned, shade: &Shade) -> [f32; 3] {
 /// Mean linear luma every layer map is normalised to (ours; its inverse,
 /// 2.5, is the Detail multiplier stock DynamicTrack materials use most).
 pub const LAYER_MEAN: f32 = 0.4;
+/// Brightness of fully rubbered tarmac relative to clean (ours): stock
+/// DynamicTrack materials blend Rubbering_Basecolor (~0.015) in at
+/// Rubbering_BaseColorStrength 0.2..0.4; at full rubber that keeps about
+/// 70 % of the clean albedo, which with the rubber weighted against a
+/// full Red layer, (1 + k) / 2 = 0.7, gives k = 0.4 for our Blue layer.
+pub const RUBBER_TONE: f32 = 0.4;
 /// A dark layer is brightened at most this much (the rest stays in the base).
 pub const LAYER_GAIN_MAX: f32 = 8.0;
 
@@ -560,14 +571,18 @@ pub const LAYER_GAIN_MAX: f32 = 8.0;
 /// class's stock materials pooled). The track's class median is scaled into
 /// p25..p75 (not for tree: its stock p25..p75 is a single value, from 1..4
 /// materials on 8 tracks, so trees keep RENDER_TO_ALBEDO); a single
-/// material never leaves p05..p95.
+/// material never leaves p05..p95. Measured with the shader-true
+/// DynamicTrack colour (stats/albedo.rs dynamic_track_albedo; stock road
+/// medians were 0.114..0.183 when the measurement read the Base_BaseColorMap
+/// that shader never samples) and parent materials resolved by their
+/// override flags (f21 / f22 entry f2).
 pub const STOCK_CLASS: [(&str, f32, f32, f32, f32); 6] = [
-    ("road", 0.114, 0.183, 0.039, 0.510),
-    ("grass", 0.161, 0.216, 0.083, 0.429),
-    ("kerb", 0.206, 0.347, 0.079, 0.419),
+    ("road", 0.052, 0.099, 0.019, 0.454),
+    ("grass", 0.169, 0.223, 0.084, 0.323),
+    ("kerb", 0.213, 0.347, 0.079, 0.419),
     ("building", 0.254, 0.283, 0.097, 0.624),
     ("tree", 0.216, 0.216, 0.034, 0.321),
-    ("other", 0.216, 0.237, 0.053, 0.564),
+    ("other", 0.216, 0.237, 0.052, 0.568),
 ];
 /// AC1 rendered linear value -> EVO albedo, before the class fit (ours,
 /// calibrated on the calibration pair ks_brands_hatch -> brands_hatch: the
@@ -598,7 +613,18 @@ fn build_all(scan: &Scan, looks: &Looks, tpl: &Templates, tx: &Textures, keys: &
         } else {
             match &looks.shade[g] {
                 Shade::Layered(_) => (layered_material(&tpl.multi, tx, p, rough), looks.shade[g].clone()),
-                Shade::Road(_) => (layered_material(&tpl.road, tx, p, rough), looks.shade[g].clone()),
+                // tarmac on DynamicTrackMultilayer, not DynamicTrack: the
+                // game's DynamicTrack pixel shaders (036c4720 and its 4
+                // variants) read no albedo map of a material - no
+                // Base_BaseColorMap, txDiffuse, layers or SpatMap - only
+                // Base_Basecolor x the stock procedural Base_BaseMap.a x
+                // Detail_Map.r (stats/albedo.rs dynamic_track_albedo). The
+                // AC1 road texture, and every line / patch painted into it,
+                // would be lost there: with Base_HasMap off the road was a
+                // flat Base_Basecolor 1 (white in game). The multilayer
+                // shader samples Base_BaseColorMap and still takes the
+                // dynamic track's rubber (on Blue) and wetness.
+                Shade::Road(_) => (layered_material(&tpl.multi, tx, p, rough), looks.shade[g].clone()),
                 s => (default_material(&tpl.default, tx, p, rough, v), s.clone()),
             }
         };
@@ -681,6 +707,44 @@ fn fit(seen: &[Option<(&'static str, f32)>]) -> (Vec<f32>, Vec<(&'static str, f3
     (factors, rep)
 }
 
+/// Scale a written material's base colour (Basecolor with
+/// Modulation_BaseColor, or Base_Basecolor on the layered shaders) by `f`,
+/// never above 1. False when the template has no such variable.
+fn tint(m: &mut Msg, f: f32) -> bool {
+    let (name, modul) = if has(m, "Base_HasBaseColorMap") { ("Base_Basecolor", "Modulation_BaseBaseColor") } else { ("Basecolor", "Modulation_BaseColor") };
+    let Some(c) = get_prop(m, name, 4) else { return false };
+    if !has(m, modul) {
+        return false;
+    }
+    set_prop(m, modul, &[1.0]);
+    let k = |x: f32| (x * f).clamp(0.0, 1.0);
+    set_prop(m, name, &[k(c[0]), k(c[1]), k(c[2]), if c[3] == 0.0 { 1.0 } else { c[3] }]);
+    true
+}
+
+/// Hold one written material inside its class's stock p05..p95 (as `aceconv
+/// albedo` measures it) through its base colour: the class fit moves the
+/// textures, but a texture shared by materials of different lifts, or one
+/// clipped by its gain, can leave a single material outside (Brands Hatch
+/// `numbers`, `bx_details` above the "other" p95). Returns a report entry
+/// when it changed something.
+fn clamp_material(m: &mut Msg, stem: &str, means: &HashMap<String, [f32; 4]>) -> Option<String> {
+    let (class, before) = measured(m, stem, means)?;
+    let &(_, _, _, lo, hi) = STOCK_CLASS.iter().find(|x| x.0 == class)?;
+    if before <= 0.0 || (lo..=hi).contains(&before) {
+        return None;
+    }
+    let mut y = before;
+    for _ in 0..4 {
+        let target = y.clamp(lo, hi);
+        if (target - y).abs() < 0.002 || !tint(m, target / y) {
+            break;
+        }
+        y = measured(m, stem, means)?.1;
+    }
+    (y != before).then(|| format!("{stem} ({class}) {before:.3} -> {y:.3}"))
+}
+
 /// Probe rounds of the brightness fit at most (the gain clips bright
 /// texels, so a scale does not move the measured albedo exactly in
 /// proportion: the fit is repeated on the re-planned textures until every
@@ -724,8 +788,13 @@ pub fn write(scan: &Scan, id: &str, out: &Path, used: &HashSet<(usize, bool, u16
     let mut by_key = HashMap::new();
     let mut shaders: HashMap<String, usize> = HashMap::new();
     let mut albedo = Vec::new();
-    for ((&(g, two, vi), p), (m, shade, stem)) in keys.iter().zip(&planned).zip(build_all(scan, looks, tpl, &tx, &keys, &planned)) {
+    let final_means = tx.probe_means(scan);
+    let mut clamped: Vec<String> = Vec::new();
+    for ((&(g, two, vi), p), (mut m, shade, stem)) in keys.iter().zip(&planned).zip(build_all(scan, looks, tpl, &tx, &keys, &planned)) {
         let v = &looks.variants[vi as usize];
+        if let Some(n) = clamp_material(&mut m, &stem, &final_means) {
+            clamped.push(n);
+        }
         std::fs::write(out.join("materials").join(format!("{stem}.material")), m.encode())?;
         let shader = m.str(1).unwrap_or_default();
         *shaders.entry(shader.clone()).or_default() += 1;
@@ -735,6 +804,9 @@ pub fn write(scan: &Scan, id: &str, out: &Path, used: &HashSet<(usize, bool, u16
     }
     let mut notes = tx.notes.clone();
     notes.push(format!("brightness: AC1 reference light, class fit to stock p25..p75: {fit_report}"));
+    if !clamped.is_empty() {
+        notes.push(format!("brightness: {} material(s) held to their class's stock p05..p95 by their base colour: {}", clamped.len(), clamped.join(", ")));
+    }
     if !tpl.builtin.is_empty() {
         notes.push(format!("templates not found in content.kspkg (built-in stand-ins used): {}", tpl.builtin.join(", ")));
     }
@@ -760,5 +832,19 @@ mod tests {
         let mut d = base_of(&t.default);
         set_render_state(&mut d, &Shade::Decal, false);
         assert_eq!(d.varint(18), Some((-5i64) as u64));
+    }
+
+    #[test]
+    fn road_rubber_layer_is_dark() {
+        // the multilayer shader adds rubber to the Blue weight: an unused
+        // Blue layer must not be white, on roads and on every other multilayer
+        let t = Templates::load(None);
+        let p = Planned { detail_mult: 1.0, ..Default::default() };
+        let tx = Textures::default();
+        let road = layered_material(&t.multi, &tx, &p, 0.8);
+        assert_eq!(road.str(1).as_deref(), Some("DynamicTrackMultilayer"));
+        let b = get_prop(&road, "Blue_Basecolor", 4).unwrap();
+        assert!((b[0] - RUBBER_TONE * LAYER_MEAN).abs() < 1e-6 && b[3] == 1.0, "{b:?}");
+        assert_eq!(get_prop(&road, "Red_Basecolor", 4).unwrap()[0], 1.0);
     }
 }

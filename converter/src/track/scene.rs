@@ -209,11 +209,15 @@ pub struct SceneBuilder {
     pub main: Scene,
     /// container stem -> scene (in creation order)
     pub containers: IndexMap<String, ContainerScene>,
+    /// Container entities for files another package holds (the shared
+    /// camera sequence of common_assets): (entity name, archive path,
+    /// kinds it declares)
+    pub external: Vec<(String, String, Vec<String>)>,
 }
 
 impl SceneBuilder {
     pub fn new(track: &str) -> SceneBuilder {
-        SceneBuilder { track: track.to_string(), ids: Ids::new(track), main: Scene::default(), containers: IndexMap::new() }
+        SceneBuilder { track: track.to_string(), ids: Ids::new(track), main: Scene::default(), containers: IndexMap::new(), external: Vec::new() }
     }
 
     pub fn container_path(&self, stem: &str) -> String {
@@ -231,6 +235,17 @@ impl SceneBuilder {
         let c = &mut self.containers[stem];
         if !c.extra.iter().any(|t| t == tag) {
             c.extra.push(tag.to_string());
+        }
+    }
+
+    /// Declare a container file that is not ours (loaded on demand through
+    /// the rows, like ours): the game enables only the main-scene Container
+    /// entities whose path a row lists, so a row naming a file without one
+    /// loads nothing (the shared camera sequence, before: the pit menu had
+    /// no camera and looked out of the world origin).
+    pub fn external(&mut self, name: &str, path: &str, kinds: &[&str]) {
+        if !self.external.iter().any(|e| e.1.eq_ignore_ascii_case(path)) {
+            self.external.push((name.to_string(), path.to_string(), kinds.iter().map(|k| k.to_string()).collect()));
         }
     }
 
@@ -272,6 +287,15 @@ impl SceneBuilder {
             let id = self.ids.of("Container", stem);
             self.main.entities.push((id, e));
             out.push((format!("containers\\{stem}.scene"), c.scene.encode()));
+        }
+        for (name, path, kinds) in std::mem::take(&mut self.external) {
+            let mut d = Msg::default();
+            d.set_str(1, &path);
+            d.set_varint(3, 1);
+            let mut e = Entity::new(&name, "Container", 121, d);
+            e.kinds.extend(kinds);
+            let id = self.ids.of("Container", &name);
+            self.main.entities.push((id, e));
         }
         out.insert(0, (format!("{}.scene", self.track), self.main.encode()));
         out
@@ -318,5 +342,21 @@ mod tests {
         let kinds: Vec<String> = c.all(3).filter_map(|v| if let Val::Bytes(b) = v { Some(String::from_utf8_lossy(b).into_owned()) } else { None }).collect();
         assert_eq!(kinds, ["Container", "SMesh", "Spline", "center_spline"]);
         assert_eq!(files[1].0, "containers\\layout_x.scene");
+    }
+
+    #[test]
+    fn external_containers_get_an_entity() {
+        let mut b = SceneBuilder::new("t");
+        b.external("camera_sequence_car", "content\\tracks\\common_assets\\x.scene", &["Camera", "camera_sequence"]);
+        b.external("again", "content\\tracks\\common_assets\\X.scene", &["Camera"]);
+        let files = b.finish();
+        let main = Msg::parse(&files[0].1).unwrap();
+        let cs: Vec<Msg> = main.subs(2).into_iter().filter(|e| matches!(e.str(1).as_deref(), Some("camera_sequence_car") | Some("again"))).collect();
+        assert_eq!(cs.len(), 1);
+        let d = cs[0].sub(50).and_then(|a| a.sub(121)).unwrap();
+        assert_eq!(d.str(1).as_deref(), Some("content\\tracks\\common_assets\\x.scene"));
+        assert_eq!(d.varint(3), Some(1));
+        let kinds: Vec<String> = cs[0].all(3).filter_map(|v| if let Val::Bytes(b) = v { Some(String::from_utf8_lossy(b).into_owned()) } else { None }).collect();
+        assert_eq!(kinds, ["Container", "Camera", "camera_sequence"]);
     }
 }

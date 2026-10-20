@@ -70,7 +70,7 @@ pub struct Country {
 /// ISO 3166-1 countries with their UN M49 sub-region and continent.
 pub fn countries() -> Vec<Country> {
     include_str!("../../data/countries.tsv")
-        .lines()
+        .lines().map(|l| l.trim_end_matches('\r'))
         .filter(|l| !l.starts_with('#') && !l.starts_with("alpha2"))
         .filter_map(|l| {
             let c: Vec<&str> = l.split('\t').collect();

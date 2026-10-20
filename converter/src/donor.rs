@@ -214,7 +214,7 @@ struct Renamer {
 impl Renamer {
     fn new() -> Renamer {
         let mut local_map = HashMap::new();
-        for l in LOCAL.lines().filter(|l| !l.is_empty()) {
+        for l in LOCAL.lines().map(|l| l.trim_end_matches('\r')).filter(|l| !l.is_empty()) {
             let (a, b) = l.split_once('\t').unwrap();
             local_map.insert(a.to_lowercase(), b.to_string());
         }
@@ -620,7 +620,7 @@ pub fn build(content: &Path) -> Result<Built> {
     let idx = index(&pkg);
     let r = Renamer::new();
     let mut files = Vec::new();
-    for line in LAYOUT.lines().filter(|l| !l.is_empty()) {
+    for line in LAYOUT.lines().map(|l| l.trim_end_matches('\r')).filter(|l| !l.is_empty()) {
         let mut it = line.split('\t');
         let (rel, kind, src) = (it.next().unwrap(), it.next().unwrap_or(""), it.next().unwrap_or(""));
         let data = match kind {

@@ -4,7 +4,8 @@
 //! imola and spa; shaders from the executable's DXIL):
 //! - main scene: one "Macro Irradiance Volume" entity (f50.f135 empty;
 //!   transform = centre and half extent of the probe grid; active-distance
-//!   override 1000) and one "Irradiance Probe" entity per volume on a full
+//!   override 100000: stock leaves it at the default or writes 10000..1e7,
+//!   never the probes' 1000) and one "Irradiance Probe" entity per volume on a full
 //!   rectangular grid (laguna 14 x 18 = 252, imola 32 x 20, spa 20 x 32);
 //! - a volume's transform position is its grid corner (y = 0); its data
 //!   (IrradianceVolumeActorData, f50.f120): f1 bounced-sky visibility
@@ -66,6 +67,9 @@ pub const AREA_MARGIN: f32 = 120.0;
 pub const GROUND_INTERVAL: f32 = 4.5;
 pub const ELEVATIONS: [f32; 3] = [1.5, 5.5, 13.5];
 pub const COLLISION_TOLERANCE: f32 = 1.5;
+/// Active-distance override of the macro volume (stock: 100000 on cota, fuji,
+/// imola, laguna_seca, spa, brands_hatch's GI bounds; 1e7 nurburgring).
+pub const MACRO_ACTIVE_DISTANCE: f32 = 100_000.0;
 pub const RAYS: usize = 48;
 pub const REACH: f32 = 250.0;
 /// Visibility -> stock texel scale (ours, calibrated).
@@ -287,7 +291,7 @@ impl Probes {
         let mut mac = Entity::new("gi_macro_volume", "Macro Irradiance Volume", 135, Msg::default());
         mac.position = [self.origin[0] + self.nx as f32 * s * 0.5, (ylo + yhi) * 0.5, self.origin[1] + self.nz as f32 * s * 0.5];
         mac.scale = [self.nx as f32 * s * 0.5, ((yhi - ylo) * 0.5 + 100.0).max(200.0), self.nz as f32 * s * 0.5];
-        mac.distance_override = Some(1000.0);
+        mac.distance_override = Some(MACRO_ACTIVE_DISTANCE);
         let macro_id = b.add(None, mac);
         // ---- per volume
         let mut texel_vals: Vec<f32> = Vec::new();

@@ -121,6 +121,74 @@ fn name_class(text: &str) -> (bool, bool) {
     (tarmac, grassy && !tarmac)
 }
 
+/// Height within which a drawn ground triangle counts as lying on a physics
+/// surface (ours: AC1 visual ground sits 0..10 cm over its invisible
+/// collision mesh; Brands Hatch's pit-box floor `concrete_box` 0..2 cm over
+/// PITS).
+const LYING_ON_M: f32 = 0.25;
+
+/// AC1 ground multilayers that are only drawn (their collision is a hidden
+/// physics mesh) take the kind of the physics surface they lie on, when it
+/// covers at least half of their upward-facing area: Brands Hatch's pit-box
+/// floor `concrete_box` (a ksMultilayer named neither asphalt nor grass)
+/// lies on PITS, and stock draws it with the road shader (DynamicTrack, its
+/// albedo in the road range), not as a building. Votes are triangle counts
+/// scaled to the material's own (so they compare with drawn-physics votes).
+fn lying_on(scan: &Scan, kinds: &[Kind], votes: &mut [std::collections::HashMap<Kind, usize>]) {
+    let multilayer = |g: usize| {
+        let m = scan.material(g);
+        m.shader.to_ascii_lowercase().starts_with("ksmultilayer") && m.blend_mode == 0 && !m.alpha_tested
+    };
+    let want: Vec<bool> = (0..scan.materials.len()).map(|g| votes[g].is_empty() && multilayer(g)).collect();
+    if !want.iter().any(|w| *w) {
+        return;
+    }
+    // every physics triangle of every layout, drivable or not
+    let mut tris = Vec::new();
+    for m in &scan.meshes {
+        let Role::Physics { surface, .. } = m.role else { continue };
+        let p = scan.positions(m);
+        for t in scan.triangles(m) {
+            tris.push(super::ground::Tri { v: [p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]], surface: surface as u16 });
+        }
+    }
+    let ground = super::ground::Ground::from_triangles(tris, vec![true; scan.surfaces.len()]);
+    if ground.is_empty() {
+        return;
+    }
+    let mut area: Vec<std::collections::HashMap<Kind, f64>> = vec![Default::default(); scan.materials.len()];
+    let mut up_area = vec![0f64; scan.materials.len()];
+    let mut ntri = vec![0usize; scan.materials.len()];
+    for m in scan.meshes.iter().filter(|m| matches!(m.role, Role::Visual) && want[m.material]) {
+        let p = scan.positions(m);
+        for t in scan.triangles(m) {
+            let (a, b, c) = (p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]);
+            let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            ntri[m.material] += 1;
+            if len < 1e-9 || n[1].abs() / len < 0.8 {
+                continue;
+            }
+            let w = len as f64 / 2.0;
+            up_area[m.material] += w;
+            let q = [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0];
+            if let Some(h) = ground.nearest(q[0], q[1], q[2]).filter(|h| (h.y - q[1]).abs() <= LYING_ON_M) {
+                *area[m.material].entry(kinds[h.surface]).or_default() += w;
+            }
+        }
+    }
+    for g in (0..scan.materials.len()).filter(|&g| want[g] && up_area[g] > 0.0) {
+        let total: f64 = area[g].values().sum();
+        if total < 0.5 * up_area[g] {
+            continue;
+        }
+        for (k, a) in &area[g] {
+            votes[g].insert(*k, ((a / up_area[g]) * ntri[g] as f64).round().max(1.0) as usize);
+        }
+    }
+}
+
 /// One class per global material of the scan.
 pub fn material_classes(scan: &Scan) -> Vec<MatClass> {
     let kinds: Vec<Kind> = scan.surfaces.iter().map(surface_kind).collect();
@@ -131,6 +199,7 @@ pub fn material_classes(scan: &Scan) -> Vec<MatClass> {
             *votes[m.material].entry(kinds[surface]).or_default() += scan.mesh(m).index_count() / 3;
         }
     }
+    lying_on(scan, &kinds, &mut votes);
     (0..scan.materials.len())
         .map(|g| {
             let mat = scan.material(g);
