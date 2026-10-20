@@ -381,3 +381,38 @@ mod tests {
         assert_eq!(class_of("curb-grass", "DefaultMaterial"), "kerb");
     }
 }
+
+/// `measure` over a track folder (`<dir>\materials\*.material`, textures
+/// from the folder, else from `pkg`): what `aceconv albedo <track dir>`
+/// prints, and what the track stage's brightness fit aims at.
+pub fn measure_dir(dir: &std::path::Path, pkg: Option<&crate::io::kspkg::Pkg>) -> std::io::Result<Report> {
+    let id = dir.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    let prefix = format!("content\\tracks\\{id}\\").to_lowercase();
+    let local = |p: &str| -> Option<std::path::PathBuf> { p.to_lowercase().strip_prefix(&prefix).map(|r| dir.join(r.replace('\\', "/"))) };
+    let mut mats = Vec::new();
+    for e in std::fs::read_dir(dir.join("materials"))?.flatten() {
+        mats.push((format!("{prefix}materials\\{}", e.file_name().to_string_lossy()), std::fs::read(e.path())?));
+    }
+    mats.sort();
+    let from_pkg = |p: &str| -> Option<Vec<u8>> { pkg.and_then(|g| g.find(p).and_then(|e| g.read(e).ok())) };
+    let page_pkg = |p: &str, i: usize| -> Option<Vec<u8>> {
+        let g = pkg?;
+        let e = g.find(p)?;
+        g.raw(e).and_then(|r| r.get(i * 65536..(i + 1) * 65536).map(|s| s.to_vec()))
+    };
+    let header = |p: &str| local(p).and_then(|f| std::fs::read(f).ok()).or_else(|| from_pkg(p));
+    let page = |p: &str, i: usize| -> Option<Vec<u8>> {
+        match local(p) {
+            Some(f) => {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut fh = std::fs::File::open(f).ok()?;
+                fh.seek(SeekFrom::Start((i * 65536) as u64)).ok()?;
+                let mut b = vec![0u8; 65536];
+                fh.read_exact(&mut b).ok()?;
+                Some(b)
+            }
+            None => page_pkg(p, i),
+        }
+    };
+    Ok(measure(&mats, &header, &page))
+}

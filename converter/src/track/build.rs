@@ -127,7 +127,10 @@ fn unique_name(base: String, seen: &mut HashSet<String>) -> String {
     n
 }
 
-fn spline_entity(points: &[[f32; 3]], closed: bool) -> Entity {
+/// A Spline entity (linear nodes, empty anchors, as stock centre / limit
+/// lines). `half_width` = SplineData f11 recorded_half_car_width (stock
+/// sets it, 1.055, on the ideal-line splines only).
+fn spline_entity(name: &str, kinds: &[&str], points: &[[f32; 3]], closed: bool, half_width: Option<f32>) -> Entity {
     let mut sd = Msg::default();
     let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
     for p in points {
@@ -142,6 +145,9 @@ fn spline_entity(points: &[[f32; 3]], closed: bool) -> Entity {
     if closed {
         sd.set_varint(10, 1);
     }
+    if let Some(w) = half_width {
+        sd.set_f32(11, w);
+    }
     let mut a = Msg::default();
     a.push(1, Val::Msg(sd));
     let mut col = Msg::default();
@@ -153,10 +159,56 @@ fn spline_entity(points: &[[f32; 3]], closed: bool) -> Entity {
     dbg.set_varint(2, 10);
     dbg.set_varint(3, 3);
     a.push(30, Val::Msg(dbg));
-    let mut e = Entity::new("track_center_spline", "Spline", 108, a);
-    e.kinds.push("center_spline".into());
+    let mut e = Entity::new(name, "Spline", 108, a);
+    e.kinds.extend(kinds.iter().map(|k| k.to_string()));
     e.bounds = Some((lo, hi));
     e
+}
+
+/// The layout container's splines (stock: every race layout of the 17
+/// stock tracks has them):
+/// - `<stem>_track_center_spline` (tag `center_spline`), ~5 m nodes;
+/// - `<stem>_track_limits_left` / `_right` (tags `track_limits_left` /
+///   `_right`): the white lines, `sides` off the ideal line, ~4 m nodes
+///   (stock 986 nodes on 3.9 km). The game finds them by NAME (stock cota /
+///   brands carry no tag) and takes the layout path from the container
+///   holding `track_limits_left` (its scene path minus ".scene": the
+///   AISplineData f5 layout_path of `layouts\<stem>.ideal_line.aisplinedata`,
+///   the file it then loads); without it: "scene_actors collection
+///   doesn't contain track_limits_left splines", no AI spline is loaded and
+///   the session has "no ideal line" (no simulated reference, and the pit
+///   menu's car-relative camera sequence sits at the world origin);
+/// - `<stem>_ideal_line` (tag `ideal_line`; stock monza / oulton tag theirs
+///   `center_spline`, so the name is what counts): the ideal line's own
+///   points, f11 1.055 as stock;
+/// - `<stem>_pitlane_spline` (tag `pitlane_spline`) when there is a pit
+///   line (stock has one on 30 of 36 layouts).
+fn layout_splines(stem: &str, line: &[[f32; 3]], closed: bool, ideal: Option<&super::ai::Line>, pit: Option<&super::ai::Line>) -> Vec<Entity> {
+    let mut out = Vec::new();
+    if line.len() > 2 {
+        out.push(spline_entity(&format!("{stem}_track_center_spline"), &["center_spline"], &resample(line, 5.0), closed, None));
+    }
+    if let Some(il) = ideal.filter(|l| l.samples.len() > 2) {
+        let edge = |sign: f32, k: usize| -> Vec<[f32; 3]> {
+            il.samples.iter().map(|s| {
+                let l = super::ai::left_of(s.fwd);
+                let d = sign * s.sides[k];
+                [s.pos[0] + l[0] * d, s.pos[1], s.pos[2] + l[2] * d]
+            }).collect()
+        };
+        for (side, sign, k) in [("left", 1.0f32, 0usize), ("right", -1.0, 1)] {
+            let pts = super::ai::resample(&edge(sign, k), il.closed, 4.0);
+            let tag = format!("track_limits_{side}");
+            out.push(spline_entity(&format!("{stem}_{tag}"), &[tag.as_str()], &pts, il.closed, None));
+        }
+        let pts: Vec<[f32; 3]> = il.samples.iter().map(|s| s.pos).collect();
+        out.push(spline_entity(&format!("{stem}_ideal_line"), &["ideal_line"], &pts, il.closed, Some(super::ai::HALF_CAR_WIDTH)));
+    }
+    if let Some(pl) = pit.filter(|l| l.samples.len() > 1) {
+        let pts: Vec<[f32; 3]> = pl.samples.iter().map(|s| s.pos).collect();
+        out.push(spline_entity(&format!("{stem}_pitlane_spline"), &["pitlane_spline"], &pts, pl.closed, None));
+    }
+    out
 }
 
 /// AI-line points every ~5 m (stock centre splines: 862 nodes over 4.3 km).
@@ -532,8 +584,8 @@ pub fn convert(src_dir: &Path, out_root: &Path, opt: &Options) -> Result<Convert
     for (li, lw) in work.iter().enumerate() {
         let lstem = format!("layout_{}", lw.stem);
         b.container(&lstem, true);
-        if lw.line.len() > 2 {
-            b.add(Some(&lstem), spline_entity(&resample(&lw.line, 5.0), lw.closed));
+        for e in layout_splines(&lw.stem, &lw.line, lw.closed, lw.play.ideal.as_ref(), lw.play.pit.as_ref()) {
+            b.add(Some(&lstem), e);
         }
         let made = spawns::write(&mut b, &lw.stem, &lw.spawns);
         let pick = |p: &str| made.iter().find(|m| m.starts_with(p)).cloned();
@@ -622,21 +674,57 @@ pub fn convert(src_dir: &Path, out_root: &Path, opt: &Options) -> Result<Convert
     if !unused.is_empty() {
         report.push(format!("  warn: physics surfaces with no mesh written: {unused:?}"));
     }
-    // brightness: estimated mean linear albedo per class (median), and every material
-    let mut by_class: std::collections::BTreeMap<&str, Vec<f32>> = std::collections::BTreeMap::new();
+    // brightness: every material's estimated mean linear albedo (look_albedo.tsv)
     let mut rows = vec!["material\tshader\tclass\talbedo_r\talbedo_g\talbedo_b\tluma".to_string()];
     for (name, sh, class, a) in &mats.albedo {
         let y = 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
-        by_class.entry(class).or_default().push(y);
         rows.push(format!("{name}\t{sh}\t{class}\t{:.3}\t{:.3}\t{:.3}\t{y:.3}", a[0], a[1], a[2]));
     }
     std::fs::write(out.join("ui").join("look_albedo.tsv"), rows.join("\n"))?;
-    let med: Vec<String> = by_class.iter_mut().map(|(k, v)| {
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        format!("{k} {:.3} (n {})", v[v.len() / 2], v.len())
-    }).collect();
-    report.push(format!("  albedo (median linear luma by class): {}", med.join(", ")));
+    // the summary is what the brightness fit aims at: `aceconv albedo`'s
+    // measurement of the written folder (stats::albedo: its own material
+    // classes and skips, the written textures' means), against the stock
+    // p25..p75. (It printed the per-material estimate above before: a
+    // different model and class split - Brands road 0.077 / grass 0.131
+    // while the fitted, measured medians were 0.131 / 0.175.)
+    let med: Vec<String> = match crate::stats::albedo::measure_dir(&out, pkg.as_ref()) {
+        Ok(m) => m.by_class.iter().map(|(k, v)| {
+            let (_, b, _) = crate::stats::albedo::quart(v);
+            let stock = super::materials::STOCK_CLASS.iter().find(|x| x.0 == *k).map(|x| format!(", stock {:.3}..{:.3}", x.1, x.2)).unwrap_or_default();
+            format!("{k} {b:.3} (n {}{stock})", v.len())
+        }).collect(),
+        Err(e) => vec![format!("not measured: {e}")],
+    };
+    report.push(format!("  albedo (as `aceconv albedo` measures it: median linear luma by class): {}", med.join(", ")));
     report.push(format!("  {:.1} s", t0.elapsed().as_secs_f64()));
     std::fs::write(out.join("ui").join("convert_report.txt"), report.join("\n"))?;
     Ok(Converted { id, dir: out, report })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::track::ai::{Line, Sample};
+
+    #[test]
+    fn layout_splines_named_as_the_game_looks_them_up() {
+        // a 100 m straight along +z: left (up x forward) = +x
+        let samples: Vec<Sample> = (0..51).map(|i| Sample { pos: [0.0, 1.0, i as f32 * 2.0], dist: i as f32 * 2.0, fwd: [0.0, 0.0, 1.0], sides: [3.0, 6.0], ..Default::default() }).collect();
+        let il = Line { samples, closed: false, length: 100.0, ..Default::default() };
+        let line: Vec<[f32; 3]> = il.samples.iter().map(|s| s.pos).collect();
+        let es = layout_splines("gp", &line, false, Some(&il), None);
+        let names: Vec<&str> = es.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["gp_track_center_spline", "gp_track_limits_left", "gp_track_limits_right", "gp_ideal_line"]);
+        assert_eq!(es[1].kinds, ["Spline", "track_limits_left"]);
+        assert_eq!(es[3].kinds, ["Spline", "ideal_line"]);
+        // the limits sit on the white lines: 3 m left (+x), 6 m right (-x)
+        let node_x = |e: &Entity| -> f32 {
+            let sd = e.actor.1.sub(1).unwrap();
+            sd.subs(3)[0].sub(1).unwrap().sub(1).unwrap().f32(1).unwrap()
+        };
+        assert!((node_x(&es[1]) - 3.0).abs() < 1e-4 && (node_x(&es[2]) + 6.0).abs() < 1e-4);
+        // the ideal line keeps every point and the stock half car width
+        assert_eq!(es[3].actor.1.sub(1).unwrap().subs(3).len(), 51);
+        assert_eq!(es[3].actor.1.sub(1).unwrap().f32(11), Some(crate::track::ai::HALF_CAR_WIDTH));
+    }
 }

@@ -26,6 +26,10 @@
 //! - (tracks) AI splines: every layout container's ideal line, pit lane and
 //!   control points parse (`track::ai`) and have a sane point spacing;
 //!   dynamic-track presets parse and share the `.track` frame.
+//! - (tracks) per session (lines.rs): the `*track_limits_left*` /
+//!   `*track_limits_right*` / `*ideal_line*` splines the game finds by name,
+//!   the ideal line's aisplinedata at the layout path they give, spawn
+//!   points upright and facing along the nearest line.
 
 use anyhow::Result;
 use std::collections::{BTreeMap, HashSet};
@@ -36,6 +40,7 @@ pub mod limits;
 pub mod rigcheck;
 pub mod camcheck;
 pub mod decl;
+pub mod lines;
 
 use crate::io::kspkg::Pkg;
 use crate::io::pb::{Msg, Val};
@@ -872,6 +877,9 @@ pub fn track(dir: &Path, id: &str, game: &Game) -> Result<Report> {
         let lower: BTreeMap<String, &Vec<u8>> = files.iter().map(|(k, b)| (k.to_lowercase(), b)).collect();
         let read = |p: &str| -> Option<Vec<u8>> { lower.get(&p.to_lowercase()).map(|b| b.to_vec()).or_else(|| game.read(p)) };
         let _ = decl::check(&track_name, &parsed, &read, true, &mut r);
+        // per session: the track-limit / ideal-line splines the game looks
+        // up, spawns upright and facing along the track (lines.rs)
+        let _ = lines::check(&track_name, &parsed, &scene, &read, true, &mut r);
         // the UI images the menus ask for, placed by the installer
         let ui_files: Vec<(String, String)> = v["ui_files"].as_array().map(|a| a.iter().filter_map(|x| Some((x["from"].as_str()?.to_string(), x["to"].as_str()?.to_string()))).collect()).unwrap_or_default();
         for l in v["layouts"].as_array().into_iter().flatten() {

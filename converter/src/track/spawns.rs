@@ -9,12 +9,19 @@
 //! - Stock pit containers hold pit slots in the lane (type 4) and boxes in
 //!   the garages (type 5).
 //! - Timing: one "Zone" entity, f50.f112 ZoneActorData {f30 debug, f1000
-//!   ZoneData {f1 one ZoneGeometricData per gate: 4 corner transforms, f21
+//!   ZoneData {f1 one ZoneGeometricData per gate: 4 corner transforms
+//!   (position only, zero rotation), f21
 //!   colour, f22 render height 0.8; f2 instance {f100 timelines}}}. The
 //!   gates are in lap order with the start / finish line LAST (stock: the
 //!   last gate lies at distance 0 / lap length of the ideal line, the
 //!   others at the sector splits). Stock gates are thin quads 26..50 m
 //!   wide and 0.7..2.4 m deep.
+//!
+//! - Rotation (checked against stock brands_hatch, 2026-10): its pit
+//!   container (174.87, 67.33, 174.14) x pit_spawn_0 (-1.32, 2.27, -1.78)
+//!   is upright, heading 114.8 deg; ours for the same pit, written in world
+//!   space, (-179.94, 64.78, -179.94): upright, heading 115.2 deg.
+//!   `validate::lines` checks every spawn is upright and faces its line.
 //!
 //! AC1 inputs: `AC_START_n`, `AC_PIT_n`, `AC_HOTLAP_START_n`,
 //! `AC_TIME_n_L` / `_R` (n = 0 is the start / finish line). Dummies point
@@ -300,9 +307,10 @@ pub fn write(b: &mut SceneBuilder, stem: &str, s: &Spawns) -> Vec<String> {
         let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
         for gt in &s.gates {
             let mut geo = Msg::default();
-            let rot = euler_of(gt.fwd, [0.0, 1.0, 0.0]);
+            // stock corner transforms carry no rotation (brands_hatch,
+            // every gate): the corners are points
             for c in &gt.corners {
-                geo.push(1, Val::Msg(transform(*c, rot, [1.0; 3])));
+                geo.push(1, Val::Msg(transform(*c, [0.0; 3], [1.0; 3])));
                 lo = [lo[0].min(c[0]), lo[1].min(c[2])];
                 hi = [hi[0].max(c[0]), hi[1].max(c[2])];
             }

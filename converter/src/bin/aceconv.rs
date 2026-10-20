@@ -11,6 +11,7 @@ const USAGE: &str = "aceconv <command> ...
   check-car-stock [content.kspkg] [id...]   the car batch checks on stock cars (their calibration)
   check-track <track dir> [content.kspkg]   validate a converted track folder
   check-track-decl [content.kspkg] [--skip a,b]  simulate every stock track's (layout, mode) lookup
+                                            (+ its track-limit / ideal-line splines and spawn orientation)
   check-lighting <track dir>...             only the static-mesh lighting checks
   make-donor [content.kspkg] [out dir]      build the donor car + template materials
   make-fmod-template [content.kspkg] [dir]  decompile the game banks into the sound template
@@ -165,10 +166,12 @@ fn run() -> Result<()> {
             let rows = aceconv::validate::decl::table_rows(&game.read("system\\track_containers.table").context("no system\\track_containers.table")?);
             let top = aceconv::io::pb::Msg::parse(&tracks)?;
             let mut names: Vec<String> = Vec::new();
+            let mut scenes: std::collections::HashMap<String, String> = Default::default();
             for line in top.sub(2).map(|t| t.subs(3)).unwrap_or_default() {
                 let Some(d) = line.sub(2) else { continue };
                 let (Some(n), Some(scene)) = (d.str(1), d.str(4)) else { continue };
                 if game.has(&scene) && d.str(8).is_some() && !skip.iter().any(|s| s.eq_ignore_ascii_case(&n)) && !names.contains(&n) {
+                    scenes.insert(n.clone(), scene);
                     names.push(n);
                 }
             }
@@ -176,7 +179,9 @@ fn run() -> Result<()> {
             for n in &names {
                 let mut r = aceconv::validate::Report::default();
                 let read = |p: &str| game.read(p);
-                let s = aceconv::validate::decl::check(n, &rows, &read, false, &mut r);
+                let mut s = aceconv::validate::decl::check(n, &rows, &read, false, &mut r);
+                let main = scenes.get(n).and_then(|p| game.read(p)).unwrap_or_default();
+                s.extend(aceconv::validate::lines::check(n, &rows, &main, &read, false, &mut r));
                 all += 1;
                 pass += r.ok() as usize;
                 println!("{n}: {} errors, {} warnings", r.errors.len(), r.warnings.len());
@@ -531,30 +536,7 @@ fn albedo_cmd(src: &Path, ids: &[String]) -> Result<()> {
     };
     if src.is_dir() {
         let id = src.file_name().unwrap().to_string_lossy().to_string();
-        let prefix = format!("content\\tracks\\{id}\\").to_lowercase();
-        let local = |p: &str| -> Option<std::path::PathBuf> {
-            let l = p.to_lowercase();
-            l.strip_prefix(&prefix).map(|r| src.join(r.replace('\\', "/")))
-        };
-        let mut mats = Vec::new();
-        for e in std::fs::read_dir(src.join("materials"))?.flatten() {
-            mats.push((format!("{prefix}materials\\{}", e.file_name().to_string_lossy()), std::fs::read(e.path())?));
-        }
-        let header = |p: &str| local(p).and_then(|f| std::fs::read(f).ok()).or_else(|| from_pkg(p));
-        let page = |p: &str, i: usize| -> Option<Vec<u8>> {
-            match local(p) {
-                Some(f) => {
-                    use std::io::{Read, Seek, SeekFrom};
-                    let mut fh = std::fs::File::open(f).ok()?;
-                    fh.seek(SeekFrom::Start((i * 65536) as u64)).ok()?;
-                    let mut b = vec![0u8; 65536];
-                    fh.read_exact(&mut b).ok()?;
-                    Some(b)
-                }
-                None => page_pkg(p, i),
-            }
-        };
-        let r = albedo::measure(&mats, &header, &page);
+        let r = albedo::measure_dir(src, game.as_ref())?;
         print(&id, &r);
         if std::env::var("ACECONV_ALBEDO_ROWS").is_ok() {
             for (n, s, c, y) in &r.rows {

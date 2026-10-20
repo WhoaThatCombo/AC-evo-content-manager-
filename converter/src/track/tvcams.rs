@@ -5,7 +5,11 @@
 //! # Format (stock, 57 TV containers on 17 tracks)
 //!
 //! Camera entities, kinds `Camera`, `CameraTV`, `TV_set1` | `TV_set2`;
-//! transform = camera position and Euler rotation (local +Z forward);
+//! transform = camera position and Euler rotation. A camera looks along
+//! its local -Z (stock: the practice sequence's fixed-point camera GP_09 at
+//! brands_hatch aims along -Z at its target_point, the car-relative
+//! sequence cameras look back at the car along -Z, monza tv2 12 of 12 face
+//! the track with -Z; AC1 FORWARD becomes -Z);
 //! bounds carry only the active distance. f50.f102 CameraData:
 //! - f12 {} (additional properties), f14 {f21 graphics override};
 //! - f15 CamTVData {f1 start segment, f2 end segment, f3 use segments 1,
@@ -191,7 +195,7 @@ pub fn write(b: &mut SceneBuilder, track: &str, stem: &str, data: &std::collecti
             e.kinds.push("CameraTV".into());
             e.kinds.push(format!("TV_set{set}"));
             e.position = cam.pos;
-            e.rotation = euler_of(cam.fwd, cam.up);
+            e.rotation = euler_of([-cam.fwd[0], -cam.fwd[1], -cam.fwd[2]], cam.up);
             b.add(Some(&c), e);
             w.cameras += 1;
         }
