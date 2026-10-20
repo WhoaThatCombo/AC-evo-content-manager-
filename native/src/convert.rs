@@ -474,7 +474,23 @@ pub fn save_settings(body: &Value) -> Value {
             cur.insert(k.into(), json!(x));
         }
     }
-    match config::save(&json!({"convert": cur})) {
+    // The EVO game folder is ACECM's own `game_dir` setting (the same one
+    // Settings edits); accept the folder or its content.kspkg / exe.
+    let mut top = json!({"convert": cur});
+    if let Some(v) = body.get("game_dir").and_then(|v| v.as_str()) {
+        let v = v.trim().trim_matches('"');
+        if v.is_empty() {
+            top["game_dir"] = json!("");
+        } else {
+            let p = Path::new(v);
+            let dir = if p.is_file() { p.parent().map(Path::to_path_buf).unwrap_or_default() } else { p.to_path_buf() };
+            if !dir.join("content.kspkg").is_file() {
+                return json!({"ok": false, "error": format!("{} has no content.kspkg - pick the Assetto Corsa EVO install folder", dir.display())});
+            }
+            top["game_dir"] = json!(dir.to_string_lossy());
+        }
+    }
+    match config::save(&top) {
         Ok(_) => info(),
         Err(e) => json!({"ok": false, "error": e.to_string()}),
     }

@@ -1,0 +1,255 @@
+# ISO 3166-1 alpha-2, ISO 3166-1 numeric, English short name, UN M49 sub-region, continent (UN M49 region; Americas split at 021 = North America)
+# Column 6: IANA time zones (comma separated). Column 7: ISO 3166-1 alpha-3.
+# Source: the ISO 3166-1 / UN M49 code lists as reported by the Windows geographical-location API (EnumSystemGeoNames / GetGeoInfoEx);
+# Time zones: IANA tz database zone1970.tab (public domain), zones whose region includes the country.
+# sub-regions for the ten territories that API files under "World" or a parent country follow the UN M49 table.
+alpha2	numeric	name	subregion	continent	timezones	alpha3
+AD	020	Andorra	039	Europe	Europe/Andorra	AND
+AE	784	United Arab Emirates	145	Asia	Asia/Dubai	ARE
+AF	004	Afghanistan	034	Asia	Asia/Kabul	AFG
+AG	028	Antigua and Barbuda	029	North America	America/Puerto_Rico	ATG
+AI	660	Anguilla	029	North America	America/Puerto_Rico	AIA
+AL	008	Albania	039	Europe	Europe/Tirane	ALB
+AM	051	Armenia	145	Asia	Asia/Yerevan	ARM
+AO	024	Angola	017	Africa	Africa/Lagos	AGO
+AQ	010	Antarctica	010	Antarctica	Antarctica/Casey,Antarctica/Davis,Antarctica/Mawson,Antarctica/Palmer,Antarctica/Rothera,Antarctica/Troll,Antarctica/Vostok,Pacific/Auckland,Pacific/Port_Moresby,Asia/Riyadh,Asia/Singapore	ATA
+AR	032	Argentina	005	South America	America/Argentina/Buenos_Aires,America/Argentina/Cordoba,America/Argentina/Salta,America/Argentina/Jujuy,America/Argentina/Tucuman,America/Argentina/Catamarca,America/Argentina/La_Rioja,America/Argentina/San_Juan,America/Argentina/Mendoza,America/Argentina/San_Luis,America/Argentina/Rio_Gallegos,America/Argentina/Ushuaia	ARG
+AS	016	American Samoa	061	Oceania	Pacific/Pago_Pago	ASM
+AT	040	Austria	155	Europe	Europe/Vienna	AUT
+AU	036	Australia	053	Oceania	Australia/Lord_Howe,Antarctica/Macquarie,Australia/Hobart,Australia/Melbourne,Australia/Sydney,Australia/Broken_Hill,Australia/Brisbane,Australia/Lindeman,Australia/Adelaide,Australia/Darwin,Australia/Perth,Australia/Eucla,Asia/Tokyo	AUS
+AW	533	Aruba	029	North America	America/Puerto_Rico	ABW
+AX	248	Åland Islands	154	Europe	Europe/Helsinki	ALA
+AZ	031	Azerbaijan	145	Asia	Asia/Baku	AZE
+BA	070	Bosnia and Herzegovina	039	Europe	Europe/Belgrade	BIH
+BB	052	Barbados	029	North America	America/Barbados	BRB
+BD	050	Bangladesh	034	Asia	Asia/Dhaka	BGD
+BE	056	Belgium	155	Europe	Europe/Brussels	BEL
+BF	854	Burkina Faso	011	Africa	Africa/Abidjan	BFA
+BG	100	Bulgaria	151	Europe	Europe/Sofia	BGR
+BH	048	Bahrain	145	Asia	Asia/Qatar	BHR
+BI	108	Burundi	014	Africa	Africa/Maputo	BDI
+BJ	204	Benin	011	Africa	Africa/Lagos	BEN
+BL	652	Saint Barthélemy	029	North America	America/Puerto_Rico	BLM
+BM	060	Bermuda	021	North America	Atlantic/Bermuda	BMU
+BN	096	Brunei	035	Asia	Asia/Kuching	BRN
+BO	068	Bolivia	005	South America	America/La_Paz	BOL
+BQ	535	Bonaire, Sint Eustatius and Saba	029	North America	America/Puerto_Rico	BES
+BR	076	Brazil	005	South America	America/Noronha,America/Belem,America/Fortaleza,America/Recife,America/Araguaina,America/Maceio,America/Bahia,America/Sao_Paulo,America/Campo_Grande,America/Cuiaba,America/Santarem,America/Porto_Velho,America/Boa_Vista,America/Manaus,America/Eirunepe,America/Rio_Branco	BRA
+BS	044	Bahamas, The	029	North America	America/Toronto	BHS
+BT	064	Bhutan	034	Asia	Asia/Thimphu	BTN
+BV	074	Bouvet Island	005	South America		BVT
+BW	072	Botswana	018	Africa	Africa/Maputo	BWA
+BY	112	Belarus	151	Europe	Europe/Minsk	BLR
+BZ	084	Belize	013	North America	America/Belize	BLZ
+CA	124	Canada	021	North America	America/St_Johns,America/Halifax,America/Glace_Bay,America/Moncton,America/Goose_Bay,America/Toronto,America/Iqaluit,America/Winnipeg,America/Resolute,America/Rankin_Inlet,America/Regina,America/Swift_Current,America/Edmonton,America/Cambridge_Bay,America/Inuvik,America/Dawson_Creek,America/Fort_Nelson,America/Whitehorse,America/Dawson,America/Vancouver,America/Panama,America/Puerto_Rico,America/Phoenix	CAN
+CC	166	Cocos (Keeling) Islands	053	Oceania	Asia/Yangon	CCK
+CD	180	Congo (DRC)	017	Africa	Africa/Maputo,Africa/Lagos	COD
+CF	140	Central African Republic	017	Africa	Africa/Lagos	CAF
+CG	178	Congo	017	Africa	Africa/Lagos	COG
+CH	756	Switzerland	155	Europe	Europe/Zurich	CHE
+CI	384	Côte d'Ivoire	011	Africa	Africa/Abidjan	CIV
+CK	184	Cook Islands	061	Oceania	Pacific/Rarotonga	COK
+CL	152	Chile	005	South America	America/Santiago,America/Coyhaique,America/Punta_Arenas,Pacific/Easter	CHL
+CM	120	Cameroon	017	Africa	Africa/Lagos	CMR
+CN	156	China	030	Asia	Asia/Shanghai,Asia/Urumqi	CHN
+CO	170	Colombia	005	South America	America/Bogota	COL
+CR	188	Costa Rica	013	North America	America/Costa_Rica	CRI
+CU	192	Cuba	029	North America	America/Havana	CUB
+CV	132	Cabo Verde	011	Africa	Atlantic/Cape_Verde	CPV
+CW	531	Curaçao	029	North America	America/Puerto_Rico	CUW
+CX	162	Christmas Island	053	Oceania	Asia/Bangkok	CXR
+CY	196	Cyprus	145	Asia	Asia/Nicosia,Asia/Famagusta	CYP
+CZ	203	Czech Republic	151	Europe	Europe/Prague	CZE
+DE	276	Germany	155	Europe	Europe/Zurich,Europe/Berlin	DEU
+DJ	262	Djibouti	014	Africa	Africa/Nairobi	DJI
+DK	208	Denmark	154	Europe	Europe/Berlin	DNK
+DM	212	Dominica	029	North America	America/Puerto_Rico	DMA
+DO	214	Dominican Republic	029	North America	America/Santo_Domingo	DOM
+DZ	012	Algeria	015	Africa	Africa/Algiers	DZA
+EC	218	Ecuador	005	South America	America/Guayaquil,Pacific/Galapagos	ECU
+EE	233	Estonia	154	Europe	Europe/Tallinn	EST
+EG	818	Egypt	015	Africa	Africa/Cairo	EGY
+ER	232	Eritrea	014	Africa	Africa/Nairobi	ERI
+ES	724	Spain	039	Europe	Europe/Madrid,Africa/Ceuta,Atlantic/Canary	ESP
+ET	231	Ethiopia	014	Africa	Africa/Nairobi	ETH
+FI	246	Finland	154	Europe	Europe/Helsinki	FIN
+FJ	242	Fiji	054	Oceania	Pacific/Fiji	FJI
+FK	238	Falkland Islands	005	South America	Atlantic/Stanley	FLK
+FM	583	Micronesia	057	Oceania	Pacific/Kosrae,Pacific/Port_Moresby,Pacific/Guadalcanal	FSM
+FO	234	Faroe Islands	154	Europe	Atlantic/Faroe	FRO
+FR	250	France	155	Europe	Europe/Paris	FRA
+GA	266	Gabon	017	Africa	Africa/Lagos	GAB
+GB	826	United Kingdom	154	Europe	Europe/London	GBR
+GD	308	Grenada	029	North America	America/Puerto_Rico	GRD
+GE	268	Georgia	145	Asia	Asia/Tbilisi	GEO
+GF	254	French Guiana	005	South America	America/Cayenne	GUF
+GG	831	Guernsey	154	Europe	Europe/London	GGY
+GH	288	Ghana	011	Africa	Africa/Abidjan	GHA
+GI	292	Gibraltar	039	Europe	Europe/Gibraltar	GIB
+GL	304	Greenland	021	North America	America/Nuuk,America/Danmarkshavn,America/Scoresbysund,America/Thule	GRL
+GM	270	Gambia	011	Africa	Africa/Abidjan	GMB
+GN	324	Guinea	011	Africa	Africa/Abidjan	GIN
+GP	312	Guadeloupe	029	North America	America/Puerto_Rico	GLP
+GQ	226	Equatorial Guinea	017	Africa	Africa/Lagos	GNQ
+GR	300	Greece	039	Europe	Europe/Athens	GRC
+GS	239	South Georgia and the South Sandwich Islands	005	South America	Atlantic/South_Georgia	SGS
+GT	320	Guatemala	013	North America	America/Guatemala	GTM
+GU	316	Guam	057	Oceania	Pacific/Guam	GUM
+GW	624	Guinea-Bissau	011	Africa	Africa/Bissau	GNB
+GY	328	Guyana	005	South America	America/Guyana	GUY
+HK	344	Hong Kong SAR	030	Asia	Asia/Hong_Kong	HKG
+HM	334	Heard Island and McDonald Islands	053	Oceania		HMD
+HN	340	Honduras	013	North America	America/Tegucigalpa	HND
+HR	191	Croatia	039	Europe	Europe/Belgrade	HRV
+HT	332	Haiti	029	North America	America/Port-au-Prince	HTI
+HU	348	Hungary	151	Europe	Europe/Budapest	HUN
+ID	360	Indonesia	035	Asia	Asia/Jakarta,Asia/Pontianak,Asia/Makassar,Asia/Jayapura	IDN
+IE	372	Ireland	154	Europe	Europe/Dublin	IRL
+IL	376	Israel	145	Asia	Asia/Jerusalem	ISR
+IM	833	Isle of Man	154	Europe	Europe/London	IMN
+IN	356	India	034	Asia	Asia/Kolkata	IND
+IO	086	British Indian Ocean Territory	014	Africa	Indian/Chagos	IOT
+IQ	368	Iraq	145	Asia	Asia/Baghdad	IRQ
+IR	364	Iran	034	Asia	Asia/Tehran	IRN
+IS	352	Iceland	154	Europe	Africa/Abidjan	ISL
+IT	380	Italy	039	Europe	Europe/Rome	ITA
+JE	832	Jersey	154	Europe	Europe/London	JEY
+JM	388	Jamaica	029	North America	America/Jamaica	JAM
+JO	400	Jordan	145	Asia	Asia/Amman	JOR
+JP	392	Japan	030	Asia	Asia/Tokyo	JPN
+KE	404	Kenya	014	Africa	Africa/Nairobi	KEN
+KG	417	Kyrgyzstan	143	Asia	Asia/Bishkek	KGZ
+KH	116	Cambodia	035	Asia	Asia/Bangkok	KHM
+KI	296	Kiribati	057	Oceania	Pacific/Tarawa,Pacific/Kanton,Pacific/Kiritimati	KIR
+KM	174	Comoros	014	Africa	Africa/Nairobi	COM
+KN	659	Saint Kitts and Nevis	029	North America	America/Puerto_Rico	KNA
+KP	408	North Korea	030	Asia	Asia/Pyongyang	PRK
+KR	410	Korea	030	Asia	Asia/Seoul	KOR
+KW	414	Kuwait	145	Asia	Asia/Riyadh	KWT
+KY	136	Cayman Islands	029	North America	America/Panama	CYM
+KZ	398	Kazakhstan	143	Asia	Asia/Almaty,Asia/Qyzylorda,Asia/Qostanay,Asia/Aqtobe,Asia/Aqtau,Asia/Atyrau,Asia/Oral	KAZ
+LA	418	Laos	035	Asia	Asia/Bangkok	LAO
+LB	422	Lebanon	145	Asia	Asia/Beirut	LBN
+LC	662	Saint Lucia	029	North America	America/Puerto_Rico	LCA
+LI	438	Liechtenstein	155	Europe	Europe/Zurich	LIE
+LK	144	Sri Lanka	034	Asia	Asia/Colombo	LKA
+LR	430	Liberia	011	Africa	Africa/Monrovia	LBR
+LS	426	Lesotho	018	Africa	Africa/Johannesburg	LSO
+LT	440	Lithuania	154	Europe	Europe/Vilnius	LTU
+LU	442	Luxembourg	155	Europe	Europe/Brussels	LUX
+LV	428	Latvia	154	Europe	Europe/Riga	LVA
+LY	434	Libya	015	Africa	Africa/Tripoli	LBY
+MA	504	Morocco	015	Africa	Africa/Casablanca	MAR
+MC	492	Monaco	155	Europe	Europe/Paris	MCO
+MD	498	Moldova	151	Europe	Europe/Chisinau	MDA
+ME	499	Montenegro	039	Europe	Europe/Belgrade	MNE
+MF	663	Saint Martin	029	North America	America/Puerto_Rico	MAF
+MG	450	Madagascar	014	Africa	Africa/Nairobi	MDG
+MH	584	Marshall Islands	057	Oceania	Pacific/Tarawa,Pacific/Kwajalein	MHL
+MK	807	North Macedonia	039	Europe	Europe/Belgrade	MKD
+ML	466	Mali	011	Africa	Africa/Abidjan	MLI
+MM	104	Myanmar	035	Asia	Asia/Yangon	MMR
+MN	496	Mongolia	030	Asia	Asia/Ulaanbaatar,Asia/Hovd	MNG
+MO	446	Macao SAR	030	Asia	Asia/Macau	MAC
+MP	580	Northern Mariana Islands	057	Oceania	Pacific/Guam	MNP
+MQ	474	Martinique	029	North America	America/Martinique	MTQ
+MR	478	Mauritania	011	Africa	Africa/Abidjan	MRT
+MS	500	Montserrat	029	North America	America/Puerto_Rico	MSR
+MT	470	Malta	039	Europe	Europe/Malta	MLT
+MU	480	Mauritius	014	Africa	Indian/Mauritius	MUS
+MV	462	Maldives	034	Asia	Indian/Maldives	MDV
+MW	454	Malawi	014	Africa	Africa/Maputo	MWI
+MX	484	Mexico	013	North America	America/Mexico_City,America/Cancun,America/Merida,America/Monterrey,America/Matamoros,America/Chihuahua,America/Ciudad_Juarez,America/Ojinaga,America/Mazatlan,America/Bahia_Banderas,America/Hermosillo,America/Tijuana	MEX
+MY	458	Malaysia	035	Asia	Asia/Kuching,Asia/Singapore	MYS
+MZ	508	Mozambique	014	Africa	Africa/Maputo	MOZ
+NA	516	Namibia	018	Africa	Africa/Windhoek	NAM
+NC	540	New Caledonia	054	Oceania	Pacific/Noumea	NCL
+NE	562	Niger	011	Africa	Africa/Lagos	NER
+NF	574	Norfolk Island	053	Oceania	Pacific/Norfolk	NFK
+NG	566	Nigeria	011	Africa	Africa/Lagos	NGA
+NI	558	Nicaragua	013	North America	America/Managua	NIC
+NL	528	Netherlands	155	Europe	Europe/Brussels	NLD
+NO	578	Norway	154	Europe	Europe/Berlin	NOR
+NP	524	Nepal	034	Asia	Asia/Kathmandu	NPL
+NR	520	Nauru	057	Oceania	Pacific/Nauru	NRU
+NU	570	Niue	061	Oceania	Pacific/Niue	NIU
+NZ	554	New Zealand	053	Oceania	Pacific/Auckland,Pacific/Chatham	NZL
+OM	512	Oman	145	Asia	Asia/Dubai	OMN
+PA	591	Panama	013	North America	America/Panama	PAN
+PE	604	Peru	005	South America	America/Lima	PER
+PF	258	French Polynesia	061	Oceania	Pacific/Tahiti,Pacific/Marquesas,Pacific/Gambier	PYF
+PG	598	Papua New Guinea	054	Oceania	Pacific/Port_Moresby,Pacific/Bougainville	PNG
+PH	608	Philippines	035	Asia	Asia/Manila	PHL
+PK	586	Pakistan	034	Asia	Asia/Karachi	PAK
+PL	616	Poland	151	Europe	Europe/Warsaw	POL
+PM	666	Saint Pierre and Miquelon	021	North America	America/Miquelon	SPM
+PN	612	Pitcairn Islands	061	Oceania	Pacific/Pitcairn	PCN
+PR	630	Puerto Rico	029	North America	America/Puerto_Rico	PRI
+PS	275	Palestinian Authority	145	Asia	Asia/Gaza,Asia/Hebron	PSE
+PT	620	Portugal	039	Europe	Europe/Lisbon,Atlantic/Madeira,Atlantic/Azores	PRT
+PW	585	Palau	057	Oceania	Pacific/Palau	PLW
+PY	600	Paraguay	005	South America	America/Asuncion	PRY
+QA	634	Qatar	145	Asia	Asia/Qatar	QAT
+RE	638	Reunion	014	Africa	Asia/Dubai	REU
+RO	642	Romania	151	Europe	Europe/Bucharest	ROU
+RS	688	Serbia	039	Europe	Europe/Belgrade	SRB
+RU	643	Russia	151	Europe	Europe/Kaliningrad,Europe/Moscow,Europe/Simferopol,Europe/Kirov,Europe/Volgograd,Europe/Astrakhan,Europe/Saratov,Europe/Ulyanovsk,Europe/Samara,Asia/Yekaterinburg,Asia/Omsk,Asia/Novosibirsk,Asia/Barnaul,Asia/Tomsk,Asia/Novokuznetsk,Asia/Krasnoyarsk,Asia/Irkutsk,Asia/Chita,Asia/Yakutsk,Asia/Khandyga,Asia/Vladivostok,Asia/Ust-Nera,Asia/Magadan,Asia/Sakhalin,Asia/Srednekolymsk,Asia/Kamchatka,Asia/Anadyr	RUS
+RW	646	Rwanda	014	Africa	Africa/Maputo	RWA
+SA	682	Saudi Arabia	145	Asia	Asia/Riyadh	SAU
+SB	090	Solomon Islands	054	Oceania	Pacific/Guadalcanal	SLB
+SC	690	Seychelles	014	Africa	Asia/Dubai	SYC
+SD	736	Sudan	015	Africa	Africa/Khartoum	SDN
+SE	752	Sweden	154	Europe	Europe/Berlin	SWE
+SG	702	Singapore	035	Asia	Asia/Singapore	SGP
+SH	654	St Helena, Ascension and Tristan da Cunha	011	Africa	Africa/Abidjan	SHN
+SI	705	Slovenia	039	Europe	Europe/Belgrade	SVN
+SJ	744	Svalbard	154	Europe	Europe/Berlin	SJM
+SK	703	Slovakia	151	Europe	Europe/Prague	SVK
+SL	694	Sierra Leone	011	Africa	Africa/Abidjan	SLE
+SM	674	San Marino	039	Europe	Europe/Rome	SMR
+SN	686	Senegal	011	Africa	Africa/Abidjan	SEN
+SO	706	Somalia	014	Africa	Africa/Nairobi	SOM
+SR	740	Suriname	005	South America	America/Paramaribo	SUR
+SS	728	South Sudan	015	Africa	Africa/Juba	SSD
+ST	678	São Tomé and Príncipe	017	Africa	Africa/Sao_Tome	STP
+SV	222	El Salvador	013	North America	America/El_Salvador	SLV
+SX	534	Sint Maarten	029	North America	America/Puerto_Rico	SXM
+SY	760	Syria	145	Asia	Asia/Damascus	SYR
+SZ	748	Eswatini	018	Africa	Africa/Johannesburg	SWZ
+TC	796	Turks and Caicos Islands	029	North America	America/Grand_Turk	TCA
+TD	148	Chad	017	Africa	Africa/Ndjamena	TCD
+TF	260	French Southern Territories	014	Africa	Asia/Dubai,Indian/Maldives	ATF
+TG	768	Togo	011	Africa	Africa/Abidjan	TGO
+TH	764	Thailand	035	Asia	Asia/Bangkok	THA
+TJ	762	Tajikistan	143	Asia	Asia/Dushanbe	TJK
+TK	772	Tokelau	061	Oceania	Pacific/Fakaofo	TKL
+TL	626	Timor-Leste	035	Asia	Asia/Dili	TLS
+TM	795	Turkmenistan	143	Asia	Asia/Ashgabat	TKM
+TN	788	Tunisia	015	Africa	Africa/Tunis	TUN
+TO	776	Tonga	061	Oceania	Pacific/Tongatapu	TON
+TR	792	Türkiye	145	Asia	Europe/Istanbul	TUR
+TT	780	Trinidad and Tobago	029	North America	America/Puerto_Rico	TTO
+TV	798	Tuvalu	061	Oceania	Pacific/Tarawa	TUV
+TW	158	Taiwan	030	Asia	Asia/Taipei	TWN
+TZ	834	Tanzania	014	Africa	Africa/Nairobi	TZA
+UA	804	Ukraine	151	Europe	Europe/Simferopol,Europe/Kyiv	UKR
+UG	800	Uganda	014	Africa	Africa/Nairobi	UGA
+UM	581	U.S. Minor Outlying Islands	057	Oceania	Pacific/Pago_Pago,Pacific/Tarawa	UMI
+US	840	United States	021	North America	America/New_York,America/Detroit,America/Kentucky/Louisville,America/Kentucky/Monticello,America/Indiana/Indianapolis,America/Indiana/Vincennes,America/Indiana/Winamac,America/Indiana/Marengo,America/Indiana/Petersburg,America/Indiana/Vevay,America/Chicago,America/Indiana/Tell_City,America/Indiana/Knox,America/Menominee,America/North_Dakota/Center,America/North_Dakota/New_Salem,America/North_Dakota/Beulah,America/Denver,America/Boise,America/Phoenix,America/Los_Angeles,America/Anchorage,America/Juneau,America/Sitka,America/Metlakatla,America/Yakutat,America/Nome,America/Adak,Pacific/Honolulu	USA
+UY	858	Uruguay	005	South America	America/Montevideo	URY
+UZ	860	Uzbekistan	143	Asia	Asia/Samarkand,Asia/Tashkent	UZB
+VA	336	Vatican City	039	Europe	Europe/Rome	VAT
+VC	670	Saint Vincent and the Grenadines	029	North America	America/Puerto_Rico	VCT
+VE	862	Venezuela	005	South America	America/Caracas	VEN
+VG	092	British Virgin Islands	029	North America	America/Puerto_Rico	VGB
+VI	850	U.S. Virgin Islands	029	North America	America/Puerto_Rico	VIR
+VN	704	Vietnam	035	Asia	Asia/Bangkok,Asia/Ho_Chi_Minh	VNM
+VU	548	Vanuatu	054	Oceania	Pacific/Efate	VUT
+WF	876	Wallis and Futuna	061	Oceania	Pacific/Tarawa	WLF
+WS	882	Samoa	061	Oceania	Pacific/Apia	WSM
+XK	906	Kosovo	039	Europe		XKS
+YE	887	Yemen	145	Asia	Asia/Riyadh	YEM
+YT	175	Mayotte	014	Africa	Africa/Nairobi	MYT
+ZA	710	South Africa	018	Africa	Africa/Johannesburg	ZAF
+ZM	894	Zambia	014	Africa	Africa/Maputo	ZMB
+ZW	716	Zimbabwe	014	Africa	Africa/Maputo	ZWE

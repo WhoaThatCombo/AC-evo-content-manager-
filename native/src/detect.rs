@@ -196,6 +196,13 @@ fn first_dir(cands: &[PathBuf], contains: Option<&dyn Fn(&str) -> bool>) -> Stri
 }
 
 fn game_dir() -> String {
+    // a game exe set by hand in Settings names its folder
+    let exe = config::get_str(&config::load(), "game_exe");
+    if !exe.is_empty() {
+        if let Some(d) = Path::new(&exe).parent().filter(|d| d.join("content.kspkg").is_file()) {
+            return norm(d);
+        }
+    }
     let d = steam_app_dir(APPID_GAME);
     if !d.is_empty() {
         return d;
