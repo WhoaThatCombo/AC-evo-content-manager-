@@ -302,6 +302,9 @@ pub fn apply_server_build(did: &str) -> Value {
 /// ⚠ Ingest FIRST: a pack downloads then unpacks, and the unpack is what
 /// is moving.
 pub fn progress() -> Value {
+    if let Some(what) = crate::acemod::export_progress() {
+        return json!({"ok": true, "active": true, "phase": "export", "what": what, "done": 0, "total": 0});
+    }
     let ing = install::ingest_state();
     if ing.get("state").and_then(|v| v.as_str()) == Some("running") {
         let what = sv(&Value::Object(ing.clone()), "detail");

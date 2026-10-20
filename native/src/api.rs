@@ -1025,13 +1025,14 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             json_resp(200, &blocking(move || crate::install::clip_item(&k, &n)).await)
         }
         (false, "/api/library/export") => {
-            let (k, n) = (q_get(&query, "kind").unwrap_or_default(), q_get(&query, "name").unwrap_or_default());
-            let r = blocking(move || crate::install::export_item(&k, &n, None)).await;
+            let (k, n, f) = (q_get(&query, "kind").unwrap_or_default(), q_get(&query, "name").unwrap_or_default(), q_get(&query, "format").unwrap_or_default());
+            let r = blocking(move || crate::install::export_item(&k, &n, None, &f)).await;
             let ok = r.get("ok") == Some(&json!(true));
             match r.get("path").and_then(|p| p.as_str()).map(std::path::PathBuf::from).filter(|p| p.is_file()) {
                 Some(p) if ok => {
                     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    let ctype = if name.to_lowercase().ends_with(".zip") { "application/zip" } else { "application/x-tar" };
+                    let low = name.to_lowercase();
+                    let ctype = if low.ends_with(".zip") { "application/zip" } else if low.ends_with(".acemod") { "application/octet-stream" } else { "application/x-tar" };
                     serve_file(&p, "", ctype, &name, "").await
                 }
                 _ if !ok => json_resp(400, &r),
@@ -1077,8 +1078,8 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         }
         (true, "/api/library/remove") => { let (k, n) = (bs("kind"), bs("name")); json_resp(200, &blocking(move || crate::install::remove_item(&k, &n)).await) }
         (true, "/api/library/export") => {
-            let (k, n, d) = (bs("kind"), bs("name"), bs("dest"));
-            json_resp(200, &blocking(move || crate::install::export_item(&k, &n, if d.is_empty() { None } else { Some(&d) })).await)
+            let (k, n, d, f) = (bs("kind"), bs("name"), bs("dest"), bs("format"));
+            json_resp(200, &blocking(move || crate::install::export_item(&k, &n, if d.is_empty() { None } else { Some(&d) }, &f)).await)
         }
         (true, "/api/mods/fix") => { let n = bs("name"); json_resp(200, &blocking(move || crate::install::apply_fix(&n)).await) }
         (true, "/api/mods/remove") => { let n = bs("name"); json_resp(200, &blocking(move || crate::install::remove(&n, None)).await) }

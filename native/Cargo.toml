@@ -53,6 +53,8 @@ tokio-tungstenite = { version = "0.26", default-features = false, features = ["h
 flate2 = "1"
 prost-types = "0.13"
 prost-reflect = { version = "0.14", features = ["serde"] }
+# reading an .acemod manifest (xz) for the install preview
+liblzma = { version = "0.4.8", features = ["static"] }
 
 [profile.release]
 opt-level = "s"

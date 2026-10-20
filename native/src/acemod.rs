@@ -163,34 +163,73 @@ fn worker() {
     }
 }
 
-fn build(t: &Task) -> Result<u64, String> {
+/// The content.kspkg packages are built against and rebuilt from. Normally
+/// the game's (ACECM_CLIENT_KSPKG included); ACECM_SHARE_BASE points only
+/// this at another archive (tests: tables written to a small copy while the
+/// stock files are read from the real game, read-only).
+fn base_content() -> PathBuf {
+    std::env::var_os("ACECM_SHARE_BASE").map(PathBuf::from).unwrap_or_else(crate::convert::game_content)
+}
+
+fn share_command(conv: &Path, args: &[String]) -> std::process::Command {
+    let mut cmd = crate::convert::command(conv, args);
+    let base = base_content();
+    if base.is_file() {
+        cmd.env("ACECONV_GAME_CONTENT", &base);
+    }
+    cmd
+}
+
+/// Run `pack-share src -> out`. `on_stage` hears each step as it starts
+/// (the converter's timing lines). Ok = the package's size.
+fn run_pack(src: &Path, out: &Path, raw_bytes: u64, on_stage: &dyn Fn(&str)) -> Result<u64, String> {
+    use std::io::BufRead;
     let conv = crate::convert::converter().ok_or("no converter in this build")?;
-    let d = dir();
-    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-    let s = stem(&t.kind, &t.name);
-    let tmp = d.join(format!("{s}.acemod.part"));
-    let _ = std::fs::remove_file(&tmp);
-    let mut cmd = crate::convert::command(&conv, &["pack-share".into(), t.src.to_string_lossy().into_owned(), tmp.to_string_lossy().into_owned()]);
+    let _ = std::fs::remove_file(out);
+    let mut cmd = share_command(&conv, &["pack-share".into(), src.to_string_lossy().into_owned(), out.to_string_lossy().into_owned()]);
     // threads: the Convert setting (half the cores, fewer when memory is
     // short), and fewer again for a big source - packing holds about three
     // copies of it in memory, plus ~400 MB per compressing thread. The
     // converter runs at idle priority.
     let (want, _) = crate::convert::threads();
     let (_, avail) = crate::convert::memory();
-    let src_bytes = t.raw_bytes.max(std::fs::metadata(&t.src).map(|m| if m.is_file() { m.len() } else { 0 }).unwrap_or(0));
+    let src_bytes = raw_bytes.max(std::fs::metadata(src).map(|m| if m.is_file() { m.len() } else { 0 }).unwrap_or(0));
     let n = if avail == 0 { want } else {
         let left = avail.saturating_sub((2u64 << 30) + 3 * src_bytes);
         want.min(((left / (400 << 20)) as usize).max(1))
     };
-    cmd.env("ACECONV_SHARE_THREADS", n.to_string()).env("ACECONV_THREADS", n.to_string());
-    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let o = cmd.output().map_err(|e| format!("could not run the converter: {e}"))?;
-    if !o.status.success() || !tmp.is_file() {
-        let _ = std::fs::remove_file(&tmp);
-        let e = String::from_utf8_lossy(&o.stderr);
-        return Err(e.lines().last().unwrap_or("pack-share failed").to_string());
+    cmd.env("ACECONV_SHARE_THREADS", n.to_string()).env("ACECONV_THREADS", n.to_string()).env("ACECONV_SHARE_TIMING", "1");
+    cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    on_stage("reading the files");
+    let mut child = cmd.spawn().map_err(|e| format!("could not run the converter: {e}"))?;
+    let mut last = String::new();
+    if let Some(err) = child.stderr.take() {
+        for l in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+            if l.starts_with("timing: read") {
+                on_stage("finding files the game already has");
+            } else if l.starts_with("timing: decide") {
+                on_stage(&format!("compressing ({n} thread{})", if n == 1 { "" } else { "s" }));
+            } else if l.starts_with("timing: compress") {
+                on_stage("writing the package");
+            } else if !l.trim().is_empty() {
+                last = l;
+            }
+        }
     }
-    let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+    let st = child.wait().map_err(|e| e.to_string())?;
+    if !st.success() || !out.is_file() {
+        let _ = std::fs::remove_file(out);
+        return Err(if last.is_empty() { "pack-share failed".into() } else { last });
+    }
+    Ok(std::fs::metadata(out).map(|m| m.len()).unwrap_or(0))
+}
+
+fn build(t: &Task) -> Result<u64, String> {
+    let d = dir();
+    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    let s = stem(&t.kind, &t.name);
+    let tmp = d.join(format!("{s}.acemod.part"));
+    let size = run_pack(&t.src, &tmp, t.raw_bytes, &|_| {})?;
     let sha = registry::file_digest(&tmp).ok_or("could not hash the package")?;
     let file = d.join(format!("{s}.acemod"));
     // the info goes first and names the package's digest, so a stale
@@ -216,7 +255,7 @@ pub fn status() -> Value {
 
 /// Can this machine rebuild packages (converter + game present)?
 pub fn supported() -> bool {
-    crate::convert::converter().is_some() && crate::convert::game_content().is_file()
+    crate::convert::converter().is_some() && base_content().is_file()
 }
 
 fn sv(v: &Value, k: &str) -> String {
@@ -275,7 +314,7 @@ pub fn install(adv: &Value, entries: &[Value], progress: Option<crate::contentsy
             return Err("package checksum mismatch".into());
         }
         let out = if kind == "car" { tmpdir.join(format!("{name}.kspkg")) } else { tmpdir.join("out") };
-        let mut cmd = crate::convert::command(&conv, &["unpack-share".into(), pkg.to_string_lossy().into_owned(), out.to_string_lossy().into_owned()]);
+        let mut cmd = share_command(&conv, &["unpack-share".into(), pkg.to_string_lossy().into_owned(), out.to_string_lossy().into_owned()]);
         cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let o = cmd.output().map_err(|e| format!("could not run the converter: {e}"))?;
         let _ = std::fs::remove_file(&pkg);
@@ -336,4 +375,157 @@ pub fn install(adv: &Value, entries: &[Value], progress: Option<crate::contentsy
     let _ = std::fs::remove_dir_all(&tmpdir);
     registry::flush_cache();
     r
+}
+
+// ------------------------------------------------- the Content library --
+//
+// Export writes the same package to a file the user hands on; install takes
+// one from any drop / path, rebuilds it against this machine's
+// content.kspkg in the Convert work folder and installs the result exactly
+// like the raw files (install.rs).
+
+/// What an export is doing right now (the app-wide progress bar).
+static EXPORT: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+
+/// The running export, as the progress feed shows it.
+pub fn export_progress() -> Option<String> {
+    EXPORT.lock().unwrap().as_ref().map(|(w, t)| format!("{w} · {} s", t.elapsed().as_secs()))
+}
+
+/// Pack a car mod's .kspkg (its .json beside it rides along) or a track
+/// folder into `out`. Blocking; one at a time.
+pub fn export(kind: &str, name: &str, src: &Path, out: &Path) -> Result<Value, String> {
+    if crate::convert::converter().is_none() {
+        return Err("this build has no converter - export as .zip instead".into());
+    }
+    {
+        let mut g = EXPORT.lock().unwrap();
+        if g.is_some() {
+            return Err("an export is already running".into());
+        }
+        *g = Some((format!("Packing {name}"), std::time::Instant::now()));
+    }
+    let t = std::time::Instant::now();
+    let raw = if src.is_dir() { dir_bytes(src) } else {
+        std::fs::metadata(src).map(|m| m.len()).unwrap_or(0) + std::fs::metadata(src.with_extension("json")).map(|m| m.len()).unwrap_or(0)
+    };
+    let part = out.with_extension("acemod.part");
+    let r = run_pack(src, &part, raw, &|s| {
+        if let Some(g) = EXPORT.lock().unwrap().as_mut() {
+            g.0 = format!("Packing {name}: {s}");
+        }
+    }).and_then(|size| {
+        let _ = std::fs::remove_file(out);
+        std::fs::rename(&part, out).map_err(|e| e.to_string())?;
+        Ok(size)
+    });
+    *EXPORT.lock().unwrap() = None;
+    let size = r.inspect_err(|_| { let _ = std::fs::remove_file(&part); })?;
+    let secs = (t.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+    logs::info(format!("export {kind} {name}: {} -> {} MB in {secs} s", raw >> 20, size >> 20));
+    Ok(json!({"ok": true, "kind": kind, "name": name, "path": out.to_string_lossy(), "format": FORMAT,
+              "size": size, "raw_bytes": raw, "secs": secs}))
+}
+
+fn dir_bytes(d: &Path) -> u64 {
+    std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| {
+        let p = e.path();
+        if p.is_dir() { dir_bytes(&p) } else { e.metadata().map(|m| m.len()).unwrap_or(0) }
+    }).sum()
+}
+
+/// The file's manifest, read without unpacking anything: the install
+/// preview. `kind` is "car" (a .kspkg + .json) or "track" (a folder).
+pub fn peek(p: &Path) -> Result<Value, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(p).map_err(|e| e.to_string())?;
+    let mut head = [0u8; 12];
+    f.read_exact(&mut head).map_err(|_| "not an .acemod (too short)".to_string())?;
+    if &head[..8] != b"ACEMOD\x01\n" {
+        return Err("not an .acemod package".into());
+    }
+    let n = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
+    if n == 0 || n > 64 << 20 {
+        return Err("damaged .acemod (manifest length)".into());
+    }
+    let mut z = vec![0u8; n];
+    f.read_exact(&mut z).map_err(|_| "damaged .acemod (truncated)".to_string())?;
+    let mut js = Vec::new();
+    liblzma::read::XzDecoder::new(&z[..]).take(256 << 20).read_to_end(&mut js).map_err(|e| format!("damaged .acemod manifest: {e}"))?;
+    let m: Value = serde_json::from_slice(&js).map_err(|e| format!("damaged .acemod manifest: {e}"))?;
+    let kind = match m.get("kind").and_then(|v| v.as_str()) {
+        Some("kspkg") => "car",
+        Some("dir") => "track",
+        _ => return Err("unknown .acemod content".into()),
+    };
+    let name = sv(&m, "name");
+    if !plain(&name) {
+        return Err(format!("bad name in the package: {name:?}"));
+    }
+    let blobs = m.get("blobs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let base: Vec<&Value> = blobs.iter().filter(|b| b.get("how").and_then(|v| v.as_str()) == Some("base")).collect();
+    let extras: Vec<Value> = m.get("extras").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let extra_bytes: u64 = extras.iter().filter_map(|e| e.get(1).and_then(|v| v.as_u64())).sum();
+    // file -> size (folder-relative, '/'): the duplicate check
+    let files: Map<String, Value> = if kind == "car" {
+        let mut f = Map::new();
+        f.insert(format!("{name}.kspkg"), m["out_size"].clone());
+        for e in &extras {
+            if let (Some(n), Some(s)) = (e.get(0).and_then(|v| v.as_str()), e.get(1).and_then(|v| v.as_u64())) {
+                f.insert(n.to_string(), json!(s));
+            }
+        }
+        f
+    } else {
+        blobs.iter().filter_map(|b| Some((b.get("path")?.as_str()?.replace('\\', "/"), b.get("size")?.clone()))).collect()
+    };
+    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let out = m.get("out_size").and_then(|v| v.as_u64()).unwrap_or(0) + extra_bytes;
+    let made = m.get("base_from").and_then(|v| v.as_u64()).unwrap_or(0);
+    let here = std::fs::metadata(base_content()).map(|m| m.len()).unwrap_or(0);
+    Ok(json!({"format": FORMAT, "kind": kind, "name": name, "size": size, "out_bytes": out,
+              "files": files, "file_count": files.len(), "from_game": base.len(),
+              "from_game_bytes": base.iter().filter_map(|b| b.get("size").and_then(|v| v.as_u64())).sum::<u64>(),
+              "game_build": made, "same_game_build": made == 0 || made == here,
+              "can_rebuild": crate::convert::converter().is_some() && (base.is_empty() || base_content().is_file())}))
+}
+
+/// The message for a package this game cannot rebuild.
+pub const OTHER_GAME: &str = "This package was made with a different game version; ask for the .zip export";
+
+/// Rebuild `pkg` into `out` (a .kspkg path for a car, beside which its
+/// .json lands; a folder for a track). The converter checks the MD5 of the
+/// whole result.
+pub fn unpack(pkg: &Path, out: &Path) -> Result<(), String> {
+    let conv = crate::convert::converter().ok_or("this build has no converter, so it cannot install an .acemod")?;
+    let mut cmd = share_command(&conv, &["unpack-share".into(), pkg.to_string_lossy().into_owned(), out.to_string_lossy().into_owned()]);
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let o = cmd.output().map_err(|e| format!("could not run the converter: {e}"))?;
+    if o.status.success() {
+        return Ok(());
+    }
+    let e = String::from_utf8_lossy(&o.stderr);
+    let last = e.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim_start_matches("error: ").to_string();
+    logs::warn(format!("acemod {}: {last}", pkg.display()));
+    // a stock file missing / changed, or no game at all
+    if ["different bytes", "game updated", "game was not found", "does not match the original"].iter().any(|k| last.contains(k)) {
+        return Err(format!("{OTHER_GAME} ({last})"));
+    }
+    Err(if last.is_empty() { "rebuilding the package failed".into() } else { last })
+}
+
+/// The Convert page's check of a converted track (`check-track`), on a
+/// rebuilt one: Ok, or why it must not be installed.
+pub fn check_track(dir: &Path) -> Result<(), String> {
+    let conv = crate::convert::converter().ok_or("no converter")?;
+    let mut cmd = share_command(&conv, &["check-track".into(), dir.to_string_lossy().into_owned(), base_content().to_string_lossy().into_owned()]);
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let o = cmd.output().map_err(|e| format!("could not run the validator: {e}"))?;
+    if o.status.success() {
+        return Ok(());
+    }
+    let mut l: Vec<String> = String::from_utf8_lossy(&o.stdout).lines().chain(String::from_utf8_lossy(&o.stderr).lines()).map(String::from).collect();
+    l.retain(|x| !x.trim().is_empty());
+    logs::warn(format!("acemod check-track {}: {}", dir.display(), l.join(" | ")));
+    Err(format!("the track failed the pre-install check - not installed ({})", l.first().cloned().unwrap_or_default()))
 }

@@ -233,7 +233,28 @@ function ask(msg, okLabel) {
   });
 }
 
+// the .acemod install preview: what the package is, what it becomes
+function acemodPrompt(r) {
+  const a = r.acemod || {};
+  let msg = `Install ${a.kind === 'track' ? 'track' : 'car'} "${a.name || r.name}" `
+    + 'from this .acemod?\n\n'
+    + `Package ${mb(a.size || 0)} → ${mb(a.out_bytes || 0)} once rebuilt`
+    + ` (${a.file_count || 0} file${a.file_count === 1 ? '' : 's'}`
+    + (a.from_game ? `, ${a.from_game} taken from your game` : '') + ').';
+  if (a.same_game_build === false) {
+    msg += '\n\nIt was made with another game build. If a file it needs '
+      + 'from the game changed, the install stops; then ask for the .zip export.';
+  }
+  if (r.exists) {
+    msg += r.same
+      ? '\n\nIt is already installed (same size) and will be replaced.'
+      : '\n\nAnother copy is installed and will be replaced.';
+  }
+  return ask(msg, 'Install');
+}
+
 function overwritePrompt(r) {
+  if (r && r.preview && r.acemod) return acemodPrompt(r);
   const name = (r && (r.label || r.name)) || 'this';
   if (r && r.same) {
     return ask('"' + name + '" is already installed and these files '
@@ -339,7 +360,8 @@ function pollProgress(p) {
     // 100 MB would otherwise divide all of it by one interval and claim
     // 100 GB/s. No rate until there are two samples to compare.
     _progRate = { done, at: now, v: 0 };
-    prog.show(p.phase === 'download' ? 'Downloading content…' : 'Installing…');
+    prog.show(p.phase === 'download' ? 'Downloading content…'
+      : p.phase === 'export' ? 'Exporting…' : 'Installing…');
   }
   if (done > _progRate.done) {
     const inst = (done - _progRate.done) / Math.max(0.001, (now - _progRate.at) / 1000);
@@ -355,7 +377,8 @@ function pollProgress(p) {
   ].filter(Boolean).join(' · ');
   if (total) prog.set(done / total, detail);
   // no byte count for this phase - move the bar rather than invent a number
-  else prog.busy(p.phase === 'download' ? 'Downloading content…' : 'Installing…',
+  else prog.busy(p.phase === 'download' ? 'Downloading content…'
+                 : p.phase === 'export' ? 'Exporting…' : 'Installing…',
                  p.what || '');
 }
 
@@ -573,7 +596,7 @@ function shareTrackBtn(folder, label, on) {
   return b;
 }
 
-function libRow(item, shareUrl) {
+function libRow(item, shareUrl, acemod) {
   const row = el('div', 'chk');
   const cars = (item.cars || []).map(x => esc(x.label || x.id)).join(', ');
   const sub = item.kind === 'car'
@@ -600,20 +623,38 @@ function libRow(item, shareUrl) {
     + `<span class="pill ${ready ? 'on' : 'warn'}"><i class="dot"></i>`
     + `${ready ? 'ready' : 'incomplete'}</span>`;
   const act = el('div', 'lib-act');
-  const exp = el('button', 'sm', 'Export');
-  exp.title = item.kind === 'track'
-    ? 'Save the multiplayer .tar (same file Get content downloads)'
-    : 'Save a zip of .kspkg + .json';
-  exp.onclick = async (ev) => {
-    ev.stopPropagation();
-    toast('Exporting — a track pack can take a minute…');
-    const r = await apiLong('library/export',
-                            { kind: item.kind, name: item.name });
+  const doExport = async (format) => {
+    toast(format === 'acemod'
+      ? 'Packing ' + item.name + ' — a car takes 10-20 s, a track longer…'
+      : 'Exporting — a track pack can take a minute…');
+    const pending = apiLong('library/export',
+                            { kind: item.kind, name: item.name, format });
+    progKick();                     // the bar shows the packing steps
+    const r = await pending;
     if (r && r.ok) {
-      toast('Saved ' + (r.path || 'to Downloads'));
+      toast('Saved ' + (r.path || 'to Downloads')
+        + (r.size && r.raw_bytes
+          ? ` (${mb(r.raw_bytes)} → ${mb(r.size)}, ${r.secs} s)` : ''));
       copyText(r.path, r.path);
     }
   };
+  const plain = item.kind === 'track' ? '.tar' : '.zip';
+  const exp = el('button', 'sm', acemod ? 'Export' : 'Export ' + plain);
+  exp.title = acemod
+    ? 'Save a compressed .acemod to Downloads: files the game already has '
+      + 'are left out and rebuilt from the installer\'s game (ACECM installs it)'
+    : (item.kind === 'track'
+      ? 'Save the multiplayer .tar (same file Get content downloads)'
+      : 'Save a zip of .kspkg + .json');
+  exp.onclick = (ev) => { ev.stopPropagation(); doExport(acemod ? 'acemod' : 'zip'); };
+  let expPlain = null;
+  if (acemod) {
+    expPlain = el('button', 'sm', plain);
+    expPlain.title = item.kind === 'track'
+      ? 'Export as .tar: the plain multiplayer pack, for people without ACECM'
+      : 'Export as .zip: the plain .kspkg + .json, for people without ACECM';
+    expPlain.onclick = (ev) => { ev.stopPropagation(); doExport('zip'); };
+  }
   const copy = el('button', 'sm', 'Copy');
   copy.title = 'Copy the name friends use (folder / mod id)';
   copy.onclick = async (ev) => {
@@ -659,7 +700,9 @@ function libRow(item, shareUrl) {
           !(r && r.ok));
     contentPage();
   };
-  act.append(exp, copy, pathB);
+  act.append(exp);
+  if (expPlain) act.append(expPlain);
+  act.append(copy, pathB);
   if (shareB) act.append(shareB);
   if (link) act.append(link);
   act.append(rm);
@@ -673,16 +716,20 @@ async function libraryCard(p) {
   const cars = lib.cars || [];
   const tracks = lib.tracks || [];
   c.innerHTML = `<h2>Installed mods · ${lib.total ?? (cars.length + tracks.length)}</h2>`
-    + '<div class="tiny dim" style="margin-bottom:10px">Drag a car zip '
-    + '(<code>.kspkg</code> + <code>.json</code>) or a track pack '
-    + '(<code>.tar</code> — the same file multiplayer Get content uses) onto '
-    + '<b>any</b> page. Export writes that same file to Downloads.</div>';
+    + '<div class="tiny dim" style="margin-bottom:10px">Drag an '
+    + '<code>.acemod</code>, a car zip (<code>.kspkg</code> + <code>.json</code>) '
+    + 'or a track pack (<code>.tar</code> — the same file multiplayer Get '
+    + 'content uses) onto <b>any</b> page. Export writes a compressed '
+    + '<code>.acemod</code> to Downloads: files the game already has are '
+    + 'rebuilt from the installer\'s game, so a converted car is about 10x '
+    + 'smaller. The <code>.zip</code> / <code>.tar</code> button beside it '
+    + 'saves the plain files, for people without ACECM.</div>';
   const tools = el('div', 'row wrap lib-tabs');
   const pick = el('button', 'primary', 'Install from file');
   const inp = el('input');
   inp.type = 'file';
   inp.multiple = true;
-  inp.accept = '.zip,.tar,.kspkg,.json,.tgz';
+  inp.accept = '.acemod,.zip,.tar,.kspkg,.json,.tgz';
   inp.style.display = 'none';
   pick.onclick = () => inp.click();
   inp.onchange = async () => {
@@ -713,7 +760,7 @@ async function libraryCard(p) {
         : name === 'car' ? 'No car mods' : 'Nothing installed yet — drop a pack'));
       return;
     }
-    rows.forEach(it => list.append(libRow(it, lib.share_url)));
+    rows.forEach(it => list.append(libRow(it, lib.share_url, !!lib.acemod)));
   };
   tabAll.onclick = () => setTab('all');
   tabCars.onclick = () => setTab('car');
@@ -931,12 +978,12 @@ async function contentPage() {
   const inst = el('div', 'card');
   inst.innerHTML = '<h2>Install from a folder or file path</h2>'
     + '<div class="tiny dim" style="margin-bottom:10px">If a drop will not '
-    + 'work, paste a path. Cars: a folder or zip with '
-    + '<code>.kspkg</code> + <code>.json</code>. Tracks: a multiplayer '
-    + '<code>.tar</code> or an unpacked track folder.</div>';
+    + 'work, paste a path: an <code>.acemod</code> (car or track). Cars: a '
+    + 'folder or zip with <code>.kspkg</code> + <code>.json</code>. Tracks: a '
+    + 'multiplayer <code>.tar</code> or an unpacked track folder.</div>';
   const rowi = el('div', 'row');
   const inp = el('input');
-  inp.placeholder = 'C:\\path\\to\\mod.zip   or   track.tar   or   folder';
+  inp.placeholder = 'C:\\path\\to\\mod.acemod   or   mod.zip   or   track.tar   or   folder';
   inp.dataset.keep = '1';   // survives the page rebuilding under you
   const goPath = el('button', 'primary', 'Install');
   rowi.append(inp, goPath);

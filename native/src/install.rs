@@ -237,6 +237,13 @@ pub fn scan_source(path: &str) -> Value {
     if path.is_empty() || !p.exists() {
         return json!({"ok": false, "error": "path not found"});
     }
+    if p.is_file() && path.to_lowercase().ends_with(".acemod") {
+        // the install preview: the package's manifest
+        return match crate::acemod::peek(p) {
+            Ok(i) => json!({"ok": true, "path": path, "acemod": i, "kind": i["kind"], "name": i["name"]}),
+            Err(e) => json!({"ok": false, "error": e}),
+        };
+    }
     let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     if p.is_file() && path.to_lowercase().ends_with(".zip") {
         match archive::entries(p) {
@@ -259,7 +266,7 @@ pub fn scan_source(path: &str) -> Value {
             }
         }
     } else {
-        return json!({"ok": false, "error": "expected a folder or a .zip"});
+        return json!({"ok": false, "error": "expected a folder, a .zip or an .acemod"});
     }
     let mods: Vec<Value> = found.iter().map(|(b, e)| json!({"name": b, "kspkg": e.contains(".kspkg"), "json": e.contains(".json"),
         "complete": e.contains(".kspkg") && e.contains(".json")})).collect();
@@ -398,6 +405,9 @@ fn car_conflict(incoming: &BTreeMap<String, BTreeMap<String, u64>>) -> Option<Va
 
 /// Copy mod pairs from a folder or .zip onto the server AND the client.
 pub fn install(path: &str, only: Option<Vec<String>>, overwrite: bool) -> Value {
+    if path.to_lowercase().ends_with(".acemod") {
+        return install_acemod(Path::new(path), overwrite);
+    }
     let scan = scan_source(path);
     if scan.get("ok") != Some(&json!(true)) {
         return scan;
@@ -1068,6 +1078,9 @@ pub fn ingest(path: &str, overwrite: bool) -> Value {
         return json!({"ok": false, "error": "that folder is not a car mod (.kspkg + .json) or a track pack"});
     }
     let low = path.to_lowercase();
+    if low.ends_with(".acemod") {
+        return install_acemod(p, overwrite);
+    }
     if low.ends_with(".tar") || low.ends_with(".tar.gz") || low.ends_with(".tgz") {
         return install_track_pack(p, None, overwrite);
     }
@@ -1090,7 +1103,101 @@ pub fn ingest(path: &str, overwrite: bool) -> Value {
         }
         return json!({"ok": false, "error": "drop the matching .kspkg and .json together (or a zip of both)"});
     }
-    json!({"ok": false, "error": "drop a car zip (.kspkg + .json) or a track pack (.tar)"})
+    json!({"ok": false, "error": "drop an .acemod, a car zip (.kspkg + .json) or a track pack (.tar)"})
+}
+
+// --------------------------------------------------------------- .acemod --
+/// Install an `.acemod` (acemod.rs). Without `overwrite` this is the
+/// preview: what the package holds and whether it replaces something, for
+/// the page to confirm. Then: rebuilt against this machine's content.kspkg
+/// in the Convert work folder (checked byte for byte by the converter),
+/// installed exactly like the raw files - a car to the client + server mods,
+/// a converted track the Convert page's way (validation, UI files, table
+/// rows with backups), an imported track like an unpacked track folder.
+pub fn install_acemod(p: &Path, overwrite: bool) -> Value {
+    let info = match crate::acemod::peek(p) { Ok(i) => i, Err(e) => return json!({"ok": false, "error": e}) };
+    let kind = sv(&info, "kind");
+    let name = sv(&info, "name");
+    let name_ok = if kind == "car" { safe_base(&name) == name } else { safe_folder(&name) == name };
+    if name.is_empty() || !name_ok {
+        return json!({"ok": false, "error": format!("bad name in the package: {name}")});
+    }
+    let files: BTreeMap<String, u64> = info["files"].as_object().map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect()).unwrap_or_default();
+    let td = contentsync::tracks_dir();
+    let track_dest = if kind == "track" { match under(&td, &[&name]) { Ok(d) => Some(d), Err(e) => return json!({"ok": false, "error": e}) } } else { None };
+    if !overwrite {
+        let hit = if kind == "car" {
+            let mut inc: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+            for (f, s) in &files {
+                let (b, e) = splitext(f);
+                if b == name {
+                    inc.entry(name.clone()).or_default().insert(e.to_lowercase(), *s);
+                }
+            }
+            car_conflict(&inc)
+        } else {
+            track_conflict(&name, track_dest.as_ref().unwrap(), &files, &name)
+        };
+        let mut r = json!({"ok": false, "need_confirm": true, "preview": true, "kind": kind, "name": name, "label": name,
+                           "acemod": info, "exists": hit.is_some(), "same": false});
+        if let Some(h) = hit {
+            r["same"] = h["same"].clone();
+            r["conflicts"] = h.get("conflicts").cloned().unwrap_or(Value::Null);
+        }
+        return r;
+    }
+    if info.get("can_rebuild") != Some(&json!(true)) {
+        return json!({"ok": false, "error": "installing an .acemod needs ACECM's converter and the game (its content.kspkg) on this PC - ask for the .zip export"});
+    }
+    if kind == "track" && crate::procs::game_running() {
+        return json!({"ok": false, "error": "close the game first - installing a track changes content.kspkg, which the game keeps open"});
+    }
+    let out_bytes = info["out_bytes"].as_u64().unwrap_or(0);
+    let work = crate::convert::out_dir().join("_acemod_install").join(format!("{name}-{}", rand_tag()));
+    if let Some(e) = room_for(&work, out_bytes) {
+        return json!({"ok": false, "error": e});
+    }
+    if let Err(e) = std::fs::create_dir_all(&work) {
+        return json!({"ok": false, "error": format!("{}: {e}", show(&work))});
+    }
+    ingest_begin(&format!("Rebuilding {name} from the .acemod"), 0);
+    let t = std::time::Instant::now();
+    let r = (|| -> Result<Value, String> {
+        if kind == "car" {
+            crate::acemod::unpack(p, &work.join(format!("{name}.kspkg")))?;
+            ingest_step(0, &format!("Installing {name}"));
+            return Ok(install(&show(&work), Some(vec![name.clone()]), true));
+        }
+        let out = work.join(&name);
+        crate::acemod::unpack(p, &out)?;
+        if !out.join("ui").join("track_decl.json").is_file() {
+            // an imported track (no declaration): as an unpacked track folder
+            ingest_step(0, &format!("Installing {name}"));
+            return Ok(install_track_folder(&out, Some(&name), true));
+        }
+        ingest_step(0, &format!("Checking {name}"));
+        crate::acemod::check_track(&out)?;
+        ingest_step(0, &format!("Installing {name}"));
+        let (d, _) = crate::converttrack::install_built(&out, &name, &[])?;
+        let decl = std::fs::read(out.join("ui").join("track_decl.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).unwrap_or(json!({}));
+        let dn = { let s = sv(&decl, "display_name"); if s.is_empty() { name.clone() } else { s } };
+        after_content_change();
+        Ok(json!({"ok": true, "kind": "track", "folder": name, "display_name": dn, "path": sv(&d, "to"),
+                  "registered": true, "register": d, "warning": Value::Null}))
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    ingest_end("");
+    let secs = (t.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+    match r {
+        Ok(mut v) => {
+            logs::info(format!("installed {kind} {name} from {} ({} -> {} MB) in {secs} s", show(p), sv(&info, "size").parse::<u64>().unwrap_or(0) >> 20, out_bytes >> 20));
+            if v.is_object() {
+                v["acemod"] = json!({"size": info["size"], "out_bytes": out_bytes, "secs": secs});
+            }
+            v
+        }
+        Err(e) => json!({"ok": false, "error": e, "kind": kind, "name": name}),
+    }
 }
 
 // ------------------------------------------------------------------ drops --
@@ -1268,11 +1375,59 @@ pub fn export_track(folder: &str, dest_dir: Option<&str>) -> Value {
     json!({"ok": true, "kind": "track", "name": folder, "path": show(&dest), "pack": show(&packed)})
 }
 
-pub fn export_item(kind: &str, name: &str, dest_dir: Option<&str>) -> Value {
-    match kind.trim().to_lowercase().as_str() {
-        "car" => export_car(name, dest_dir),
-        "track" => export_track(name, dest_dir),
-        _ => json!({"ok": false, "error": "kind must be car or track"}),
+/// `format`: "acemod" (the default: the compressed package sharing uses,
+/// which ACECM rebuilds against the installer's game) or "zip" (the plain
+/// files: a car's .zip, a track's multiplayer .tar).
+pub fn export_item(kind: &str, name: &str, dest_dir: Option<&str>, format: &str) -> Value {
+    let kind = kind.trim().to_lowercase();
+    if !matches!(kind.as_str(), "car" | "track") {
+        return json!({"ok": false, "error": "kind must be car or track"});
+    }
+    if matches!(format.trim().to_lowercase().as_str(), "zip" | "tar" | "raw") {
+        return if kind == "car" { export_car(name, dest_dir) } else { export_track(name, dest_dir) };
+    }
+    export_acemod(&kind, name, dest_dir)
+}
+
+/// The car's .kspkg with its .json beside it (the package carries both), or
+/// the track folder.
+fn export_source(kind: &str, name: &str) -> Result<PathBuf, String> {
+    if kind == "car" {
+        let mut kspkg = None;
+        for d in [client_mods_dir(), mods_dir(false)] {
+            let p = Path::new(&d).join(format!("{name}.kspkg"));
+            if d.is_empty() || !p.is_file() {
+                continue;
+            }
+            if p.with_extension("json").is_file() {
+                return Ok(p);
+            }
+            kspkg.get_or_insert(p);
+        }
+        return Err(match kspkg {
+            Some(p) => format!("{name}.json is not beside {} - export as .zip instead", show(&p)),
+            None => format!("no {name}.kspkg on this machine"),
+        });
+    }
+    let d = under(&contentsync::tracks_dir(), &[name])?;
+    if !track_has_files(&d) {
+        return Err("no files for that track".into());
+    }
+    Ok(d)
+}
+
+fn export_acemod(kind: &str, name: &str, dest_dir: Option<&str>) -> Value {
+    let name = if kind == "car" { safe_base(name) } else { safe_folder(name) };
+    if name.is_empty() {
+        return json!({"ok": false, "error": "bad name"});
+    }
+    let src = match export_source(kind, &name) { Ok(s) => s, Err(e) => return json!({"ok": false, "error": e}) };
+    let dd = dest_dir.map(PathBuf::from).unwrap_or_else(downloads);
+    let _ = std::fs::create_dir_all(&dd);
+    let dest = dd.join(format!("{name}.acemod"));
+    match crate::acemod::export(kind, &name, &src, &dest) {
+        Ok(v) => v,
+        Err(e) => json!({"ok": false, "error": e}),
     }
 }
 
@@ -1360,7 +1515,9 @@ pub fn library() -> Value {
     let lan = sv(&contentsync::share_info(), "lan_url");
     let total = cars.len() + tracks.len();
     json!({"ok": true, "cars": cars, "tracks": tracks, "server_dir": au.get("server_dir"), "client_dir": au.get("client_dir"),
-           "tracks_dir": contentsync::tracks_dir(), "share_url": lan, "total": total})
+           "tracks_dir": contentsync::tracks_dir(), "share_url": lan, "total": total,
+           // .acemod export / install: the converter and the game are here
+           "acemod": crate::acemod::supported()})
 }
 
 /// Write a body stream to a staged drop file, exactly `want` bytes.

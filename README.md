@@ -148,7 +148,7 @@ Drop a car mod or a track pack onto **any** page.
 
 **Tracks** cannot be loose files on the dedicated server: the engine resolves content by hash against `content.kspkg`. ACECM writes the track into that archive (native folder or a borrowed stock slot), takes a `.bak_pretrack` backup before the first write, and lists the result in Drive. **Stop the dedicated server first** — it keeps the archive open.
 
-The library can delete items and export them, including tracks in the same multiplayer pack format you can drop back in. AI splines (`.ideal_line` / `.pitlane`) are copied next to the server when the client or the import has them.
+The library can delete items and export them. Export writes an `.acemod` by default: the same compressed package sharing uses (files identical to the game's own are left out and rebuilt from the installer's `content.kspkg`, so a ~540 MB converted car is a few tens of MB). Dropping an `.acemod` on any page shows what it holds, rebuilds it, checks every byte and installs it like the plain files; if it was made with a different game version, ask for the plain export. The `.zip` / `.tar` button saves the plain files (tracks in the same multiplayer pack format you can drop back in) for people without ACECM. AI splines (`.ideal_line` / `.pitlane`) are copied next to the server when the client or the import has them.
 
 ### Convert (Assetto Corsa → EVO)
 
