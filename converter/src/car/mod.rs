@@ -313,6 +313,12 @@ pub fn convert(o: &Opts) -> Result<Report> {
     notes.extend(frame.notes.iter().cloned());
     let insts = geometry::flatten(&k, &mut notes);
     let mut hints = materials::Hints::from_data(car.ini("lights.ini"), car.ini("mirrors.ini"), skin_textures(&car));
+    hints.paint = materials::paint_fallback(&k.materials, &hints);
+    if !hints.paint.is_empty() {
+        let mut v: Vec<&String> = hints.paint.iter().collect();
+        v.sort();
+        notes.push(format!("paint: no car-paint material; painting {} (named like the body)", v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+    }
     let templates = materials::Templates::load(&refmats, &files, &id)?;
     // car functions that shape the body's sections (read before the body
     // overwrites the donor's materials)

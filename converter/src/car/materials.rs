@@ -109,6 +109,9 @@ pub struct Hints {
     /// lower-case node names left out of the car (AC1-only effects such as
     /// fake light cones)
     pub drop: HashSet<String>,
+    /// lower-case material names taken as the paint when no material is
+    /// car paint by the usual rule (see paint_fallback)
+    pub paint: HashSet<String>,
 }
 
 fn re(p: &str) -> regex::Regex {
@@ -133,6 +136,31 @@ impl Hints {
         let mirrors = mirrors.sections.iter().filter(|(s, _)| s.starts_with("MIRROR")).filter_map(|(_, kv)| kv.get("NAME")).map(|n| n.to_lowercase()).collect();
         Hints { lamps, mirrors, skin_textures, ..Default::default() }
     }
+}
+
+/// The paint of a car with no car-paint material by the usual rule (a
+/// damage_dirt shader, or a skin-replaced texture with a body-like name):
+/// mods that bake one livery into the body texture and use a plain shader,
+/// e.g. `redbull_paint` on ksPerPixelMultiMap. Without a paint section EVO
+/// has nothing to put paint and liveries on and the car fails the check.
+/// Takes opaque exterior materials whose NAME says paint / livery / body.
+pub fn paint_fallback(mats: &[Material], h: &Hints) -> HashSet<String> {
+    let body = re(r"(paint|skin|body|chassis|livery|carpaint|coach)");
+    let usual = mats.iter().any(|m| {
+        let tex = m.texture("txDiffuse").map(|t| t.to_lowercase()).unwrap_or_default();
+        m.shader.to_lowercase().contains("damage_dirt") || (h.skin_textures.contains(&tex) && body.is_match(&m.name.to_lowercase()))
+    });
+    if usual {
+        return HashSet::new();
+    }
+    let not_body = re(r"(int_|interior|cockpit|glass|window|tyre|tire|rim|wheel|disc|light|lamp|driver|helmet|suit|glove|decal|number|logo)");
+    let named = re(r"(paint|livery|carpaint|bodywork|body|coach)");
+    mats.iter().filter(|m| {
+        let n = m.name.to_lowercase();
+        let sh = m.shader.to_lowercase();
+        m.blend_mode == 0 && !m.alpha_tested && named.is_match(&n) && !not_body.is_match(&n)
+            && !(sh.contains("tyre") || sh.contains("glass") || sh.contains("windscreen"))
+    }).map(|m| m.name.to_lowercase()).collect()
 }
 
 /// A brake disc by name: disc / disk / rotor in the material or node name,
@@ -190,7 +218,8 @@ pub fn kind_of(m: &Material, node: &str, under_wheel: bool, blur: bool, cockpit:
         return Kind::Glass;
     }
     let tex = m.texture("txDiffuse").map(|t| t.to_lowercase()).unwrap_or_default();
-    if !cockpit && (sh.contains("damage_dirt") || (h.skin_textures.contains(&tex) && re(r"(paint|skin|body|chassis|livery|carpaint|coach)").is_match(&both))) {
+    if !cockpit && (sh.contains("damage_dirt") || h.paint.contains(&name)
+        || (h.skin_textures.contains(&tex) && re(r"(paint|skin|body|chassis|livery|carpaint|coach)").is_match(&both))) {
         return Kind::Paint;
     }
     let em = m.prop("ksEmissive").map(|p| p.v3[0].max(p.v3[1]).max(p.v3[2])).unwrap_or(0.0);
@@ -1214,5 +1243,15 @@ mod tests {
         // a tyre stays a tyre; a body-level brake-named part is not a disc by itself
         assert_eq!(kind_of(&mat("tyre_brake", "ksTyres"), "TYRE_LF", true, false, false, &h), Kind::Tyre);
         assert_eq!(kind_of(&mat("quattro_brakes", "ksCarPaintSimple"), "CALIPER_LF_MESH", false, false, false, &h), Kind::Generic);
+        // a baked-livery body on a plain shader: only when nothing is car paint
+        let mats = vec![mat("redbull_paint", "ksPerPixelMultiMap"), mat("redbull_carbon1", "ksPerPixelMultiMap"),
+                        mat("redbull_decals", "ksPerPixelMultiMap"), mat("interior_body", "ksPerPixelMultiMap")];
+        let mut h2 = Hints::default();
+        h2.paint = paint_fallback(&mats, &h2);
+        assert_eq!(h2.paint.iter().cloned().collect::<Vec<_>>(), vec!["redbull_paint".to_string()]);
+        assert_eq!(kind_of(&mats[0], "body_sub0", false, false, false, &h2), Kind::Paint);
+        assert_eq!(kind_of(&mats[0], "body_sub0", false, false, true, &h2), Kind::Generic);
+        let with_paint = vec![mat("redbull_paint", "ksPerPixelMultiMap"), mat("body", "ksPerPixelMultiMap_damage_dirt")];
+        assert!(paint_fallback(&with_paint, &h).is_empty());
     }
 }
