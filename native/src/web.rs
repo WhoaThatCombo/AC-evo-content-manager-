@@ -64,7 +64,8 @@ fn mtime(p: &Path) -> u64 {
 /// Bust the WebView2 disk / V8 code cache whenever the UI files change: the
 /// newest mtime of the scripts and stylesheets.
 fn cache_tag(web: &Path) -> String {
-    let mut newest = mtime(&web.join("style.css")).max(mtime(&web.join("redesign.css")));
+    let mut newest = mtime(&web.join("style.css")).max(mtime(&web.join("redesign.css")))
+        .max(mtime(&web.join("skin.css")));
     if let Ok(rd) = std::fs::read_dir(web.join("js")) {
         for e in rd.flatten() {
             if e.path().extension().and_then(|x| x.to_str()) == Some("js") {
@@ -93,7 +94,8 @@ fn theme() -> String {
 fn index_html(raw: String, tag: &str) -> String {
     let mut s = raw
         .replace(r#"href="/style.css""#, &format!(r#"href="/style.css?v={tag}""#))
-        .replace(r#"href="/redesign.css""#, &format!(r#"href="/redesign.css?v={tag}""#));
+        .replace(r#"href="/redesign.css""#, &format!(r#"href="/redesign.css?v={tag}""#))
+        .replace(r#"href="/skin.css""#, &format!(r#"href="/skin.css?v={tag}""#));
     // every UI script (web/js/NN-*.js)
     let mut out = String::with_capacity(s.len() + 512);
     let needle = r#"src="/js/"#;
