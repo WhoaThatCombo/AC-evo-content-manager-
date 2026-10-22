@@ -339,6 +339,10 @@ fn main() {
                 .title(acecm::edition::TITLE)
                 .inner_size(1320.0, 860.0)
                 .min_inner_size(900.0, 600.0)
+                // ⚠ Tauri's own file-drop handler swallows every dropped
+                // file, so the page's drag-and-drop (install a mod, convert
+                // an AC1 zip) never fired in the window - only in a browser
+                .disable_drag_drop_handler()
                 .build()?;
             Ok(())
         })
