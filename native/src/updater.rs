@@ -117,7 +117,7 @@ enum Fail {
 }
 
 fn get_json(url: &str) -> Result<Value, Fail> {
-    let r = request(url, "application/vnd.github+json", 20).send().map_err(|e| Fail::Other(format!("URLError: {e}")))?;
+    let r = request(url, "application/vnd.github+json", 10).send().map_err(|e| Fail::Other(format!("URLError: {e}")))?;
     if !r.status().is_success() {
         return Err(Fail::Http(r.status().as_u16()));
     }
@@ -125,7 +125,7 @@ fn get_json(url: &str) -> Result<Value, Fail> {
 }
 
 fn get_text(url: &str) -> Option<String> {
-    let r = request(url, "application/octet-stream", 20).send().ok()?;
+    let r = request(url, "application/octet-stream", 10).send().ok()?;
     if !r.status().is_success() {
         return None;
     }
@@ -179,6 +179,42 @@ fn download_file(urls: &[String], dest: &Path) -> Result<String, String> {
 static CHECK: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
 const CHECK_TTL: u64 = 30 * 60;
 
+/// Where releases come from when Settings names nothing. `update_check:
+/// false` in config turns the background check off.
+const DEFAULT_REPO: &str = "WhoaThatCombo/AC-evo-content-manager-";
+
+/// The last answer, WITHOUT touching the network: what the UI polls. The
+/// real check only ever runs on watch()'s own thread (or Check now).
+pub fn cached() -> Value {
+    match CHECK.lock().unwrap().as_ref() {
+        Some((_, hit)) => hit.clone(),
+        None => json!({"ok": true, "current": VERSION, "checked": false}),
+    }
+}
+
+/// Background update check: once ~20 s after launch, then every 6 hours.
+/// ⚠ Its own thread, so a slow or offline GitHub never holds up a page or
+/// startup; the request itself has a timeout. Installs nothing: the UI
+/// offers the update and the user clicks.
+pub fn watch() {
+    if crate::edition::is_dev() || !frozen() {
+        return;
+    }
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(20));
+        loop {
+            let on = crate::config::load().get("update_check").and_then(|v| v.as_bool()).unwrap_or(true);
+            if on {
+                let r = check(true);
+                if r["available"] == json!(true) {
+                    crate::logs::info(format!("update available: {} -> {}", VERSION, r["latest"]));
+                }
+            }
+            std::thread::sleep(Duration::from_secs(6 * 3600));
+        }
+    });
+}
+
 /// Cached: the dashboard asks on every render, and a release does not
 /// appear more than once every half hour. The Updater page passes force.
 /// A failure is never cached.
@@ -209,11 +245,10 @@ fn asset_url(a: &Value) -> String {
 
 fn check_now() -> Value {
     let cfg = crate::config::load();
-    let repo = crate::config::get_str(&cfg, "update_repo").trim().to_string();
+    let mut repo = crate::config::get_str(&cfg, "update_repo").trim().to_string();
     let url = crate::config::get_str(&cfg, "update_url").trim().to_string();
     if repo.is_empty() && url.is_empty() {
-        return json!({"ok": true, "current": VERSION, "checked": false,
-                      "hint": "set update_repo (owner/name) in Settings to check GitHub for new builds"});
+        repo = DEFAULT_REPO.to_string();
     }
     let res = (|| -> Result<Value, Fail> {
         if !repo.is_empty() {

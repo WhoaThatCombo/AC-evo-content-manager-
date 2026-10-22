@@ -151,6 +151,7 @@ fn autostart_proxy() {
 /// (rollback flag, share sizes, lobby prefetch, bundle sweep, pit button).
 pub fn run(port: u16) {
     rescan_content();
+    crate::updater::watch();
     // the third-party directory, so Drive's first open is not empty
     std::thread::spawn(|| { let _ = crate::evoreg::fetch(true, true); });
     std::thread::spawn(|| {

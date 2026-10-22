@@ -787,6 +787,8 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let force = q_get(&query, "force").as_deref() == Some("1");
             json_resp(200, &blocking(move || crate::updater::check(force)).await)
         }
+        // cached only - never waits on GitHub
+        (false, "/api/update/status") => json_resp(200, &crate::updater::cached()),
         (true, "/api/update/apply") => json_resp(200, &blocking(crate::updater::apply).await),
         (true, "/api/install/run") => {
             let desktop = body.get("desktop").map(|v| bb_of(Some(v))).unwrap_or(true);

@@ -230,7 +230,26 @@ function liveStart() {
   liveOn(watchPics);
   fetch('/api/version').then(r => r.json())
     .then(v => { live.version = v && v.version; }).catch(() => {});
+  // the check itself runs in the background on the app side; this only
+  // reads its cached answer, so it never waits on the network
+  const upd = () => fetch('/api/update/status').then(r => r.json())
+    .then(u => { live.update = u && u.available ? u.latest : ''; }).catch(() => {});
+  setTimeout(upd, 30000);
+  setInterval(upd, 10 * 60000);
   liveKick();
+}
+
+let _updBusy = false;
+async function installUpdate(ver) {
+  if (_updBusy) return;
+  if (!await ask(`Download and install ACECM ${ver}? It is checked against the release signature first, then ACECM restarts.`, 'Update')) return;
+  _updBusy = true;
+  toast('Downloading ACECM ' + ver + '…');
+  const r = await api('update/apply', {});
+  _updBusy = false;
+  if (!r.ok) { toast(r.error || 'Update failed', true); return; }
+  toast('Installed - restarting');
+  await api('app/restart', {});
 }
 
 /* ---- the Join / Start job, described once for every page ------------- */
@@ -286,12 +305,15 @@ function paintSideStat(s) {
     [up.length ? 'ok' : '', up.length === 1 ? (up[0].name || 'Server') + ' · live'
                          : (up.length ? up.length + ' servers live' : 'No server running')],
   ];
-  const key = JSON.stringify([lines, live.version]);
+  const key = JSON.stringify([lines, live.version, live.update]);
   if (box.dataset.key === key) return;
   box.dataset.key = key;
   box.innerHTML = lines.map(([c, t]) =>
     `<div class="ln"><i class="${c}"></i><span>${esc(t)}</span></div>`).join('')
-    + (live.version ? `<div class="ver">v${esc(live.version)}</div>` : '');
+    + (live.version ? `<div class="ver">v${esc(live.version)}</div>` : '')
+    + (live.update ? `<button class="sm upd-btn" data-v="${esc(live.update)}">Update to ${esc(live.update)}</button>` : '');
+  const ub = box.querySelector('.upd-btn');
+  if (ub) ub.onclick = () => installUpdate(ub.dataset.v);
 }
 
 /* ---- activity strip: what is happening, on every page ----------------- */

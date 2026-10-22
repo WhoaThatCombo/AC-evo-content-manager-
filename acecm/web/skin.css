@@ -232,3 +232,8 @@ details > summary:hover{color:var(--fg)}
 /* Track grip's labels are long ("Optimum - rubbered in"): full width, so
    Time and Time multiplier pair up below it */
 .sess-grid > label.f:nth-child(3){grid-column:1/-1}
+
+/* sidebar: a new release is out (the check runs in the background) */
+.side-stat .upd-btn{margin-top:8px;width:100%;background:var(--accent);border-color:var(--accent);
+  color:var(--on-accent);font-weight:600}
+.side-stat .upd-btn:hover{background:var(--accent2);border-color:var(--accent2)}
