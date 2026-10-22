@@ -11,6 +11,55 @@
 let cvTimer = null, cvPick = '', cvFilter = '', cvShow = 'all', cvSetupOpen = null, cvMode = 'car';
 const cvPicks = { car: '', track: '' };
 
+/* An AC1 mod archive dropped on the Convert page: unpacked into ACECM's own
+   convert_sources folder (not installed anywhere) and picked, ready to
+   convert. Everything else dropped here still goes to the normal install. */
+function cvIsArchive(f) { return /\.(zip|7z|rar|tar|tgz|tar\.gz)$/i.test(f.name || ''); }
+async function cvDropImport(files) {
+  const id = dropId();
+  const prog = dropProgress();
+  const total = files.reduce((n, f) => n + (f.size || 0), 0);
+  let done = 0;
+  prog.show('Copying ' + files.map(f => f.name).join(', ') + '…');
+  progClaim('local');
+  try {
+    for (const f of files) {
+      const r = await putFile('/api/drop/part?id=' + encodeURIComponent(id) + '&name=' + encodeURIComponent(f.name), f,
+        loaded => prog.set(total ? (done + loaded) / total : 0, `${f.name} - ${mb(done + loaded)} of ${mb(total)}`));
+      if (!r.ok) { toast(r.error || 'Upload failed', true); return; }
+      done += f.size || 0;
+    }
+    prog.busy('Unpacking…', 'looking for Assetto Corsa cars and tracks');
+    const r = await apiLong('convert/import', { id });
+    if (r.error) toast(r.error, !r.ok);
+    if (!r.ok) return;
+    const car = (r.cars || [])[0], trk = (r.tracks || [])[0];
+    const n = (r.cars || []).length + (r.tracks || []).length;
+    // a car pack wins over a track in the same drop; the rest are listed too
+    cvMode = car ? 'car' : 'track';
+    cvPicks[cvMode] = car || trk;
+    cvShow = 'all';
+    cvFilter = n === 1 ? (car || trk) : '';
+    toast(n === 1 ? 'Ready to convert: ' + (car || trk) : n + ' mods added - ' + (car || trk) + ' is picked');
+    convertPage();
+  } finally {
+    prog.hide();
+    progRelease('local');
+  }
+}
+
+async function cvAddFolder(st) {
+  const r = await api('pick_folder', { start: (st.extra_dirs || '').split(';').pop() || '' });
+  if (!r.ok) { toast(r.error || 'Could not open the folder picker', true); return; }
+  if (!r.path) return;
+  const have = (st.extra_dirs || '').split(';').map(x => x.trim()).filter(Boolean);
+  if (!have.some(x => x.toLowerCase() === r.path.toLowerCase())) have.push(r.path);
+  const s = await api('convert/settings', { extra_dirs: have.join(';') });
+  if (!s.ok) { toast(s.error || 'Could not save', true); return; }
+  toast('Added ' + r.path);
+  convertPage();
+}
+
 function cvCss() {
   if (document.getElementById('cv-css')) return;
   const s = document.createElement('style');
@@ -138,7 +187,12 @@ async function convertPage() {
   chips.append(chip('all', 'All'), chip('new', 'Not converted'), chip('done', 'Converted'));
   const count = el('span', 'tiny dim grow');
   count.style.textAlign = 'right';
-  bar.append(filt, chips, count);
+  count.style.whiteSpace = 'nowrap';
+  const addDir = el('button', 'sm', 'Add folder…');
+  addDir.title = 'Convert ' + noun + 's that are not installed in Assetto Corsa: pick a folder of downloaded mods. '
+    + 'You can also drop a mod .zip anywhere on this page.';
+  addDir.onclick = () => cvAddFolder(st);
+  bar.append(filt, chips, addDir, count);
   const grid = el('div', 'cv-grid' + (T ? ' tracks' : ''));
   grid.style.marginTop = '10px';
   pc.append(bar, grid);
@@ -216,6 +270,7 @@ async function convertPage() {
     + ' <span class="tiny dim">' + (missing.length ? 'needs attention' : 'everything found') + '</span></summary>';
   const fields = [
     ['ac1_root', 'Assetto Corsa folder', 'Where Assetto Corsa (the first game) is installed', have.ac1_root],
+    ['extra_dirs', 'Extra mod folders', 'Folders with AC1 mods that are not installed in Assetto Corsa (downloads, unzipped packs). Separate several with ;', true],
     ['out_dir', 'Work folder', 'Where converted cars and tracks are built (several hundred MB each). The converter also keeps what it builds once from your EVO install here (_aceconv).', have.out_dir],
     ['threads', 'Threads', '0 = automatic: half of your cores, fewer when memory is short', true],
     ['memory_gb', 'Memory limit (GB)', '0 = automatic: what is free, less 2 GB for everything else', true],
@@ -295,7 +350,8 @@ async function convertPage() {
     count.textContent = cars.ok ? (shown.length === all.length ? all.length + ' ' + noun + 's' : shown.length + ' of ' + all.length + ' ' + noun + 's') : (cars.error || '');
     for (const c of shown.slice(0, 300)) {
       const card = el('div', 'cv-card' + (c.folder === cvPick ? ' on' : '') + (c.protected ? ' locked' : ''));
-      card.title = c.protected ? (T ? 'Protected by its author - click to see its files' : 'Protected by its author - it can\'t be converted') : c.folder;
+      card.title = c.protected ? (T ? 'Protected by its author - click to see its files' : 'Protected by its author - it can\'t be converted')
+        : c.folder + (c.from ? '\nfrom ' + c.from : '');
       card.dataset.folder = c.folder;
       // small cached thumbnails, loaded only when scrolled into view
       const im = el('div', 'cv-img', tagOf(c));

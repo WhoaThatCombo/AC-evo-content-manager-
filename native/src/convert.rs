@@ -114,7 +114,7 @@ pub(crate) fn settings() -> Map<String, Value> {
         apply(s, &["ac1_root", "out_dir"]);
     }
     if let Some(Value::Object(s)) = cfg.get("convert") {
-        apply(s, &["ac1_root", "out_dir", "threads", "memory_gb"]);
+        apply(s, &["ac1_root", "out_dir", "extra_dirs", "threads", "memory_gb"]);
     }
     m
 }
@@ -384,8 +384,8 @@ pub fn earlier_api(kind: &str, folder: &str) -> Value {
     if !valid_folder(folder) || (kind != "cars" && kind != "tracks") {
         return json!({"ok": false, "error": "bad request"});
     }
-    let st = settings();
-    let src = Path::new(&s(&st, "ac1_root")).join("content").join(kind).join(folder);
+    let src = source_item(kind, folder)
+        .unwrap_or_else(|| Path::new(&s(&settings(), "ac1_root")).join("content").join(kind).join(folder));
     json!({"ok": true, "earlier": earlier(Path::new(&mods::client_mods_dir()), kind, &src)})
 }
 
@@ -463,7 +463,7 @@ pub fn info() -> Value {
 /// POST /api/convert/settings {ac1_root, out_dir, threads, memory_gb}
 pub fn save_settings(body: &Value) -> Value {
     let mut cur = match config::load().get("convert") { Some(Value::Object(m)) => m.clone(), _ => Map::new() };
-    for k in ["ac1_root", "out_dir"] {
+    for k in ["ac1_root", "out_dir", "extra_dirs"] {
         if let Some(v) = body.get(k).and_then(|v| v.as_str()) {
             cur.insert(k.into(), json!(v.trim()));
         }
@@ -542,7 +542,7 @@ pub fn preview(folder: &str) -> Option<PathBuf> {
     if !valid_folder(folder) {
         return None;
     }
-    let car = Path::new(&s(&settings(), "ac1_root")).join("content").join("cars").join(folder);
+    let car = source_item("cars", folder)?;
     let mut skins: Vec<PathBuf> = std::fs::read_dir(car.join("skins")).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
     skins.sort();
     skins.into_iter().map(|d| d.join("preview.jpg")).find(|p| p.is_file())
@@ -645,17 +645,214 @@ pub(crate) fn history_id(h: &Map<String, Value>, key: &str, kind: &str) -> Optio
     e.get("id").and_then(|v| v.as_str()).filter(|id| valid_id(kind, id)).map(String::from)
 }
 
+
+/// Is `p` an AC1 car (`cars`) or track (`tracks`) folder itself?
+pub(crate) fn is_source_item(kind: &str, p: &Path) -> bool {
+    if kind == "cars" {
+        (p.join("data.acd").is_file() || p.join("data").is_dir()) && !car_kn5s(p).is_empty()
+    } else {
+        p.join("data").join("surfaces.ini").is_file() || crate::converttrack::has_layouts(p)
+    }
+}
+
+/// Where dropped AC1 mod archives are unpacked (one folder per archive).
+pub(crate) fn imports_dir() -> PathBuf {
+    crate::paths::data().join("convert_sources")
+}
+
+/// Extra folders to convert from, besides the AC1 install: `extra_dirs`
+/// (Setup / "Add folder", several separated by `;`), then every archive
+/// dropped on the Convert page.
+pub(crate) fn extra_dirs() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = s(&settings(), "extra_dirs").split(';').map(|x| x.trim().trim_matches('"'))
+        .filter(|x| !x.is_empty()).map(PathBuf::from).filter(|p| p.is_dir()).collect();
+    v.extend(subdirs(&imports_dir()));
+    v
+}
+
+fn subdirs(d: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(d).map(|r| r.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// The cars / tracks inside one extra folder, which may be a mod itself, a
+/// folder of mods, or a pack with content\<kind> inside - also one level
+/// down (a folder of unzipped packs, or a zip with one top folder).
+pub(crate) fn scan_extra(kind: &str, d: &Path) -> Vec<PathBuf> {
+    if is_source_item(kind, d) {
+        return vec![d.to_path_buf()];
+    }
+    let mut roots = vec![d.join("content").join(kind), d.to_path_buf()];
+    for c in subdirs(d) {
+        roots.push(c.join("content").join(kind));
+        roots.push(c);
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for r in roots {
+        for p in subdirs(&r) {
+            if is_source_item(kind, &p) && !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Every folder that may be an AC1 car / track to offer: the AC1 install's
+/// content\<kind> (not filtered here: the lists check each one), then the
+/// mods found in each extra folder. ⚠ A folder name seen once is skipped
+/// after: the AC1 install wins, and the pick list is keyed by folder name.
+pub(crate) fn source_items(kind: &str) -> Vec<PathBuf> {
+    let mut items = subdirs(&Path::new(&s(&settings(), "ac1_root")).join("content").join(kind));
+    let mut seen: std::collections::HashSet<String> = items.iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase())).collect();
+    for d in extra_dirs() {
+        for p in scan_extra(kind, &d) {
+            let n = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if seen.insert(n) {
+                items.push(p);
+            }
+        }
+    }
+    items
+}
+
+/// POST /api/convert/import {id}: unpack AC1 mod archives dropped on the
+/// Convert page into <data>\convert_sources\<name>\ and say what is inside.
+pub fn import_dropped(did: &str) -> Value {
+    let Some(stage) = crate::install::drop_staging(did, false).filter(|d| d.is_dir()) else {
+        return json!({"ok": false, "error": "nothing was dropped"});
+    };
+    let files: Vec<PathBuf> = std::fs::read_dir(&stage).map(|r| r.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect())
+        .unwrap_or_default();
+    let mut cars: Vec<String> = Vec::new();
+    let mut tracks: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for f in &files {
+        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let low = name.to_lowercase();
+        if !(low.ends_with(".zip") || low.ends_with(".tar") || low.ends_with(".tar.gz") || low.ends_with(".tgz")) {
+            errors.push(if low.ends_with(".7z") || low.ends_with(".rar") {
+                format!("{name}: .7z and .rar can't be opened here - unpack it, then use Add folder")
+            } else {
+                format!("{name}: not a .zip")
+            });
+            continue;
+        }
+        let stem: String = name.split('.').next().unwrap_or("").chars()
+            .map(|c| if c.is_ascii_alphanumeric() || "-_ ()".contains(c) { c } else { '_' }).collect();
+        let stem = if stem.trim().is_empty() { "mod".to_string() } else { stem.trim().to_string() };
+        let dest = imports_dir().join(&stem);
+        let _ = std::fs::remove_dir_all(&dest);
+        if let Err(e) = unpack(f, &dest) {
+            let _ = std::fs::remove_dir_all(&dest);
+            errors.push(format!("{name}: {e}"));
+            continue;
+        }
+        let (c, t) = (scan_extra("cars", &dest), scan_extra("tracks", &dest));
+        if c.is_empty() && t.is_empty() {
+            let _ = std::fs::remove_dir_all(&dest);
+            errors.push(format!("{name}: no Assetto Corsa car or track inside (a car has data.acd and a .kn5)"));
+            continue;
+        }
+        let names = |v: Vec<PathBuf>| v.into_iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>();
+        cars.extend(names(c));
+        tracks.extend(names(t));
+    }
+    crate::install::drop_cleanup(did);
+    // the lists cache per folder: new folders show up on the next listing
+    logs::info(format!("convert: imported {} car(s), {} track(s) from {} archive(s)", cars.len(), tracks.len(), files.len()));
+    json!({"ok": !(cars.is_empty() && tracks.is_empty()), "cars": cars, "tracks": tracks,
+           "error": if errors.is_empty() { Value::Null } else { json!(errors.join("\n")) }})
+}
+
+/// Unpack an archive into `dest`. ⚠ Member names come from a downloaded
+/// file: every part must be a plain name, so nothing lands outside `dest`.
+fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
+    let mut total: u64 = 0;
+    crate::archive::each_file(archive, |name, size, r| {
+        let parts: Vec<&str> = name.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".").collect();
+        if parts.is_empty() || parts.iter().any(|p| *p == ".." || p.contains(':') || p.contains('\0')) {
+            return Err(format!("unsafe path in the archive: {name}"));
+        }
+        total += size;
+        if total > crate::install::DROP_LIMIT {
+            return Err("unpacks to more than 8 GB".into());
+        }
+        let out = parts.iter().fold(dest.to_path_buf(), |p, x| p.join(x));
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let mut f = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        std::io::copy(r, &mut f).map_err(|e| e.to_string())?;
+        Ok(true)
+    })
+}
+
+/// The folder behind a pick-list entry, wherever it came from.
+pub(crate) fn source_item(kind: &str, folder: &str) -> Option<PathBuf> {
+    if !valid_folder(folder) {
+        return None;
+    }
+    let inst = Path::new(&s(&settings(), "ac1_root")).join("content").join(kind).join(folder);
+    if inst.is_dir() {
+        return Some(inst);
+    }
+    source_items(kind).into_iter().find(|p| p.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case(folder)).unwrap_or(false)
+        && is_source_item(kind, p))
+}
+
+/// Is `p` outside the AC1 install (came from an extra folder)?
+pub(crate) fn from_extra(kind: &str, p: &Path) -> bool {
+    !p.starts_with(Path::new(&s(&settings(), "ac1_root")).join("content").join(kind))
+}
+
+/// POST /api/pick_folder: the Windows folder picker, on THIS machine.
+pub fn pick_folder(start: &str) -> Value {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; \
+            Add-Type -AssemblyName System.Windows.Forms; \
+            $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+            $d.Description = 'Pick a folder with Assetto Corsa mods (or one car / track)'; \
+            $d.ShowNewFolderButton = $false; \
+            if ($env:ACECM_START -and (Test-Path -LiteralPath $env:ACECM_START)) { $d.SelectedPath = $env:ACECM_START }; \
+            $f = New-Object System.Windows.Forms.Form -Property @{TopMost = $true}; \
+            if ($d.ShowDialog($f) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }";
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .env("ACECM_START", start)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output();
+        match out {
+            Ok(o) => {
+                let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                json!({"ok": true, "path": if p.is_empty() { Value::Null } else { json!(p) }})
+            }
+            Err(e) => json!({"ok": false, "error": format!("could not open the folder picker: {e}")}),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = start;
+        json!({"ok": false, "error": "type the folder path instead"})
+    }
+}
+
 /// GET /api/convert/cars: AC1 cars that can be converted.
 pub fn cars() -> Value {
     let st = settings();
     let root = Path::new(&s(&st, "ac1_root")).join("content").join("cars");
-    let Ok(rd) = std::fs::read_dir(&root) else {
+    let cands = source_items("cars");
+    if !root.is_dir() && cands.is_empty() {
         return json!({"ok": false, "error": format!("No Assetto Corsa cars folder at {}", root.display()), "cars": []});
-    };
+    }
     let hist = history();
     let mut out = Vec::new();
-    for e in rd.flatten() {
-        let p = e.path();
+    for p in cands {
         let Some(base) = cached_entry(&p, &CAR_CACHE, |p| {
             let has_data = p.join("data.acd").is_file() || p.join("data").is_dir();
             let kn5s = car_kn5s(p);
@@ -666,9 +863,12 @@ pub fn cars() -> Value {
             c.insert("protected".into(), json!(kn5s.iter().any(|k| kn5_protected(k))));
             Some(c)
         }) else { continue };
-        let folder = e.file_name().to_string_lossy().into_owned();
+        let folder = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut c = base;
         c.insert("folder".into(), json!(folder));
+        if from_extra("cars", &p) {
+            c.insert("from".into(), json!(p.parent().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default()));
+        }
         c.insert("last".into(), hist.get(&folder).cloned().unwrap_or(Value::Null));
         out.push(c);
     }
@@ -750,7 +950,7 @@ pub fn start(body: &Value) -> Value {
         return json!({"ok": false, "error": "a car id is ks_ followed by lower-case letters, digits and _, 13 to 37 characters in all"});
     }
     let st = settings();
-    let ac1 = Path::new(&s(&st, "ac1_root")).join("content").join("cars").join(&car);
+    let ac1 = source_item("cars", &car).unwrap_or_else(|| Path::new(&s(&st, "ac1_root")).join("content").join("cars").join(&car));
     let Some(conv) = converter() else {
         return json!({"ok": false, "error": "the converter is missing from this build"});
     };

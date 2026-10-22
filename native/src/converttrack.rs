@@ -17,6 +17,10 @@ use serde_json::{json, Map, Value};
 use crate::convert::{check, converter, default_ids, game_content, history, history_id, kn5_protected, now, run_converter, s, save_history, settings, valid_folder, valid_id, Job, JOB};
 use crate::{logs, mods, procs};
 
+pub(crate) fn has_layouts(dir: &Path) -> bool {
+    !layouts(dir).is_empty()
+}
+
 fn layouts(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir).map(|r| r.flatten().filter(|e| {
         let n = e.file_name().to_string_lossy().to_lowercase();
@@ -56,13 +60,13 @@ static TRACK_CACHE: crate::convert::ListCache = std::sync::LazyLock::new(|| std:
 /// GET /api/convert/tracks
 pub fn tracks() -> Value {
     let root = root();
-    let Ok(rd) = std::fs::read_dir(&root) else {
+    let cands = crate::convert::source_items("tracks");
+    if !root.is_dir() && cands.is_empty() {
         return json!({"ok": false, "error": format!("No Assetto Corsa tracks folder at {}", root.display()), "tracks": []});
-    };
+    }
     let hist = history();
     let mut out = Vec::new();
-    for e in rd.flatten() {
-        let p = e.path();
+    for p in cands {
         let Some(base) = crate::convert::cached_entry(&p, &TRACK_CACHE, |p| {
             let ls = layouts(p);
             if ls.is_empty() && !p.join("data").join("surfaces.ini").is_file() {
@@ -73,9 +77,12 @@ pub fn tracks() -> Value {
             t.insert("protected".into(), json!(track_kn5s(p).iter().any(|k| kn5_protected(k))));
             Some(t)
         }) else { continue };
-        let folder = e.file_name().to_string_lossy().into_owned();
+        let folder = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut t = base;
         t.insert("folder".into(), json!(folder));
+        if crate::convert::from_extra("tracks", &p) {
+            t.insert("from".into(), json!(p.parent().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default()));
+        }
         let key = format!("track:{folder}");
         t.insert("last".into(), hist.get(&key).cloned().unwrap_or(Value::Null));
         out.push(t);
@@ -104,7 +111,7 @@ pub fn image(folder: &str, layout: &str, outline: bool) -> Option<PathBuf> {
     if !valid_folder(folder) || (!layout.is_empty() && !valid_folder(layout)) {
         return None;
     }
-    let dir = root().join(folder);
+    let dir = crate::convert::source_item("tracks", folder)?;
     let lays: Vec<String> = if layout.is_empty() { layouts(&dir) } else { vec![layout.to_string()] };
     let names: &[&str] = if outline { &["outline.png"] } else { &["preview.png", "outline.png"] };
     let mut c: Vec<PathBuf> = Vec::new();
@@ -144,7 +151,7 @@ fn track_kn5s(dir: &Path) -> Vec<PathBuf> {
 fn source_dir(body: &Value, folder: &str) -> Result<PathBuf, String> {
     let src = body.get("source").and_then(|v| v.as_str()).unwrap_or("").trim().trim_matches('"').to_string();
     if src.is_empty() {
-        return Ok(root().join(folder));
+        return Ok(crate::convert::source_item("tracks", folder).unwrap_or_else(|| root().join(folder)));
     }
     let p = PathBuf::from(&src);
     if !p.is_absolute() || !p.is_dir() {

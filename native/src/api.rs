@@ -433,7 +433,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/patches/save" | "/api/patches/apply" | "/api/patches/restore" | "/api/patches/delete" | "/api/hook/plan"
             | "/api/install/run" | "/api/install/remove" | "/api/update/apply" | "/api/app/restart"
             | "/api/app/show" | "/api/server_shortcut"
-            | "/api/convert/settings" | "/api/convert/start" | "/api/convert/cancel" | "/api/convert/uninstall"
+            | "/api/convert/settings" | "/api/pick_folder" | "/api/convert/import" | "/api/convert/start" | "/api/convert/cancel" | "/api/convert/uninstall"
             | "/api/convert/track_start" | "/api/convert/track_uninstall" | "/api/convert/track_open" | "/api/convert/track_install"),
         _ => false,
     }
@@ -522,6 +522,13 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (false, "/api/convert") => json_resp(200, &blocking(crate::convert::info).await),
         (false, "/api/convert/cars") => json_resp(200, &blocking(crate::convert::cars).await),
         (false, "/api/convert/status") => json_resp(200, &crate::convert::status()),
+        // ⚠ opens a dialog on THIS machine: never for a remote client
+        (true, "/api/pick_folder") if !auth::is_loopback(&peer) => json_resp(403, &serde_json::json!({"ok": false, "error": "only on the PC running ACECM"})),
+        (true, "/api/pick_folder") => {
+            let start = body.get("start").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            json_resp(200, &blocking(move || crate::convert::pick_folder(&start)).await)
+        }
+        (true, "/api/convert/import") => { let id = bs("id"); json_resp(200, &blocking(move || crate::convert::import_dropped(&id)).await) }
         (true, "/api/convert/settings") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::save_settings(&b)).await) }
         (true, "/api/convert/start") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::start(&b)).await) }
         (true, "/api/convert/cancel") => json_resp(200, &crate::convert::cancel()),
