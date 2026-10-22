@@ -407,7 +407,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/drive" | "/api/drive/servers" | "/api/evoshare/manifest" | "/api/evoshare/plan" | "/api/evoshare/status"
             | "/api/events" | "/api/events/snapshot" | "/api/livery" | "/api/car/specs" | "/api/pit/devices"
             | "/api/patches" | "/api/patches/inspect"
-            | "/api/state" | "/api/install" | "/api/overview" | "/api/update/check"
+            | "/api/state" | "/api/install" | "/api/overview" | "/api/update/check" | "/api/update/status"
             | "/api/convert" | "/api/convert/cars" | "/api/convert/status" | "/api/convert/tracks"
             | "/api/convert/track_info" | "/api/convert/earlier"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
