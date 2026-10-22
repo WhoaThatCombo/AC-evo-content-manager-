@@ -229,3 +229,6 @@ details > summary:hover{color:var(--fg)}
    with an empty strip beside it */
 .panetabs.seg{display:flex;width:100%}
 .panetabs.seg button{flex:1 1 0;text-align:center}
+/* Track grip's labels are long ("Optimum - rubbered in"): full width, so
+   Time and Time multiplier pair up below it */
+.sess-grid > label.f:nth-child(3){grid-column:1/-1}
