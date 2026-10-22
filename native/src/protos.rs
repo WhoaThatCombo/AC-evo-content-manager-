@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use prost::Message;
@@ -60,7 +61,9 @@ fn varint(d: &[u8], i: &mut usize) -> Option<u64> {
 
 /// Exact length of the descriptor at `off`, by walking its top-level fields.
 fn blob_len(d: &[u8], off: usize) -> usize {
-    const KNOWN: [u64; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12];
+    // FileDescriptorProto fields 1-12 and 14 (edition): a file with a public
+    // or weak import (10/11) or an edition stamp must not end the walk early
+    const KNOWN: [u64; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14];
     let end = d.len().min(off + (1 << 22));
     let mut i = off;
     while i < end {
@@ -204,12 +207,36 @@ pub fn pool() -> DescriptorPool {
 
 /// A message type by its short name (the game's names are unqualified).
 pub fn find(name: &str) -> Option<MessageDescriptor> {
-    let p = pool();
-    if let Some(m) = p.get_message_by_name(name) {
+    if let Some(m) = lookup(&pool(), name) {
         return Some(m);
     }
-    let hit = p.all_messages().find(|m| m.name() == name);
-    hit
+    // ⚠ The pool is cached for the whole run: one built before the game was
+    // found (or from a cache an older build wrote) stays empty until a
+    // restart. Re-read the exes once per run when a type is missing.
+    static RETRIED: AtomicBool = AtomicBool::new(false);
+    if RETRIED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let r = extract(true);
+    eprintln!("protos: {name} missing, re-extracted: {r}");
+    *POOL.lock().unwrap() = None;
+    lookup(&pool(), name)
+}
+
+fn lookup(p: &DescriptorPool, name: &str) -> Option<MessageDescriptor> {
+    p.get_message_by_name(name).or_else(|| p.all_messages().find(|m| m.name() == name))
+}
+
+/// Why `name` cannot be found, in words a user can act on.
+pub fn missing(name: &str) -> String {
+    let srcs = sources();
+    if srcs.is_empty() {
+        return "ACECM cannot find AssettoCorsaEVO.exe to read the game's save format from.                 Set the game folder in Settings, then try again.".into();
+    }
+    let files = srcs.iter().map(|s| Path::new(s).file_name()
+        .map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect::<Vec<_>>();
+    format!("the game's save format ({name}) was not found in {} ({} schema files read).              If the game just updated, restart ACECM; if it keeps happening, send the Diagnostics report.",
+            files.join(" + "), descs(&cache_dir()).len())
 }
 
 pub fn has(name: &str) -> bool {
