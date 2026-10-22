@@ -117,12 +117,10 @@ async function convertPage() {
   }
 
   // ---- 1. pick a car
-  const modes = el('div', 'row');
-  modes.style.marginBottom = '10px';
+  const modes = el('div', 'seg');
+  modes.style.marginBottom = '12px';
   for (const [k, label] of [['car', 'Cars'], ['track', 'Tracks']]) {
     const b = el('button', 'cv-chip' + (cvMode === k ? ' on' : ''), label);
-    b.style.fontSize = '13px';
-    b.style.padding = '5px 16px';
     b.onclick = () => { if (cvMode !== k) { cvPicks[cvMode] = cvPick; cvMode = k; cvFilter = ''; cvShow = 'all'; convertPage(); } };
     modes.append(b);
   }
@@ -134,7 +132,7 @@ async function convertPage() {
   filt.placeholder = 'Search by name, brand or folder…';
   filt.value = cvFilter;
   filt.style.width = '300px';
-  const chips = el('div', 'row');
+  const chips = el('div', 'seg');
   const chip = (k, label) => { const b = el('button', 'cv-chip' + (cvShow === k ? ' on' : ''), label);
     b.onclick = () => { cvShow = k; chips.querySelectorAll('.cv-chip').forEach(x => x.classList.remove('on')); b.classList.add('on'); paint(); }; return b; };
   chips.append(chip('all', 'All'), chip('new', 'Not converted'), chip('done', 'Converted'));

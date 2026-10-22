@@ -1,0 +1,234 @@
+/* =====================================================================
+   ACECM skin (2026-10): a plain, calm mod-manager look.
+   Loaded LAST, after style.css and redesign.css, so it restyles every page
+   through the classes the pages already use.
+
+   - Blue-grey graphite surfaces, one accent (Assetto Corsa red by default;
+     the theme picker still overrides it) used for the main action and the
+     current selection only.
+   - One family (Segoe UI Variable, ships with Windows: no web fonts),
+     sentence case, a fixed scale: 12 / 13 / 14 / 16 / 20 / 26 px.
+   - Flat panels separated by space and one hairline; small radii
+     (6 px panels, 4 px controls); no all-caps labels, no pill soup.
+   ===================================================================== */
+:root{
+  --bg:#1a1e25; --side:#161a20; --panel:#222731; --panel2:#2a303b;
+  --panel3:#333a47; --well:#1d2129;
+  --line:#353c48; --line2:#434b59;
+  --fg:#e4e7ec; --dim:#97a0ad; --dim2:#727b88;
+  --accent:#d9342b; --accent2:#b02a22; --accent3:#f07a3c; --on-accent:#fff;
+  --gold:#e2b04a; --red:#e5534b; --ok:#57b37c;
+  --r:6px;
+  --ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Noto Sans",sans-serif;
+  --display:"Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,"Noto Sans",sans-serif;
+  --body:var(--ui);
+  --mono:"Cascadia Mono","Consolas",ui-monospace,monospace;
+}
+/* the old default ("Ember" orange) becomes the red default; a saved theme
+   still wins through data-theme */
+:root:not([data-theme]),:root[data-theme="ember"],:root[data-theme=""]{
+  --accent:#d9342b; --accent2:#b02a22; --accent3:#f07a3c; --on-accent:#fff}
+/* other themes keep their own --on-accent (dark text on the bright ones) */
+
+body{background:var(--bg);color:var(--fg);font:14px/1.5 var(--ui);
+  -webkit-font-smoothing:antialiased}
+
+/* ---- type: sentence case everywhere ---------------------------------- */
+h1,h2,h3,h4,#ttl,.card h2,.page > .card h2,.hero h2,.hero .kick,.bigbtn,.go-btn,
+.drive-pick b,.onl-foot .drive-pick .dp-bar b,.side .wordmark,.stat b,
+.onl .srv-head .cell,th{
+  text-transform:none !important;letter-spacing:0 !important}
+#ttl{font:600 20px/1.2 var(--display)}
+.card h2,.page > .card h2{font:600 16px/1.3 var(--display);color:var(--fg);margin:0 0 10px}
+.page > .card > p,.page > .card > .dim,.page > .card > .tiny{color:var(--dim);
+  font-size:13px;line-height:1.55;max-width:72ch}
+.tiny{font-size:12px}
+th{font:600 12px/1.3 var(--ui);color:var(--dim)}
+.onl .srv-head .cell{font:600 12px/1.3 var(--ui);color:var(--dim)}
+
+/* ---- shell ------------------------------------------------------------ */
+.side{background:var(--side);border-right:1px solid var(--line);padding:16px 10px 12px}
+.side .brand{padding:2px 10px 16px}
+.side .mark{width:22px;height:22px;border-radius:4px}
+.side .mark::after{left:5px;right:5px;top:9px;height:4px;border-radius:1px}
+.side .wordmark{font:700 16px/1 var(--display);color:var(--fg)}
+#sections a,#sections2 a{border-radius:4px;padding:8px 10px;gap:10px;
+  font:500 14px/1.2 var(--ui);color:var(--dim)}
+#sections2 a{font-size:13px;padding:7px 10px}
+#sections a:hover,#sections2 a:hover{background:var(--panel);color:var(--fg)}
+#sections a.on,#sections2 a.on{background:var(--panel2);color:var(--fg);
+  box-shadow:inset 2px 0 0 var(--accent)}
+.side-stat{border-radius:4px;background:transparent;border:0;
+  border-top:1px solid var(--line);padding:10px 10px 0;margin-top:10px}
+.side-stat .ver{font:12px var(--ui);color:var(--dim2)}
+header{padding:12px 24px;border-bottom:1px solid var(--line);background:var(--bg)}
+.page{padding:20px 24px 40px}
+#activity{padding:10px 24px 0}
+#attention{padding:0 24px}
+
+/* ---- surfaces: flat panels ------------------------------------------- */
+.card,.page > .card{background:var(--panel);border:1px solid var(--line);
+  border-radius:6px;padding:16px 20px;box-shadow:none}
+.page > .card{border-radius:0;border-top-width:0}
+.page > .card:first-child,.page > :not(.card) + .card,
+.page > .card[style*="border-color"] + .card{border-top-width:1px;
+  border-top-left-radius:6px;border-top-right-radius:6px}
+.page > .card:last-child,.page > .card:has(+ :not(.card)),
+.page > .card:has(+ .card[style*="border-color"]){
+  border-bottom-left-radius:6px;border-bottom-right-radius:6px}
+.page > .card[style*="border-color"]{border-radius:6px;
+  background:color-mix(in srgb,var(--panel) 90%,var(--gold) 10%)}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:6px}
+.stat b{font:600 22px/1.15 var(--display)}
+.list{border-color:var(--line);border-radius:6px;background:var(--well)}
+pre.log{background:var(--well);border-color:var(--line);border-radius:6px}
+.page > .split{border-radius:6px;background:var(--panel)}
+.page > .split > .split-list{background:var(--side)}
+.chk:hover,.drive-row:hover,tbody tr:hover{background:var(--panel2)}
+
+/* ---- controls --------------------------------------------------------- */
+button{border-radius:4px;background:var(--panel2);border:1px solid var(--line2);
+  color:var(--fg);font:500 13px/1.2 var(--ui)}
+button:hover{background:var(--panel3);border-color:var(--line2);color:var(--fg)}
+button.sm{font-size:12px}
+button.primary,button.primary:hover{background:var(--accent);border-color:var(--accent);
+  color:var(--on-accent);font-weight:600;filter:none}
+button.primary:hover{background:var(--accent2);border-color:var(--accent2)}
+.go-btn,.bigbtn{font:600 16px/1 var(--ui) !important;border-radius:4px !important;
+  min-height:44px;padding:0 28px !important}
+input,select,textarea{background:var(--well);border:1px solid var(--line2);
+  border-radius:4px;color:var(--fg);font:13px/1.3 var(--ui)}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.pill{border-radius:3px;font-size:12px}
+.themebtn{border-radius:4px}
+/* sub-navigation tabs: underline, not pills */
+#subnav a{border-radius:0;border:0;border-bottom:2px solid transparent;
+  padding:6px 2px;margin-right:14px;background:none;color:var(--dim);font:500 13px var(--ui)}
+#subnav a:hover{color:var(--fg);background:none}
+#subnav a.on{color:var(--fg);border-bottom-color:var(--accent);background:none}
+
+/* ---- Home -------------------------------------------------------------- */
+.home{gap:16px;max-width:1180px}
+.hero{border-radius:6px;min-height:240px;background:var(--panel);border:1px solid var(--line)}
+.hero .bg{opacity:.18}
+.hero .txt{padding:26px 28px;gap:10px;
+  background:linear-gradient(90deg,var(--panel) 45%,transparent)}
+.hero .kick{font:500 13px/1.2 var(--ui) !important;color:var(--dim)}
+.hero h2{font:600 26px/1.2 var(--display);max-width:22ch}
+.hero .chips span{border-radius:3px;background:var(--panel2);color:var(--dim);font-size:12px}
+.hero .acts{gap:8px;margin-top:6px}
+.hgrid{gap:16px}
+.srow{border-radius:4px;background:transparent;border-bottom:1px solid var(--line);
+  margin:0;padding:10px 4px}
+.srow:last-child{border-bottom:0}
+.srow img{border-radius:3px}
+.qa{gap:8px}
+.qa button{border-radius:4px;min-height:64px;padding:12px;background:var(--panel2)}
+.qa button b{font-weight:600;font-size:13px}
+
+/* ---- server browser bits that were styled as display type ------------- */
+.onl-tabs{border-radius:4px}
+.onl-tabs button{border-radius:3px}
+.onl .drive-row.srv img,.onl-foot .drive-pick img{border-radius:3px}
+.onl-foot .drive-pick,.drive-pick{border-radius:4px}
+.drive-pick b,.onl-foot .drive-pick .dp-bar b,.onl-sel .drive-pick .dp-bar b{
+  font:600 14px/1.3 var(--ui) !important}
+
+/* ---- scrollbars -------------------------------------------------------- */
+::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:6px}
+
+/* ---- no CSS-driven capitals anywhere -----------------------------------
+   The old layers set uppercase + wide tracking on ~25 label styles; the
+   words now read as written. Labels that were 9.5-10.5 px only worked as
+   tracked capitals, so they move to the 12 px step of the scale. */
+*,*::before,*::after{text-transform:none !important;letter-spacing:normal !important}
+header .sub,header .foot,th,.drive-direct .fav-title,.chip,.rowhead,.rowitem .tag,
+.dbrand,.car-specs .spec b,.livery-lab{font-size:12px !important}
+.rowhead{color:var(--dim);font-weight:600;padding-top:10px}
+.rowitem .tag,.chip{color:var(--dim2)}
+/* small chips and filter toggles: square-ish, quiet */
+.chip,.act,.cv-chip,.pill{border-radius:4px !important}
+.cv-chip.on{background:var(--panel2);border-color:var(--line2) !important;color:var(--fg) !important;
+  box-shadow:inset 0 -2px 0 var(--accent)}
+.cv-hero .cv-img,.cv-img{border-radius:4px !important}
+
+/* status pills read as coloured text with a dot, not boxed badges */
+.pill.on,.pill.warn,.pill.bad,.pill.err{background:none !important;border:0 !important;
+  padding:0 4px !important;font-weight:500}
+.pill.on{color:var(--ok) !important}
+.pill.warn{color:var(--gold) !important}
+/* library rows: the action buttons are quiet text buttons; one row = one line of weight */
+.lib-act{gap:2px}
+.lib-act button.sm{background:none;border-color:transparent;color:var(--dim)}
+.lib-act button.sm:hover{background:var(--panel3);color:var(--fg)}
+.lib-act button.sm.danger{color:var(--dim)}
+.lib-act button.sm.danger:hover{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.chk{border-radius:4px}
+/* a track picture that failed to load takes no room */
+.srow img[style*="hidden"]{display:none}
+
+/* ---- segmented controls ------------------------------------------------
+   One look for every "pick one of these" group (Single player / Online,
+   Session / Assists, All / Cars / Tracks, server car policy). The choice
+   shows as a raised segment; the accent stays on the button that DOES
+   something. JS still marks the chosen one with .primary (or .on). */
+.seg{display:inline-flex;gap:2px;padding:2px;border-radius:5px;
+  background:var(--well);border:1px solid var(--line);flex-wrap:wrap}
+.seg button,.seg button.primary{background:none;border:0;color:var(--dim);
+  font:500 13px/1.2 var(--ui);padding:6px 14px;border-radius:3px;min-height:0}
+.seg button:hover{background:var(--panel2);color:var(--fg)}
+.seg button.primary,.seg button.primary:hover,.seg button.on{
+  background:var(--panel3);color:var(--fg);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.seg .n,.onl-tabs .n{font:500 12px/1 var(--ui);color:var(--dim2);margin-left:4px}
+.seg button.primary .n,.onl-tabs button.on .n{color:var(--fg)}
+.panetabs.seg{display:inline-flex;margin:0 0 14px}
+.drive-via .seg{margin-bottom:4px}
+/* a toggle that opens something (Filters, Add by IP, Logs) */
+button.on{background:var(--panel3);border-color:var(--line2);color:var(--fg)}
+
+/* ---- Play: the car's numbers as a plain spec list, not a wall of tiles */
+.car-specs{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px 16px;margin-top:12px;
+  padding:12px 2px 2px;border-top:1px solid var(--line)}
+.car-specs .spec{border:0;background:none;padding:0;border-radius:0;
+  font:500 14px/1.3 var(--ui);gap:2px}
+.car-specs .spec b{color:var(--dim) !important;font:400 12px/1.2 var(--ui) !important}
+.drive-pick{border-radius:4px}
+.drive-pick .dp-bar b{font:600 16px/1.3 var(--ui) !important}
+.drive-pick .dp-sub{font-size:12px}
+.drive-go .go-btn{margin-top:6px}
+label.f > span{color:var(--dim);font-size:12px}
+
+/* ---- Host ---------------------------------------------------------------- */
+.pen-card .row{align-items:center;gap:12px;margin-bottom:6px}
+.list-head{align-items:center;gap:8px}
+.list-head h2{margin:0 !important}
+/* meta facts are spaced apart, not strung together with dots */
+.meta{display:flex;flex-wrap:wrap;gap:4px 14px}
+.pill.off{background:none !important;border:0 !important;padding:0 4px !important;color:var(--dim2)}
+details > summary{cursor:pointer;color:var(--dim)}
+details > summary:hover{color:var(--fg)}
+/* ⚠ the Session/Assists card picked up the generic .card bottom margin and
+   stopped 16px short of the Car/Track column beside it */
+.drive > .drive-col,.drive-left > .card{margin:0 !important}
+.sess-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.sess-grid > .drive-fields{grid-column:1/-1}
+@media (max-width:520px){.sess-grid{grid-template-columns:1fr}}
+
+/* Convert: Cars/Tracks and All/Not converted/Converted are segmented too */
+.seg .cv-chip{border:0 !important;border-radius:3px !important;padding:6px 14px;
+  font:500 13px/1.2 var(--ui);color:var(--dim) !important;box-shadow:none}
+.seg .cv-chip.on{background:var(--panel3);color:var(--fg) !important;box-shadow:0 1px 0 rgba(0,0,0,.25)}
+
+/* a cover that failed to load keeps its frame as a quiet placeholder
+   instead of leaving a blank hole in the grid */
+.no-pic{background:var(--well) !important;border-bottom:1px solid var(--line)}
+.grid.g3 > .stat{border-radius:6px}
+
+/* Session / Assists: two equal halves across the card, not a short pill
+   with an empty strip beside it */
+.panetabs.seg{display:flex;width:100%}
+.panetabs.seg button{flex:1 1 0;text-align:center}
+/* Track grip's labels are long ("Optimum - rubbered in"): full width, so
+   Time and Time multiplier pair up below it */
+.sess-grid > label.f:nth-child(3){grid-column:1/-1}
