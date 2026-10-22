@@ -28,8 +28,7 @@
    still wins through data-theme */
 :root:not([data-theme]),:root[data-theme="ember"],:root[data-theme=""]{
   --accent:#d9342b; --accent2:#b02a22; --accent3:#f07a3c; --on-accent:#fff}
-:root[data-theme]:not([data-theme="ember"]):not([data-theme=""]){--on-accent:#fff}
-:root[data-theme="amber"]{--on-accent:#1d1600}
+/* other themes keep their own --on-accent (dark text on the bright ones) */
 
 body{background:var(--bg);color:var(--fg);font:14px/1.5 var(--ui);
   -webkit-font-smoothing:antialiased}
@@ -168,3 +167,65 @@ header .sub,header .foot,th,.drive-direct .fav-title,.chip,.rowhead,.rowitem .ta
 .chk{border-radius:4px}
 /* a track picture that failed to load takes no room */
 .srow img[style*="hidden"]{display:none}
+
+/* ---- segmented controls ------------------------------------------------
+   One look for every "pick one of these" group (Single player / Online,
+   Session / Assists, All / Cars / Tracks, server car policy). The choice
+   shows as a raised segment; the accent stays on the button that DOES
+   something. JS still marks the chosen one with .primary (or .on). */
+.seg{display:inline-flex;gap:2px;padding:2px;border-radius:5px;
+  background:var(--well);border:1px solid var(--line);flex-wrap:wrap}
+.seg button,.seg button.primary{background:none;border:0;color:var(--dim);
+  font:500 13px/1.2 var(--ui);padding:6px 14px;border-radius:3px;min-height:0}
+.seg button:hover{background:var(--panel2);color:var(--fg)}
+.seg button.primary,.seg button.primary:hover,.seg button.on{
+  background:var(--panel3);color:var(--fg);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.seg .n,.onl-tabs .n{font:500 12px/1 var(--ui);color:var(--dim2);margin-left:4px}
+.seg button.primary .n,.onl-tabs button.on .n{color:var(--fg)}
+.panetabs.seg{display:inline-flex;margin:0 0 14px}
+.drive-via .seg{margin-bottom:4px}
+/* a toggle that opens something (Filters, Add by IP, Logs) */
+button.on{background:var(--panel3);border-color:var(--line2);color:var(--fg)}
+
+/* ---- Play: the car's numbers as a plain spec list, not a wall of tiles */
+.car-specs{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px 16px;margin-top:12px;
+  padding:12px 2px 2px;border-top:1px solid var(--line)}
+.car-specs .spec{border:0;background:none;padding:0;border-radius:0;
+  font:500 14px/1.3 var(--ui);gap:2px}
+.car-specs .spec b{color:var(--dim) !important;font:400 12px/1.2 var(--ui) !important}
+.drive-pick{border-radius:4px}
+.drive-pick .dp-bar b{font:600 16px/1.3 var(--ui) !important}
+.drive-pick .dp-sub{font-size:12px}
+.drive-go .go-btn{margin-top:6px}
+label.f > span{color:var(--dim);font-size:12px}
+
+/* ---- Host ---------------------------------------------------------------- */
+.pen-card .row{align-items:center;gap:12px;margin-bottom:6px}
+.list-head{align-items:center;gap:8px}
+.list-head h2{margin:0 !important}
+/* meta facts are spaced apart, not strung together with dots */
+.meta{display:flex;flex-wrap:wrap;gap:4px 14px}
+.pill.off{background:none !important;border:0 !important;padding:0 4px !important;color:var(--dim2)}
+details > summary{cursor:pointer;color:var(--dim)}
+details > summary:hover{color:var(--fg)}
+/* ⚠ the Session/Assists card picked up the generic .card bottom margin and
+   stopped 16px short of the Car/Track column beside it */
+.drive > .drive-col,.drive-left > .card{margin:0 !important}
+.sess-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.sess-grid > .drive-fields{grid-column:1/-1}
+@media (max-width:520px){.sess-grid{grid-template-columns:1fr}}
+
+/* Convert: Cars/Tracks and All/Not converted/Converted are segmented too */
+.seg .cv-chip{border:0 !important;border-radius:3px !important;padding:6px 14px;
+  font:500 13px/1.2 var(--ui);color:var(--dim) !important;box-shadow:none}
+.seg .cv-chip.on{background:var(--panel3);color:var(--fg) !important;box-shadow:0 1px 0 rgba(0,0,0,.25)}
+
+/* a cover that failed to load keeps its frame as a quiet placeholder
+   instead of leaving a blank hole in the grid */
+.no-pic{background:var(--well) !important;border-bottom:1px solid var(--line)}
+.grid.g3 > .stat{border-radius:6px}
+
+/* Session / Assists: two equal halves across the card, not a short pill
+   with an empty strip beside it */
+.panetabs.seg{display:flex;width:100%}
+.panetabs.seg button{flex:1 1 0;text-align:center}

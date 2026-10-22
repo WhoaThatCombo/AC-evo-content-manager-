@@ -83,7 +83,12 @@ async function tracksPage() {
       img.style.cssText = 'width:100%;display:block;aspect-ratio:16/9;'
         + 'object-fit:cover;background:#0c0e11';
       img.src = 'api/thumb/track?folder=' + encodeURIComponent(folder);
-      img.onerror = () => { img.style.visibility = 'hidden'; };   // leave it blank
+      // no cover: an empty frame of the same size, not a broken-image icon
+      img.onerror = () => {
+        const ph = el('div', 'no-pic');
+        ph.style.aspectRatio = '16 / 9';
+        img.replaceWith(ph);
+      };
       const cap = el('div');
       cap.style.cssText = 'padding:8px 10px';
       cap.innerHTML = `<b style="font-size:13px">${esc(name)}</b>`

@@ -11,6 +11,15 @@ function _pill(node, on, text, offClass) {
   if (node.innerHTML !== want) node.innerHTML = want;
 }
 
+/* PRACTICE / SCATTERED_CLOUDS -> Practice / Scattered clouds: the game's
+   enum names, read as words. Anything already mixed-case is left alone. */
+function enumLabel(s) {
+  s = String(s);
+  if (s !== s.toUpperCase()) return s.replace(/_/g, ' ');
+  const w = s.replace(/_/g, ' ').toLowerCase();
+  return w.charAt(0).toUpperCase() + w.slice(1);
+}
+
 function _setText(node, text) {
   const s = String(text);
   if (node.textContent !== s) node.textContent = s;

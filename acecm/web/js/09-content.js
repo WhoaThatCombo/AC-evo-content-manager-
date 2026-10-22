@@ -741,9 +741,9 @@ async function libraryCard(p) {
     contentPage();
   };
   let filter = 'all';
-  const tabAll = el('button', 'sm primary', `All · ${cars.length + tracks.length}`);
-  const tabCars = el('button', 'sm', `Cars · ${cars.length}`);
-  const tabTr = el('button', 'sm', `Tracks · ${tracks.length}`);
+  const tabAll = el('button', 'sm primary', `All <span class="n">${cars.length + tracks.length}</span>`);
+  const tabCars = el('button', 'sm', `Cars <span class="n">${cars.length}</span>`);
+  const tabTr = el('button', 'sm', `Tracks <span class="n">${tracks.length}</span>`);
   const list = el('div');
   const setTab = (name) => {
     filter = name;
@@ -765,7 +765,9 @@ async function libraryCard(p) {
   tabAll.onclick = () => setTab('all');
   tabCars.onclick = () => setTab('car');
   tabTr.onclick = () => setTab('track');
-  tools.append(pick, inp, tabAll, tabCars, tabTr);
+  const tabs = el('div', 'seg');
+  tabs.append(tabAll, tabCars, tabTr);
+  tools.append(pick, inp, tabs);
   c.append(tools, list);
   p.append(c);
   setTab('all');

@@ -238,7 +238,7 @@ async function drivePage() {
   const isOnline = () => ONLINE.includes(sel.via);
   if (!sel.onlineVia) sel.onlineVia = isOnline() ? sel.via : 'local';
 
-  const modeRow = el('div', 'row');
+  const modeRow = el('div', 'seg');
   const subRow = el('div', 'row subrow');
 
   function setVia(v) {
@@ -627,7 +627,7 @@ async function drivePage() {
      section at the bottom. Assists is a thing you set, not a thing you read
      past, so it gets equal billing and is always fully open once selected. */
   goCol.innerHTML = '';
-  const paneTabs = el('div', 'panetabs');
+  const paneTabs = el('div', 'panetabs seg');
   const sessionPane = el('div', 'pane');
   const assistPane = el('div', 'pane');
   assistPane.style.display = 'none';
@@ -645,14 +645,14 @@ async function drivePage() {
   goCol.append(paneTabs, sessionPane, assistPane);
   const mode = el('select');
   (d.game_modes || []).forEach(m => {
-    const o = el('option', null, m.replace(/_/g, ' '));
+    const o = el('option', null, enumLabel(m));
     o.value = m;
     if (m === sel.game_mode) o.selected = true;
     mode.append(o);
   });
   const weather = el('select');
   (d.weather || []).forEach(m => {
-    const o = el('option', null, m.replace(/_/g, ' '));
+    const o = el('option', null, enumLabel(m));
     o.value = m;
     if (m === sel.weather) o.selected = true;
     weather.append(o);
@@ -702,9 +702,12 @@ async function drivePage() {
   tmult.title = 'How fast the clock runs. These are the only values the game '
     + 'accepts.';
   tmult.onchange = () => { sel.time_mult = Number(tmult.value); };
-  sessionPane.append(mkf('Game mode', mode), mkf('Weather', weather),
-                     mkf('Track grip', grip), mkf('Time', hour),
-                     mkf('Time multiplier', tmult), extras);
+  // two columns: one tall stack of six selects pushed Drive below the fold
+  const sessGrid = el('div', 'sess-grid');
+  sessGrid.append(mkf('Game mode', mode), mkf('Weather', weather),
+                  mkf('Track grip', grip), mkf('Time', hour),
+                  mkf('Time multiplier', tmult), extras);
+  sessionPane.append(sessGrid);
   const driveBtn = el('button', 'primary go-btn', 'Drive');
   const st = el('div', 'drive-status tiny dim');
   const pwField = el('label', 'f');
@@ -742,7 +745,7 @@ async function drivePage() {
   const filtBtn = el('button', 'sm', 'Filters');
   filtBtn.onclick = () => {
     onl.classList.toggle('filters-open');
-    filtBtn.classList.toggle('primary', onl.classList.contains('filters-open'));
+    filtBtn.classList.toggle('on', onl.classList.contains('filters-open'));
   };
   const refreshBtn = el('button', 'sm', 'Refresh');
   refreshBtn.title = 'Ask the lobby for the public list (a few seconds). If '
@@ -762,7 +765,7 @@ async function drivePage() {
     e.stopPropagation();
     const open = !onl.classList.contains('direct-open');
     onl.classList.toggle('direct-open', open);
-    ipBtn.classList.toggle('primary', open);
+    ipBtn.classList.toggle('on', open);
     if (open) { const i = slotDirect.querySelector('input'); if (i) i.focus(); }
   };
   slotDirect.onclick = e => e.stopPropagation();
@@ -903,7 +906,7 @@ async function drivePage() {
   // ⚠ computed BEFORE the assists block is added: it selects direct-child
   // label.f, and the assists fields live one level down so they cannot be
   // caught by the single-player show/hide.
-  const spFields = sessionPane.querySelectorAll(':scope > label.f');
+  const spFields = sessionPane.querySelectorAll(':scope > .sess-grid > label.f');
 
   /* ---- assists ----------------------------------------------------------
      The game stores these in the profile (Saved Games\ACE\AssistSettings), so

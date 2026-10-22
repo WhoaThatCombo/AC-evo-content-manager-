@@ -63,52 +63,48 @@ async function serversPage() {
   // content.kspkg itself, so every profile hosted from this server shares
   // one on/off state. Shown here rather than in the per-profile editor
   // because that is exactly what it is not scoped to.
-  const pc = el('div', 'card');
+  const pc = el('div', 'card pen-card');
   const pens = await api('penalties');
   pc.innerHTML = '<h2>Penalties</h2>';
   const pdim = el('div', 'tiny dim',
     'A Kunos content update replaces content.kspkg wholesale, which silently '
-    + 'resets this to ON along with everything else in the archive - if it '
+    + 'resets this to on along with everything else in the archive - if it '
     + 'looks flipped after an update, that is why, not a bug.');
-  pc.append(pdim);
   const prow = el('div', 'row');
   // ⚠ server only. The client/single-player switch moved to Drive > Assists,
   // where it reads as the personal setting it is.
   for (const side of ['server']) {
     const info = pens && pens[side];
     if (!info) continue;
-    const label = 'Dedicated server (affects everyone who joins)';
-    const box = el('div', 'card');
-    box.style.flex = '1';
     const isOff = info.state === 'off';
     const isOn = info.state === 'on';
-    const stateText = isOff ? 'OFF' : isOn ? 'ON' : info.state;
-    box.innerHTML = `<div><b>${esc(label)}</b></div>
-      <div class="tiny dim">${esc(info.path)}</div>
-      <div style="margin:6px 0">state: <b>${esc(stateText)}</b></div>`;
+    const stateText = isOff ? 'Off' : isOn ? 'On' : info.state;
+    const box = el('div', 'grow');
+    box.innerHTML = `<div>Dedicated server: <b>${esc(stateText)}</b>
+      <span class="dim">- applies to everyone who joins</span></div>`;
+    box.title = info.path;
+    prow.append(box);
     if (isOff || isOn) {
-      const btn = el('button', isOff ? 'sm' : 'sm danger',
-        isOff ? 'Turn penalties ON' : 'Turn penalties OFF');
+      const btn = el('button', 'sm', isOff ? 'Turn on' : 'Turn off');
       btn.onclick = async () => {
         const r = await api('penalties/set', { side, off: isOn });
-        toast(r.ok ? `Penalties now ${(r.state || '').toUpperCase()} (${side})`
+        toast(r.ok ? `Penalties now ${r.state || ''} (${side})`
                    : (r.error || 'Failed'), !r.ok);
         serversPage();
       };
-      box.append(btn);
+      prow.append(btn);
     }
-    prow.append(box);
   }
-  pc.append(prow);
+  pc.append(prow, pdim);
   p.append(pc);
 
-  const head = el('div', 'row');
-  const add = el('button', 'primary', '+ New server');
-  add.onclick = () => { editing = { ...template }; serversPage(); };
-  head.append(add);
-  const stopAll = el('button', 'danger', 'Stop all');
+  const head = el('div', 'row list-head');
+  head.append(el('h2', 'grow', 'Your servers'));
+  const stopAll = el('button', '', 'Stop all');
   stopAll.onclick = async () => { await api('server/stop', {}); toast('Stopped'); };
-  head.append(stopAll);
+  const add = el('button', 'primary', 'New server');
+  add.onclick = () => { editing = { ...template }; serversPage(); };
+  head.append(stopAll, add);
   p.append(el('div', 'card').appendChild(head).parentElement);
 
   if (editing) {
@@ -142,12 +138,12 @@ async function serversPage() {
       : (t ? t.label : 'track ' + prof.track_index);
     card.innerHTML = `<div class="row"><div class="grow">
         <b>${esc(prof.name)}</b>
-        <div class="tiny dim">${esc(shown)}
-        &middot; ${esc(prof.game_mode || 'PRACTICE')}
-        &middot; ${esc((prof.car_policy && prof.car_policy.label) || 'all cars')}
-        &middot; ${prof.max_players} slots
-        ${prof.driver_password ? '&middot; 🔒' : ''}
-        &middot; :${prof.tcp_port}</div></div>
+        <div class="tiny dim meta">${[esc(shown),
+          esc(enumLabel(prof.game_mode || 'PRACTICE')),
+          esc((prof.car_policy && prof.car_policy.label) || 'all cars'),
+          prof.max_players + ' slots',
+          prof.driver_password ? 'password' : '',
+          'port ' + prof.tcp_port].filter(Boolean).map(x => `<span>${x}</span>`).join('')}</div></div>
         <span class="pill off" data-st="${prof.id}"><i class="dot"></i>checking</span>
       </div>`;
     const row = el('div', 'row wrap');
@@ -243,7 +239,7 @@ async function serversPage() {
     logs.onclick = async () => {
       const opening = pre.style.display === 'none';
       pre.style.display = opening ? '' : 'none';
-      logs.classList.toggle('primary', opening);
+      logs.classList.toggle('on', opening);
       if (!opening) { stopLog(); return; }
       logAt = 0;
       await pullLog();
@@ -401,7 +397,7 @@ async function serversPage() {
     const more = el('details');
     more.style.marginTop = '8px';
     more.append(el('summary', 'tiny dim',
-                   'More — logs, share package, delete'));
+                   'Logs, share package, delete'));
     const extra = el('div', 'row wrap');
     extra.style.marginTop = '8px';
     // ⚠ telemetry controls (tOn/tOff/tView/tLink/tpill) are deliberately not
@@ -491,7 +487,7 @@ function editor(prof, trk, opts, extra) {
       inp = el('select');
       (extra || []).forEach(o => {
         const val = (o && o.value !== undefined) ? o.value : o;
-        const txt = (o && o.label !== undefined) ? o.label : String(o).replace(/_/g, ' ');
+        const txt = (o && o.label !== undefined) ? o.label : enumLabel(String(o));
         const op = el('option', null, esc(txt));
         op.value = val;
         if (String(val) === String(prof[key])) op.selected = true;
@@ -761,21 +757,25 @@ function editor(prof, trk, opts, extra) {
     policy.innerHTML = '';
     const stockRow = el('div', 'row wrap');
     stockRow.append(el('span', 'tiny dim', 'Stock cars'));
+    const stockSeg = el('div', 'seg');
     [[true, 'All Kunos'], [false, 'Only the ones I pick']].forEach(([v, lab]) => {
       const b = el('button',
         'sm' + ((!!prof.allow_kunos === v) ? ' primary' : ''), lab);
       b.onclick = () => setStock(v);
-      stockRow.append(b);
+      stockSeg.append(b);
     });
+    stockRow.append(stockSeg);
     const modRow = el('div', 'row wrap');
     modRow.style.marginTop = '6px';
     modRow.append(el('span', 'tiny dim', 'Modded cars'));
+    const modSeg = el('div', 'seg');
     [['all', 'All mods'], ['none', 'No mods'],
      ['pick', 'Only the ones I pick']].forEach(([k, lab]) => {
       const b = el('button', 'sm' + (prof.mods === k ? ' primary' : ''), lab);
       b.onclick = () => setMods(k);
-      modRow.append(b);
+      modSeg.append(b);
     });
+    modRow.append(modSeg);
     policy.append(stockRow, modRow);
     chips.innerHTML = '';
     const note =
