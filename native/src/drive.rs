@@ -515,7 +515,7 @@ pub fn write_gamemode_into(root: &Path, pick: &Map<String, Value>, check_game: b
     let save_path = gmdir.join(format!("{mode}.gamemodesave"));
     let last_path = gmdir.join("gamemode.lastgamemode");
     let Some(desc) = protos::find("GameModeSave") else {
-        return json!({"ok": false, "error": "GameModeSave schema is missing"});
+        return json!({"ok": false, "error": protos::missing("GameModeSave")});
     };
     let mut obj = match std::fs::read(&save_path) {
         Ok(b) => match DynamicMessage::decode(desc.clone(), b.as_slice()) {
