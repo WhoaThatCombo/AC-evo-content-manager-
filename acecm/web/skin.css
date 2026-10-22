@@ -237,3 +237,14 @@ details > summary:hover{color:var(--fg)}
 .side-stat .upd-btn{margin-top:8px;width:100%;background:var(--accent);border-color:var(--accent);
   color:var(--on-accent);font-weight:600}
 .side-stat .upd-btn:hover{background:var(--accent2);border-color:var(--accent2)}
+.upd-pop{position:fixed;right:20px;bottom:20px;z-index:900;width:320px;max-width:calc(100vw - 32px);
+  background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:14px 16px 12px;
+  box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;flex-direction:column;gap:6px}
+.upd-pop b{font:600 14px/1.3 var(--ui);padding-right:20px}
+.upd-pop .row{gap:8px;margin-top:6px}
+.upd-pop .upd-x{position:absolute;top:6px;right:6px;width:26px;height:26px;padding:0;
+  background:none;border:0;color:var(--dim);font-size:18px;line-height:1}
+.upd-pop .upd-x:hover{color:var(--fg);background:var(--panel3)}
+@media (prefers-reduced-motion:no-preference){
+  .upd-pop{animation:upd-in .2s ease-out}
+  @keyframes upd-in{from{opacity:0;transform:translateY(8px)}}}

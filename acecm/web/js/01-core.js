@@ -233,10 +233,42 @@ function liveStart() {
   // the check itself runs in the background on the app side; this only
   // reads its cached answer, so it never waits on the network
   const upd = () => fetch('/api/update/status').then(r => r.json())
-    .then(u => { live.update = u && u.available ? u.latest : ''; }).catch(() => {});
+    .then(u => {
+      live.update = u && u.available ? u.latest : '';
+      if (live.update) updatePopup(live.update);
+    }).catch(() => {});
   setTimeout(upd, 30000);
-  setInterval(upd, 10 * 60000);
+  setInterval(upd, 5 * 60000);
   liveKick();
+}
+
+/* A floating card when a release is out: stays up for a few minutes unless
+   dismissed. Dismissed = not shown again for that version; timed out = shown
+   again next launch. The sidebar button stays either way. */
+const UPD_SHOW_MS = 3 * 60000;
+let _updShown = '';
+function updatePopup(ver) {
+  let gone = '';
+  try { gone = localStorage.getItem('acecm.upd.dismissed') || ''; } catch (e) { /* no storage */ }
+  if (ver === gone || ver === _updShown) return;
+  _updShown = ver;
+  const card = el('div', 'upd-pop');
+  card.setAttribute('role', 'status');
+  card.innerHTML = `<button class="upd-x" title="Dismiss" aria-label="Dismiss">×</button>
+    <b>ACECM ${esc(ver)} is available</b>
+    <div class="tiny dim">You have ${esc(live.version || '')}. Updating restarts ACECM.</div>
+    <div class="row"><button class="sm primary upd-go">Update</button>
+      <button class="sm upd-later">Later</button></div>`;
+  const close = (dismiss) => {
+    if (dismiss) { try { localStorage.setItem('acecm.upd.dismissed', ver); } catch (e) { /* no storage */ } }
+    clearTimeout(t);
+    card.remove();
+  };
+  const t = setTimeout(() => close(false), UPD_SHOW_MS);
+  card.querySelector('.upd-x').onclick = () => close(true);
+  card.querySelector('.upd-later').onclick = () => close(true);
+  card.querySelector('.upd-go').onclick = () => { close(false); installUpdate(ver); };
+  document.body.append(card);
 }
 
 let _updBusy = false;

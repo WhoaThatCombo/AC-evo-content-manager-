@@ -192,7 +192,7 @@ pub fn cached() -> Value {
     }
 }
 
-/// Background update check: once ~20 s after launch, then every 6 hours.
+/// Background update check: once ~20 s after launch, then every hour.
 /// ⚠ Its own thread, so a slow or offline GitHub never holds up a page or
 /// startup; the request itself has a timeout. Installs nothing: the UI
 /// offers the update and the user clicks.
@@ -210,7 +210,7 @@ pub fn watch() {
                     crate::logs::info(format!("update available: {} -> {}", VERSION, r["latest"]));
                 }
             }
-            std::thread::sleep(Duration::from_secs(6 * 3600));
+            std::thread::sleep(Duration::from_secs(3600));
         }
     });
 }
