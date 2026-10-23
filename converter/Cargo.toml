@@ -24,6 +24,9 @@ libloading = "0.8"
 indexmap = "2"
 rustc-hash = "2"
 flate2 = "1"
+aes = "0.8"
+cbc = { version = "0.1", features = ["block-padding", "alloc"] }
+sha2 = "0.10"
 lewton = { version = "0.10.2", default-features = false }
 liblzma = { version = "0.4.8", features = ["static"] }
 zstd = { version = "0.13", default-features = false }

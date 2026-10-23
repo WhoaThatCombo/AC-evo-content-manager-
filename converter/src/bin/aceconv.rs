@@ -371,6 +371,26 @@ fn run() -> Result<()> {
                 println!("{}{d}", if dry { "would remove " } else { "removed " });
             }
         }
+        "kn5-lock" => {
+            // exit 0: this kn5 opens (plain, or decryptable); 1: locked, reason on stdout
+            match aceconv::ac1::kn5_decrypt::status(Path::new(arg(2)?)) {
+                Ok(()) => println!("ok"),
+                Err(e) => {
+                    println!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "car-lock" => {
+            // exit 0: the car's model opens (plain, or decryptable); 1: locked, reason on stdout
+            match aceconv::ac1::car::Car::open(Path::new(arg(2)?)) {
+                Ok(_) => println!("ok"),
+                Err(e) => {
+                    println!("{e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "car-frame" => {
             let car = aceconv::ac1::car::Car::open(Path::new(arg(2)?))?;
             let k = car.kn5()?;
@@ -477,7 +497,9 @@ fn run() -> Result<()> {
         }
         "track" => {
             let id = a.iter().position(|x| x == "--id").and_then(|i| a.get(i + 1)).cloned();
-            let opt = aceconv::track::build::Options { id, content: None };
+            let layouts = a.iter().position(|x| x == "--layouts").and_then(|i| a.get(i + 1))
+                .map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+            let opt = aceconv::track::build::Options { id, content: None, layouts };
             let r = aceconv::track::build::convert(Path::new(arg(2)?), Path::new(arg(3)?), &opt)?;
             for l in &r.report {
                 println!("{l}");

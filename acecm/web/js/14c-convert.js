@@ -256,7 +256,7 @@ async function convertPage() {
   // track details: map, facts, layouts, the model files and where they are
   const tdet = el('div', 'cv-tdet');
   tdet.hidden = true;
-  let tLayout = '', tSource = '', tBlocked = false, tReq = 0, pReq = 0;
+  let tLayout = '', tSel = null, tAll = [], tSource = '', tBlocked = false, tReq = 0, pReq = 0;
   let lastId = '';
   let replaceIds = [];
   cc.append(hero, tdet, prog);
@@ -414,7 +414,7 @@ async function convertPage() {
     prevBox.innerHTML = '';
     replaceIds = [];
     if (T) {
-      if (c.folder !== tdet.dataset.folder) { tLayout = ''; tSource = ''; }
+      if (c.folder !== tdet.dataset.folder) { tLayout = ''; tSource = ''; tSel = null; }
       tdet.dataset.folder = c.folder;
       trackDetails(c);
     } else {
@@ -451,16 +451,27 @@ async function convertPage() {
     if (!lays.some(x => x.layout === tLayout)) tLayout = (lays[0] || {}).layout || '';
     const cur = lays.find(x => x.layout === tLayout) || lays[0] || { ui: {} };
     const u = cur.ui || {};
-    // layout picker (the map and facts follow it; every layout is converted)
+    // layout picker: the tick chooses what is converted, the name previews its map and facts
+    tAll = lays.map(x => x.layout);
+    if (!tSel) tSel = new Set(tAll);
     if (lays.length > 1) {
       const row = el('div', 'row wrap');
       row.style.marginBottom = '8px';
-      row.append(el('span', 'tiny dim', 'Layouts (all are converted)'));
+      row.append(el('span', 'tiny dim', 'Layouts to convert'));
       for (const x of lays) {
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = tSel.has(x.layout);
+        cb.title = 'Convert this layout';
+        cb.onchange = () => {
+          if (cb.checked) tSel.add(x.layout);
+          else if (tSel.size > 1) tSel.delete(x.layout);
+          else cb.checked = true;
+        };
         const b = el('button', 'cv-chip' + (x.layout === tLayout ? ' on' : ''), esc((x.ui || {}).name || x.layout));
         b.title = x.layout;
         b.onclick = () => { tLayout = x.layout; trackDetails(c); };
-        row.append(b);
+        row.append(cb, b);
       }
       left.append(row);
     }
@@ -542,7 +553,7 @@ async function convertPage() {
     if (!cvPick) { toast('Pick a ' + noun + ' first', true); return; }
     const r = T
       ? await api('convert/track_start', { track: cvPick, id: idIn.value.trim(), install: cbC.querySelector('input').checked,
-          source: tSource, replace: replaceIds })
+          source: tSource, replace: replaceIds, layouts: tSel && tSel.size < tAll.length ? [...tSel] : [] })
       : await api('convert/start', { car: cvPick, id: idIn.value.trim(), replace: replaceIds,
           install_client: cbC.querySelector('input').checked, install_server: cbS.querySelector('input').checked });
     if (r.ok) poll(); else toast(r.error || 'could not start', true);

@@ -678,8 +678,10 @@ fn author_lods(ext: &mut Built, k0: &Kn5, p: &Plan, f: &Frame, a: &Author) -> Ve
     let mut used = 0;
     for (li, file) in a.files.iter().take(3).enumerate() {
         let level = li + 2;
-        let Ok(fh) = std::fs::File::open(file) else { continue };
-        let Ok(map) = (unsafe { memmap2::Mmap::map(&fh) }) else { continue };
+        let Ok(map) = crate::ac1::kn5_decrypt::open(file) else {
+            notes.push(format!("lods: {} is protected - simplified level kept", file.display()));
+            continue;
+        };
         if crate::ac1::kn5::protected(&map) {
             notes.push(format!("lods: {} is protected - simplified level kept", file.display()));
             continue;

@@ -74,7 +74,7 @@ pub fn tracks() -> Value {
             }
             let mut t = ui_track(p, ls.first().map(|x| x.as_str()));
             t.insert("layouts".into(), json!(ls));
-            t.insert("protected".into(), json!(track_kn5s(p).iter().any(|k| kn5_protected(k))));
+            t.insert("protected".into(), json!(used_kn5s(p).iter().any(|k| kn5_protected(k))));
             Some(t)
         }) else { continue };
         let folder = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -120,6 +120,41 @@ pub fn image(folder: &str, layout: &str, outline: bool) -> Option<PathBuf> {
         c.push(dir.join("ui").join(n));
     }
     c.into_iter().find(|p| p.is_file())
+}
+
+/// The kn5 files the layouts actually load (the FILE= lines of models*.ini,
+/// else <folder>.kn5). Spare copies kept in sub-folders ("Enhanced Version")
+/// don't count towards a track being locked.
+fn used_kn5s(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            if !(n.starts_with("models") && n.ends_with(".ini")) {
+                continue;
+            }
+            let Ok(text) = std::fs::read(e.path()) else { continue };
+            for line in String::from_utf8_lossy(&text).lines() {
+                let Some((k, val)) = line.split_once('=') else { continue };
+                if !k.trim().eq_ignore_ascii_case("file") {
+                    continue;
+                }
+                let p = dir.join(val.trim().replace('\\', "/"));
+                if p.is_file() && !v.contains(&p) {
+                    v.push(p);
+                }
+            }
+        }
+    }
+    if v.is_empty() {
+        let own = dir.join(format!("{}.kn5", dir.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()));
+        if own.is_file() {
+            v.push(own);
+        } else {
+            return track_kn5s(dir);
+        }
+    }
+    v
 }
 
 /// Every .kn5 of a track (models_*.ini can point into sub-folders).
@@ -183,10 +218,12 @@ pub fn info(folder: &str, source: &str) -> Value {
         ls.iter().map(|l| json!({"layout": l, "ui": ui_track(&dir, Some(l)), "outline": image(folder, l, true).is_some()})).collect()
     };
     let mut total = 0u64;
+    let used = used_kn5s(&dir);
     let files: Vec<Value> = track_kn5s(&dir).iter().map(|p| {
         let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         total += size;
-        json!({"name": p.strip_prefix(&dir).unwrap_or(p).to_string_lossy(), "size": size, "protected": kn5_protected(p)})
+        let in_use = used.contains(p);
+        json!({"name": p.strip_prefix(&dir).unwrap_or(p).to_string_lossy(), "size": size, "protected": in_use && kn5_protected(p), "unused": !in_use})
     }).collect();
     let locked = files.iter().filter(|f| f["protected"].as_bool() == Some(true)).count();
     let ext = dir.join("extension").join("ext_config.ini").is_file();
@@ -462,6 +499,8 @@ pub fn start(body: &Value) -> Value {
     let install = body.get("install").and_then(|v| v.as_bool()).unwrap_or(true);
     let replace: Vec<String> = body.get("replace").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string())
         .filter(|x| *x != id && valid_folder(x) && x.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')).collect()).unwrap_or_default();
+    let layouts: Vec<String> = body.get("layouts").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty() && valid_folder(x)).collect()).unwrap_or_default();
     if !valid_folder(&track) {
         return json!({"ok": false, "error": "pick a track"});
     }
@@ -486,7 +525,7 @@ pub fn start(body: &Value) -> Value {
     if !game_content().is_file() {
         return json!({"ok": false, "error": "Assetto Corsa EVO's content.kspkg was not found - set the game folder in Settings"});
     }
-    if track_kn5s(&ac1).iter().any(|k| kn5_protected(k)) {
+    if used_kn5s(&ac1).iter().any(|k| kn5_protected(k)) {
         return json!({"ok": false, "error": "This track is protected by its author (CSP encryption), so it can't be converted. If the author sent you an unencrypted copy, point \"Convert from\" at it."});
     }
     let _ = std::fs::create_dir_all(&out);
@@ -497,7 +536,11 @@ pub fn start(body: &Value) -> Value {
         }
         *j = Job::running(format!("track:{track}"), id.clone());
     }
-    let args = vec!["track".to_string(), ac1.to_string_lossy().into_owned(), out.to_string_lossy().into_owned(), "--id".into(), id.clone()];
+    let mut args = vec!["track".to_string(), ac1.to_string_lossy().into_owned(), out.to_string_lossy().into_owned(), "--id".into(), id.clone()];
+    if !layouts.is_empty() {
+        args.push("--layouts".into());
+        args.push(layouts.join(","));
+    }
     logs::info(format!("convert track: {track} -> {id}"));
     std::thread::spawn(move || {
         let Some((code, secs, cancelled)) = run_converter(&conv, &args, &out) else { return };

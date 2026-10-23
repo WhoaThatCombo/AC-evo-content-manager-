@@ -30,6 +30,8 @@ pub struct Options {
     /// the game's content.kspkg (stock templates and ids); None = default
     /// location, ignored when missing
     pub content: Option<PathBuf>,
+    /// AC1 layout folder names to convert; empty = every layout
+    pub layouts: Vec<String>,
 }
 
 pub struct Converted {
@@ -284,7 +286,10 @@ fn bake(scan: &Scan, id: &str, out: &Path, mo: &meshes::Output, mats: &super::ma
 
 pub fn convert(src_dir: &Path, out_root: &Path, opt: &Options) -> Result<Converted> {
     let t0 = std::time::Instant::now();
-    let source = Source::open(src_dir)?;
+    let mut source = Source::open(src_dir)?;
+    if !opt.layouts.is_empty() {
+        source.keep_layouts(&opt.layouts)?;
+    }
     let scan = Scan::new(&source)?;
     let content = opt.content.clone().unwrap_or_else(crate::io::gamedir::evo_content);
     let pkg = Pkg::open(&content).ok();

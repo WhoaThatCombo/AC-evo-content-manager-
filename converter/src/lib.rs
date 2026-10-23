@@ -15,6 +15,7 @@ pub mod ac1 {
     pub mod car;
     pub mod ini;
     pub mod kn5;
+    pub mod kn5_decrypt;
     pub mod knh;
     pub mod ksanim;
     pub mod ui;

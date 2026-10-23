@@ -4,8 +4,8 @@
 //! `lods.ini`, the collider, `ui\ui_car.json` and the skins.
 //!
 //! LOD0 is `lods.ini [LOD_0] FILE`, else the largest kn5 that is not the
-//! collider and has no `_lod_` in its name. A kn5 protected by its author
-//! (Custom Shaders Patch encryption) is refused.
+//! collider and has no `_lod_` in its name. A kn5 encrypted with Custom Shaders
+//! Patch (tail envelope) is decrypted in memory; other protection is refused.
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ac1::ini::{self, Ini};
 use crate::ac1::kn5;
+use crate::ac1::kn5_decrypt::{self, Kn5Bytes};
 
 pub struct Lod {
     pub file: PathBuf,
@@ -28,7 +29,7 @@ pub struct Car {
     /// lower-case file name -> latin-1 text
     pub data: BTreeMap<String, String>,
     pub kn5_path: PathBuf,
-    kn5_map: memmap2::Mmap,
+    kn5_map: Kn5Bytes,
     /// author LODs after LOD0 (lods.ini order), when lods.ini lists them
     pub lods: Vec<Lod>,
     /// LOD0's own OUT distance from lods.ini
@@ -40,11 +41,6 @@ pub struct Car {
     pub skins: Vec<String>,
     /// the ini files parsed once: lower-case name -> Ini
     inis: BTreeMap<String, Ini>,
-}
-
-fn map(p: &Path) -> Result<memmap2::Mmap> {
-    let f = std::fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
-    Ok(unsafe { memmap2::Mmap::map(&f)? })
 }
 
 fn is_kn5(p: &Path) -> bool {
@@ -105,7 +101,7 @@ impl Car {
                 best.map(|(_, p)| p).ok_or_else(|| anyhow::anyhow!("{}: no kn5 model", dir.display()))?
             }
         };
-        let kn5_map = map(&kn5_path)?;
+        let kn5_map = kn5_decrypt::open(&kn5_path).with_context(|| format!("{}: opening the kn5", kn5_path.display()))?;
         if kn5::protected(&kn5_map) {
             bail!("{}: the model is protected by its author (encrypted kn5) and cannot be converted", kn5_path.display());
         }

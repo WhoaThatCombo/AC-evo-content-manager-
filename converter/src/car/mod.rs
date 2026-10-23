@@ -138,8 +138,10 @@ fn collider(files: &mut Files, car: &Car, f: &frame::Frame, id: &str, stem: &str
         notes.push("collider: no collider.kn5 - the donor's stays".into());
         return notes;
     };
-    let Ok(file) = std::fs::File::open(cp) else { return notes };
-    let Ok(map) = (unsafe { memmap2::Mmap::map(&file) }) else { return notes };
+    let Ok(map) = crate::ac1::kn5_decrypt::open(cp) else {
+        notes.push("collider: collider.kn5 is protected - the donor's stays".into());
+        return notes;
+    };
     if crate::ac1::kn5::protected(&map) {
         notes.push("collider: collider.kn5 is protected - the donor's stays".into());
         return notes;

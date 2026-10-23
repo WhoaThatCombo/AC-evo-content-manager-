@@ -42,13 +42,14 @@
 //!   [`LIFT`] is the one place to change that.
 
 use anyhow::{bail, Context, Result};
-use memmap2::Mmap;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::ac1::ai::{self, AiLine};
 use crate::ac1::ini::{self, Ini};
 use crate::ac1::kn5::{self, Kn5, Material, Mesh, NodeKind, Texture};
+use crate::ac1::kn5_decrypt::{self, Kn5Bytes};
 use crate::ac1::ui::TrackUi;
 
 /// Vertical offset applied to everything (see the module notes).
@@ -95,7 +96,7 @@ pub struct Source {
     pub folder: String,
     pub layouts: Vec<LayoutDef>,
     /// (file name as written in the ini, map), one per distinct kn5
-    pub maps: Vec<(String, Mmap)>,
+    pub maps: Vec<(String, Kn5Bytes)>,
     /// models skipped (listed but missing)
     pub notes: Vec<String>,
 }
@@ -129,6 +130,15 @@ fn models_of(ini: &Ini) -> Vec<ModelRef> {
 }
 
 impl Source {
+    /// Keep only the layouts whose AC1 folder name is in `names` (case-insensitive).
+    pub fn keep_layouts(&mut self, names: &[String]) -> Result<()> {
+        self.layouts.retain(|l| names.iter().any(|n| n.eq_ignore_ascii_case(&l.name)));
+        if self.layouts.is_empty() {
+            bail!("{}: none of the chosen layouts exist ({})", self.folder, names.join(", "));
+        }
+        Ok(())
+    }
+
     /// Find the layouts of the AC1 track at `dir` and map its kn5 files.
     /// Fails on a CSP-protected kn5 (those are encrypted by their author).
     pub fn open(dir: &Path) -> Result<Source> {
@@ -170,7 +180,7 @@ impl Source {
                 l.models.push(ModelRef { file: format!("{folder}.kn5"), position: [0.0; 3], rotation: [0.0; 3] });
             }
         }
-        let mut maps: Vec<(String, Mmap)> = Vec::new();
+        let mut maps: Vec<(String, Kn5Bytes)> = Vec::new();
         let mut notes = Vec::new();
         for l in &layouts {
             for m in &l.models {
@@ -181,9 +191,7 @@ impl Source {
                     notes.push(format!("model {} listed by layout {:?} is missing: skipped", m.file, l.name));
                     continue;
                 };
-                let f = std::fs::File::open(&p).with_context(|| format!("open {}", p.display()))?;
-                // SAFETY: read-only map of a file nobody writes while we convert
-                let map = unsafe { Mmap::map(&f) }.with_context(|| format!("map {}", p.display()))?;
+                let map = kn5_decrypt::open(&p).with_context(|| format!("{}: {}", folder, m.file))?;
                 if kn5::protected(&map) {
                     bail!("{}: {} is protected by its author (CSP kn5 encryption) - it cannot be converted", folder, m.file);
                 }

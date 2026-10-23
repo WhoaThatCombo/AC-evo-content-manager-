@@ -554,6 +554,37 @@ pub fn preview(folder: &str) -> Option<PathBuf> {
 const PROTECT_MARK: &[u8] = b"__AC_SHADERS_PATCH_KN5ENC";
 static PROTECTED: LazyLock<Mutex<std::collections::HashMap<PathBuf, (u64, u64, bool)>>> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// Does the file carry CSP's protection marker (at the start or the end)?
+fn kn5_marked(p: &Path, len: u64) -> bool {
+    // ⚠ the marker is at the START of some files and at the END of others
+    use std::io::{Read, Seek, SeekFrom};
+    let has = |b: &[u8]| b.windows(PROTECT_MARK.len()).any(|w| w == PROTECT_MARK);
+    std::fs::File::open(p).map(|mut f| {
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = f.read(&mut buf).unwrap_or(0);
+        if has(&buf[..n]) {
+            return true;
+        }
+        if len > buf.len() as u64 && f.seek(SeekFrom::End(-(buf.len() as i64))).is_ok() {
+            let n = f.read(&mut buf).unwrap_or(0);
+            return has(&buf[..n]);
+        }
+        false
+    }).unwrap_or(false)
+}
+
+/// A car is locked when some kn5 carries the marker AND the converter cannot
+/// open the car (its real model, found the way the converter finds it): an
+/// unused leftover like template.kn5 doesn't lock it.
+pub(crate) fn car_protected(dir: &Path) -> bool {
+    let marked = car_kn5s(dir).iter().any(|k| std::fs::metadata(k).map(|m| kn5_marked(k, m.len())).unwrap_or(false));
+    marked && !converter().is_some_and(|c| {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(c).arg("car-lock").arg(dir).creation_flags(0x0800_0000)
+            .output().map(|o| o.status.success()).unwrap_or(false)
+    })
+}
+
 pub(crate) fn kn5_protected(p: &Path) -> bool {
     let Ok(md) = std::fs::metadata(p) else { return false };
     let stamp = (md.len(), md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0));
@@ -562,21 +593,13 @@ pub(crate) fn kn5_protected(p: &Path) -> bool {
             return v;
         }
     }
-    // ⚠ the marker is at the START of some files and at the END of others
-    use std::io::{Read, Seek, SeekFrom};
-    let has = |b: &[u8]| b.windows(PROTECT_MARK.len()).any(|w| w == PROTECT_MARK);
-    let v = std::fs::File::open(p).map(|mut f| {
-        let mut buf = vec![0u8; 64 * 1024];
-        let n = f.read(&mut buf).unwrap_or(0);
-        if has(&buf[..n]) {
-            return true;
-        }
-        if md.len() > buf.len() as u64 && f.seek(SeekFrom::End(-(buf.len() as i64))).is_ok() {
-            let n = f.read(&mut buf).unwrap_or(0);
-            return has(&buf[..n]);
-        }
-        false
-    }).unwrap_or(false);
+    let v = kn5_marked(p, md.len());
+    // marked by CSP: still usable when the converter can decrypt it
+    let v = v && !converter().is_some_and(|c| {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(c).arg("kn5-lock").arg(p).creation_flags(0x0800_0000)
+            .output().map(|o| o.status.success()).unwrap_or(false)
+    });
     PROTECTED.lock().unwrap().insert(p.to_path_buf(), (stamp.0, stamp.1, v));
     v
 }
@@ -860,7 +883,7 @@ pub fn cars() -> Value {
                 return None;
             }
             let mut c = ui_car(p);
-            c.insert("protected".into(), json!(kn5s.iter().any(|k| kn5_protected(k))));
+            c.insert("protected".into(), json!(car_protected(p)));
             Some(c)
         }) else { continue };
         let folder = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -961,7 +984,7 @@ pub fn start(body: &Value) -> Value {
     if !game_content().is_file() {
         return json!({"ok": false, "error": "Assetto Corsa EVO's content.kspkg was not found - set the game folder in Settings"});
     }
-    if car_kn5s(&ac1).iter().any(|k| kn5_protected(k)) {
+    if car_protected(&ac1) {
         return json!({"ok": false, "error": "This car is protected by its author (CSP encryption), so it can't be converted. An unprotected copy from the author will work."});
     }
     if let Err(e) = std::fs::create_dir_all(&out) {
