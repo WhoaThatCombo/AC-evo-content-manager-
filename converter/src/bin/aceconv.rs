@@ -383,8 +383,21 @@ fn run() -> Result<()> {
         }
         "car-lock" => {
             // exit 0: the car's model opens (plain, or decryptable); 1: locked, reason on stdout
-            match aceconv::ac1::car::Car::open(Path::new(arg(2)?)) {
-                Ok(_) => println!("ok"),
+            // the key check on the model the converter would load: no decrypt
+            let lock = aceconv::ac1::car::Car::model_path(Path::new(arg(2)?)).and_then(|p| {
+                let f = std::fs::File::open(&p)?;
+                // SAFETY: read-only map of a file nobody writes meanwhile
+                let map = unsafe { memmap2::Mmap::map(&f)? };
+                if aceconv::ac1::kn5_decrypt::detect(&map).is_some() {
+                    aceconv::ac1::kn5_decrypt::status(&p)
+                } else if aceconv::ac1::kn5::protected(&map) {
+                    anyhow::bail!("{}: protected by its author", p.display())
+                } else {
+                    Ok(())
+                }
+            });
+            match lock {
+                Ok(()) => println!("ok"),
                 Err(e) => {
                     println!("{e:#}");
                     std::process::exit(1);

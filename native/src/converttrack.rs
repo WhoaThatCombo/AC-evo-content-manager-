@@ -97,6 +97,7 @@ pub fn tracks() -> Value {
     }).collect();
     let key = |v: &Value| v["name"].as_str().or(v["folder"].as_str()).unwrap_or("").to_lowercase();
     out.sort_by_key(key);
+    crate::convert::locks_flush();
     json!({"ok": true, "root": root.to_string_lossy(), "tracks": out})
 }
 

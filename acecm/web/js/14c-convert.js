@@ -81,6 +81,14 @@ function cvCss() {
   .cv-meta span{font-size:11px;color:var(--dim)}
   .cv-chip{border:1px solid var(--line);border-radius:14px;padding:3px 10px;font-size:11.5px;cursor:pointer;background:none;color:inherit}
   .cv-chip.on{border-color:var(--accent);color:var(--accent)}
+  .cv-lays{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-bottom:10px}
+  .cv-lays > .tiny{flex-basis:100%}
+  .cv-lay{display:inline-flex;align-items:center;gap:6px}
+  .cv-lay input{width:auto;margin:0;padding:0;accent-color:var(--accent);cursor:pointer;flex:none}
+  .cv-lay.off .cv-chip{opacity:.5}
+  .cv-opts label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+  .cv-opts label[hidden]{display:none}
+  .cv-opts input{width:auto;margin:0;padding:0;accent-color:var(--accent);flex:none}
   .cv-hero{display:flex;gap:16px;align-items:center}
   .cv-hero .cv-img{width:240px;flex:none;border-radius:8px}
   .cv-bar{height:10px;border-radius:5px;background:var(--line);overflow:hidden;margin:10px 0 6px}
@@ -207,7 +215,7 @@ async function convertPage() {
   const htitle = el('div', '', '<span class="dim">Pick a ' + noun + ' above.</span>');
   htitle.style.fontSize = '15px';
   const hsub = el('div', 'tiny dim');
-  const opts = el('div', 'row wrap');
+  const opts = el('div', 'row wrap cv-opts');
   opts.style.margin = '10px 0';
   const cbC = el('label', 'tiny', '<input type="checkbox" checked> Put it in the game');
   const cbS = el('label', 'tiny', '<input type="checkbox"> Also in my dedicated server');
@@ -455,10 +463,10 @@ async function convertPage() {
     tAll = lays.map(x => x.layout);
     if (!tSel) tSel = new Set(tAll);
     if (lays.length > 1) {
-      const row = el('div', 'row wrap');
-      row.style.marginBottom = '8px';
-      row.append(el('span', 'tiny dim', 'Layouts to convert'));
+      const row = el('div', 'cv-lays');
+      row.append(el('span', 'tiny dim', 'Layouts to convert (click a name to preview it)'));
       for (const x of lays) {
+        const item = el('span', 'cv-lay' + (tSel.has(x.layout) ? '' : ' off'));
         const cb = document.createElement('input');
         cb.type = 'checkbox';
         cb.checked = tSel.has(x.layout);
@@ -467,11 +475,13 @@ async function convertPage() {
           if (cb.checked) tSel.add(x.layout);
           else if (tSel.size > 1) tSel.delete(x.layout);
           else cb.checked = true;
+          item.classList.toggle('off', !cb.checked);
         };
         const b = el('button', 'cv-chip' + (x.layout === tLayout ? ' on' : ''), esc((x.ui || {}).name || x.layout));
         b.title = x.layout;
         b.onclick = () => { tLayout = x.layout; trackDetails(c); };
-        row.append(cb, b);
+        item.append(cb, b);
+        row.append(item);
       }
       left.append(row);
     }

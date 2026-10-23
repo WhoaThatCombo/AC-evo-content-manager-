@@ -550,58 +550,136 @@ pub fn preview(folder: &str) -> Option<PathBuf> {
 }
 
 /// CSP's kn5 protection: the author locked the model. Those files are not
-/// converted. Cached by file size + time, so the list stays fast.
+/// converted. Verdicts are kept on disk (data/kn5_locks.json) by file size +
+/// time and the converter build, so the list is only slow the first time.
 const PROTECT_MARK: &[u8] = b"__AC_SHADERS_PATCH_KN5ENC";
-static PROTECTED: LazyLock<Mutex<std::collections::HashMap<PathBuf, (u64, u64, bool)>>> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+struct Locks {
+    rev: String,
+    map: std::collections::HashMap<String, (u64, u64, bool)>,
+    dirty: bool,
+}
+
+/// The bundled converter's size + time: a new build (new keys, new layouts)
+/// re-checks every verdict.
+fn lock_rev() -> String {
+    converter().and_then(|c| std::fs::metadata(c).ok()).map(|m| {
+        let t = m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+        format!("{}:{t}", m.len())
+    }).unwrap_or_default()
+}
+
+fn locks_file() -> PathBuf {
+    crate::paths::data().join("kn5_locks.json")
+}
+
+static LOCKS: LazyLock<Mutex<Locks>> = LazyLock::new(|| {
+    let rev = lock_rev();
+    let mut map = std::collections::HashMap::new();
+    if let Some(v) = std::fs::read(locks_file()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+        if v["rev"].as_str() == Some(rev.as_str()) {
+            if let Some(m) = v["locks"].as_object() {
+                for (k, x) in m {
+                    if let (Some(l), Some(t), Some(b)) = (x[0].as_u64(), x[1].as_u64(), x[2].as_bool()) {
+                        map.insert(k.clone(), (l, t, b));
+                    }
+                }
+            }
+        }
+    }
+    Mutex::new(Locks { rev, map, dirty: false })
+});
+
+fn stamp_of(p: &Path) -> Option<(u64, u64)> {
+    let md = std::fs::metadata(p).ok()?;
+    Some((md.len(), md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0)))
+}
+
+/// The cached verdict for `key` at `stamp`, else compute and remember it.
+fn lock_cached(key: String, stamp: (u64, u64), compute: impl FnOnce() -> bool) -> bool {
+    if let Some(&(l, t, v)) = LOCKS.lock().unwrap().map.get(&key) {
+        if (l, t) == stamp {
+            return v;
+        }
+    }
+    let v = compute();
+    let mut g = LOCKS.lock().unwrap();
+    g.map.insert(key, (stamp.0, stamp.1, v));
+    g.dirty = true;
+    v
+}
+
+/// Write the verdicts once a list is built (not per file).
+pub(crate) fn locks_flush() {
+    let mut g = LOCKS.lock().unwrap();
+    if !g.dirty {
+        return;
+    }
+    let locks: Map<String, Value> = g.map.iter().map(|(k, &(l, t, b))| (k.clone(), json!([l, t, b]))).collect();
+    let body = json!({"rev": g.rev, "locks": locks}).to_string();
+    let f = locks_file();
+    let tmp = f.with_extension("json.tmp");
+    if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &f).is_ok() {
+        g.dirty = false;
+    }
+}
 
 /// Does the file carry CSP's protection marker (at the start or the end)?
-fn kn5_marked(p: &Path, len: u64) -> bool {
-    // ⚠ the marker is at the START of some files and at the END of others
-    use std::io::{Read, Seek, SeekFrom};
-    let has = |b: &[u8]| b.windows(PROTECT_MARK.len()).any(|w| w == PROTECT_MARK);
-    std::fs::File::open(p).map(|mut f| {
-        let mut buf = vec![0u8; 64 * 1024];
-        let n = f.read(&mut buf).unwrap_or(0);
-        if has(&buf[..n]) {
-            return true;
-        }
-        if len > buf.len() as u64 && f.seek(SeekFrom::End(-(buf.len() as i64))).is_ok() {
+fn kn5_marked(p: &Path) -> bool {
+    let Some(stamp) = stamp_of(p) else { return false };
+    lock_cached(format!("m|{}", p.display()), stamp, || {
+        // ⚠ the marker is at the START of some files and at the END of others
+        use std::io::{Read, Seek, SeekFrom};
+        let has = |b: &[u8]| b.windows(PROTECT_MARK.len()).any(|w| w == PROTECT_MARK);
+        std::fs::File::open(p).map(|mut f| {
+            let mut buf = vec![0u8; 64 * 1024];
             let n = f.read(&mut buf).unwrap_or(0);
-            return has(&buf[..n]);
-        }
-        false
-    }).unwrap_or(false)
+            if has(&buf[..n]) {
+                return true;
+            }
+            if stamp.0 > buf.len() as u64 && f.seek(SeekFrom::End(-(buf.len() as i64))).is_ok() {
+                let n = f.read(&mut buf).unwrap_or(0);
+                return has(&buf[..n]);
+            }
+            false
+        }).unwrap_or(false)
+    })
+}
+
+/// Ask the converter (`aceconv <cmd> <path>`): exit 0 = it opens.
+fn converter_opens(cmd: &str, p: &Path) -> bool {
+    converter().is_some_and(|c| {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(c).arg(cmd).arg(p).creation_flags(0x0800_0000)
+            .output().map(|o| o.status.success()).unwrap_or(false)
+    })
 }
 
 /// A car is locked when some kn5 carries the marker AND the converter cannot
 /// open the car (its real model, found the way the converter finds it): an
 /// unused leftover like template.kn5 doesn't lock it.
 pub(crate) fn car_protected(dir: &Path) -> bool {
-    let marked = car_kn5s(dir).iter().any(|k| std::fs::metadata(k).map(|m| kn5_marked(k, m.len())).unwrap_or(false));
-    marked && !converter().is_some_and(|c| {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new(c).arg("car-lock").arg(dir).creation_flags(0x0800_0000)
-            .output().map(|o| o.status.success()).unwrap_or(false)
-    })
-}
-
-pub(crate) fn kn5_protected(p: &Path) -> bool {
-    let Ok(md) = std::fs::metadata(p) else { return false };
-    let stamp = (md.len(), md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0));
-    if let Some(&(l, t, v)) = PROTECTED.lock().unwrap().get(p) {
-        if (l, t) == stamp {
-            return v;
+    let kn5s = car_kn5s(dir);
+    if !kn5s.iter().any(|k| kn5_marked(k)) {
+        return false;
+    }
+    // the car's stamp: every kn5 and data.acd, so any change re-checks it
+    let mut stamp = (0u64, 0u64);
+    for p in kn5s.iter().cloned().chain(std::iter::once(dir.join("data.acd"))) {
+        if let Some((l, t)) = stamp_of(&p) {
+            stamp = (stamp.0.wrapping_add(l), stamp.1.max(t));
         }
     }
-    let v = kn5_marked(p, md.len());
-    // marked by CSP: still usable when the converter can decrypt it
-    let v = v && !converter().is_some_and(|c| {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new(c).arg("kn5-lock").arg(p).creation_flags(0x0800_0000)
-            .output().map(|o| o.status.success()).unwrap_or(false)
-    });
-    PROTECTED.lock().unwrap().insert(p.to_path_buf(), (stamp.0, stamp.1, v));
-    v
+    lock_cached(format!("c|{}", dir.display()), stamp, || !converter_opens("car-lock", dir))
+}
+
+/// One kn5 (track models): marked by CSP and not decryptable by the converter.
+pub(crate) fn kn5_protected(p: &Path) -> bool {
+    if !kn5_marked(p) {
+        return false;
+    }
+    let Some(stamp) = stamp_of(p) else { return false };
+    lock_cached(format!("f|{}", p.display()), stamp, || !converter_opens("kn5-lock", p))
 }
 
 pub(crate) fn car_kn5s(dir: &Path) -> Vec<PathBuf> {
@@ -895,6 +973,7 @@ pub fn cars() -> Value {
         c.insert("last".into(), hist.get(&folder).cloned().unwrap_or(Value::Null));
         out.push(c);
     }
+    locks_flush();
     let folders: Vec<String> = out.iter().filter_map(|c| c.get("folder").and_then(|v| v.as_str()).map(String::from)).collect();
     let ids = default_ids("cars", &folders);
     let mut list: Vec<Value> = out.into_iter().map(|mut c| {

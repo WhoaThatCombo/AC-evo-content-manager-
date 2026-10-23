@@ -56,51 +56,65 @@ pub fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| p.file_name().map(|f| f.to_string_lossy().eq_ignore_ascii_case(name)).unwrap_or(false))
 }
 
+/// The LOD0 model of the car in `dir` (lods.ini LOD_0, else the largest
+/// kn5 that is not a collider or a LOD), its OUT distance and the other LODs.
+fn models(dir: &Path, inis: &BTreeMap<String, Ini>) -> Result<(PathBuf, Option<f32>, Vec<Lod>)> {
+    // lods.ini is a data file (inside data.acd on Kunos cars); some mods
+    // keep a copy in the car folder
+    let lods_ini = inis.get("lods.ini").cloned()
+        .or_else(|| find_ci(dir, "lods.ini").and_then(|p| std::fs::read(p).ok()).map(|b| ini::parse(&String::from_utf8_lossy(&b))));
+    let mut lods = Vec::new();
+    let mut lod0: Option<PathBuf> = None;
+    let mut lod0_out = None;
+    if let Some(li) = &lods_ini {
+        let mut idx: Vec<(usize, &str)> = li.names().filter_map(|n| n.strip_prefix("LOD_").and_then(|x| x.parse().ok()).map(|i: usize| (i, n))).collect();
+        idx.sort();
+        for (i, name) in idx {
+            let Some(file) = li.get(name, "FILE").and_then(|f| find_ci(dir, f)) else { continue };
+            let lod_in = li.num(name, "IN").unwrap_or(0.0) as f32;
+            let lod_out = li.num(name, "OUT").unwrap_or(0.0) as f32;
+            if i == 0 && lod0.is_none() {
+                lod0 = Some(file);
+                lod0_out = Some(lod_out);
+            } else {
+                lods.push(Lod { file, lod_in, lod_out });
+            }
+        }
+    }
+    let kn5_path = match lod0 {
+        Some(p) => p,
+        None => {
+            let mut best: Option<(u64, PathBuf)> = None;
+            for e in std::fs::read_dir(dir)?.flatten() {
+                let p = e.path();
+                let n = p.file_name().unwrap().to_string_lossy().to_lowercase();
+                if !is_kn5(&p) || n == "collider.kn5" || n.contains("_lod") {
+                    continue;
+                }
+                let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
+                if best.as_ref().map(|(b, _)| sz > *b).unwrap_or(true) {
+                    best = Some((sz, p));
+                }
+            }
+            best.map(|(_, p)| p).ok_or_else(|| anyhow::anyhow!("{}: no kn5 model", dir.display()))?
+        }
+    };
+    Ok((kn5_path, lod0_out, lods))
+}
+
 impl Car {
+    /// The file `open` would load as the model, without reading it.
+    pub fn model_path(dir: &Path) -> Result<PathBuf> {
+        let data = crate::ac1::acd::read_car_data(dir)?;
+        let inis: BTreeMap<String, Ini> = data.iter().filter(|(k, _)| k.ends_with(".ini")).map(|(k, v)| (k.clone(), ini::parse(v))).collect();
+        Ok(models(dir, &inis)?.0)
+    }
+
     pub fn open(dir: &Path) -> Result<Car> {
         let folder = dir.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let data = crate::ac1::acd::read_car_data(dir)?;
         let inis: BTreeMap<String, Ini> = data.iter().filter(|(k, _)| k.ends_with(".ini")).map(|(k, v)| (k.clone(), ini::parse(v))).collect();
-        // lods.ini is a data file (inside data.acd on Kunos cars); some mods
-        // keep a copy in the car folder
-        let lods_ini = inis.get("lods.ini").cloned()
-            .or_else(|| find_ci(dir, "lods.ini").and_then(|p| std::fs::read(p).ok()).map(|b| ini::parse(&String::from_utf8_lossy(&b))));
-        let mut lods = Vec::new();
-        let mut lod0: Option<PathBuf> = None;
-        let mut lod0_out = None;
-        if let Some(li) = &lods_ini {
-            let mut idx: Vec<(usize, &str)> = li.names().filter_map(|n| n.strip_prefix("LOD_").and_then(|x| x.parse().ok()).map(|i: usize| (i, n))).collect();
-            idx.sort();
-            for (i, name) in idx {
-                let Some(file) = li.get(name, "FILE").and_then(|f| find_ci(dir, f)) else { continue };
-                let lod_in = li.num(name, "IN").unwrap_or(0.0) as f32;
-                let lod_out = li.num(name, "OUT").unwrap_or(0.0) as f32;
-                if i == 0 && lod0.is_none() {
-                    lod0 = Some(file);
-                    lod0_out = Some(lod_out);
-                } else {
-                    lods.push(Lod { file, lod_in, lod_out });
-                }
-            }
-        }
-        let kn5_path = match lod0 {
-            Some(p) => p,
-            None => {
-                let mut best: Option<(u64, PathBuf)> = None;
-                for e in std::fs::read_dir(dir)?.flatten() {
-                    let p = e.path();
-                    let n = p.file_name().unwrap().to_string_lossy().to_lowercase();
-                    if !is_kn5(&p) || n == "collider.kn5" || n.contains("_lod") {
-                        continue;
-                    }
-                    let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
-                    if best.as_ref().map(|(b, _)| sz > *b).unwrap_or(true) {
-                        best = Some((sz, p));
-                    }
-                }
-                best.map(|(_, p)| p).ok_or_else(|| anyhow::anyhow!("{}: no kn5 model", dir.display()))?
-            }
-        };
+        let (kn5_path, lod0_out, lods) = models(dir, &inis)?;
         let kn5_map = kn5_decrypt::open(&kn5_path).with_context(|| format!("{}: opening the kn5", kn5_path.display()))?;
         if kn5::protected(&kn5_map) {
             bail!("{}: the model is protected by its author (encrypted kn5) and cannot be converted", kn5_path.display());

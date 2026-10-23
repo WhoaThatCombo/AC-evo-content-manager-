@@ -78,7 +78,9 @@ fn salt_candidates(folders: &[String], acd: Option<&[u8]>) -> Vec<String> {
 /// Can this file be opened? `Ok(())` when nothing is encrypted in it or its
 /// salt and keys resolve; `Err` says why not. Reads the file, does not rebuild it.
 pub fn status(path: &std::path::Path) -> Result<()> {
-    let data = std::fs::read(path)?;
+    let f = std::fs::File::open(path)?;
+    // SAFETY: read-only map; only the tail and one entry are touched
+    let data = unsafe { memmap2::Mmap::map(&f)? };
     let Some((off, ver)) = detect(&data) else {
         bail!("the lock is not a CSP v1 envelope this tool knows")
     };
