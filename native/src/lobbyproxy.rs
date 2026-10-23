@@ -394,35 +394,31 @@ fn bump(sh: &Shared, k: &str) {
 }
 
 // ---------------------------------------------------------- TLS + ws -----
-#[derive(Debug)]
-struct NoVerify;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerify {
-    fn verify_server_cert(&self, _e: &rustls::pki_types::CertificateDer<'_>, _i: &[rustls::pki_types::CertificateDer<'_>],
-                          _s: &rustls::pki_types::ServerName<'_>, _o: &[u8], _n: rustls::pki_types::UnixTime)
-                          -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(&self, _m: &[u8], _c: &rustls::pki_types::CertificateDer<'_>, _d: &rustls::DigitallySignedStruct)
-                              -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(&self, _m: &[u8], _c: &rustls::pki_types::CertificateDer<'_>, _d: &rustls::DigitallySignedStruct)
-                              -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
-    }
+/// The roots the real Kunos backend is checked against: the Windows trust
+/// store (so a corporate proxy's root also works), else the Mozilla list.
+/// `b.gk.sd` presents a Let's Encrypt certificate for its own name.
+fn upstream_roots() -> Arc<rustls::RootCertStore> {
+    static ROOTS: std::sync::OnceLock<Arc<rustls::RootCertStore>> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let mut r = rustls::RootCertStore::empty();
+        for c in rustls_native_certs::load_native_certs().certs {
+            let _ = r.add(c);
+        }
+        if r.is_empty() {
+            r.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        Arc::new(r)
+    }).clone()
 }
 
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// TLS to the real Kunos backend. ⚠ We are not the trust anchor here (the
-/// Python proxy did not verify either); permessage-deflate stays OFF - Kunos's
-/// is not always a valid zlib stream.
+/// TLS to the real Kunos backend, VERIFIED: the game's session traffic goes
+/// through here, so an unverified link would let anyone on the network path
+/// impersonate the lobby. permessage-deflate stays OFF - Kunos's is not
+/// always a valid zlib stream.
 pub async fn dial_upstream(url: &str, ua: Option<&str>, subprotocols: Option<&str>)
     -> Result<tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -437,7 +433,7 @@ pub async fn dial_upstream(url: &str, ua: Option<&str>, subprotocols: Option<&st
     let port = req.uri().port_u16().unwrap_or(443);
     let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await.map_err(|e| e.to_string())?;
     let cfg = rustls::ClientConfig::builder_with_provider(provider()).with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?.dangerous().with_custom_certificate_verifier(Arc::new(NoVerify)).with_no_client_auth();
+        .map_err(|e| e.to_string())?.with_root_certificates(upstream_roots()).with_no_client_auth();
     let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(|e| e.to_string())?;
     let tls = tokio_rustls::TlsConnector::from(Arc::new(cfg)).connect(name, tcp).await.map_err(|e| e.to_string())?;
     let wcfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(None).max_frame_size(None);

@@ -49,6 +49,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
+# verify the real Kunos lobby server (lobbyproxy.rs): the OS trust store,
+# else the Mozilla roots
+rustls-native-certs = "0.8"
+webpki-roots = "1"
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 flate2 = "1"
 prost-types = "0.13"
