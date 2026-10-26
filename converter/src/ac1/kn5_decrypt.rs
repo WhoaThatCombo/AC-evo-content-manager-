@@ -26,12 +26,18 @@ pub fn detect(data: &[u8]) -> Option<(u32, u32)> {
     Some((off, ver))
 }
 
-/// Nothing to restore: no encrypted textures, and (envelope v2/3) the vertex
-/// entries are tweak data the geometry doesn't need - the body is already plain.
-/// (No Hesi cars: `met.user.u` + `ver.<mesh>/<count>.*` and real textures in the body.)
-fn body_is_plain(sidecar: &HashMap<String, Vec<u8>>, enc_version: u32) -> bool {
-    let encrypted_textures = sidecar.keys().any(|k| k.starts_with("tex.") && k.ends_with(".d"));
-    sidecar.is_empty() || (!encrypted_textures && enc_version != 1)
+/// The trailer's format version (1 and 3 are known) and the entry layout are
+/// independent. Layout B keeps a pad in `met.user.u` and names vertex entries
+/// `ver.<mesh>/<count>`; with format 3 its geometry is moved by a rule not
+/// worked out yet, so it is refused rather than converted into a broken model.
+fn unsupported(sidecar: &HashMap<String, Vec<u8>>, format: u32) -> Option<String> {
+    match format {
+        3 if sidecar.contains_key("met.user.u") => {
+            Some("newer CSP protection (format 3, container layout): its geometry can't be restored yet".into())
+        }
+        1 | 3 => None,
+        v => Some(format!("CSP protection format {v} is not supported")),
+    }
 }
 
 /// Folder names the encrypting tool may have used for this file (its own
@@ -84,12 +90,12 @@ pub fn status(path: &std::path::Path) -> Result<()> {
     let Some((off, ver)) = detect(&data) else {
         bail!("the lock is not a CSP v1 envelope this tool knows")
     };
-    if ver > 3 {
-        bail!("CSP encVersion {ver} is not supported");
-    }
     let sidecar = read_sidecar(&data, off as usize, data.len() - TAIL_LEN)?;
-    if body_is_plain(&sidecar, ver) {
+    if sidecar.is_empty() {
         return Ok(());
+    }
+    if let Some(why) = unsupported(&sidecar, ver) {
+        bail!("{why}");
     }
     let (folders, acd) = context_of(path);
     if resolve_salt(&sidecar, &salt_candidates(&folders, acd.as_deref())).is_some() {
@@ -149,15 +155,16 @@ pub fn open(path: &std::path::Path) -> Result<Kn5Bytes> {
 pub fn decrypt(data: &[u8], folders: &[String], acd_bytes: Option<&[u8]>) -> Result<Vec<u8>> {
     let (sidecar_offset, enc_version) = detect(data)
         .ok_or_else(|| anyhow::anyhow!("no CSP v1 envelope"))?;
-    if enc_version > 3 {
-        bail!("CSP encVersion {enc_version} is not supported");
-    }
     let sidecar_end = data.len() - TAIL_LEN;
     let sidecar = read_sidecar(data, sidecar_offset as usize, sidecar_end)?;
-    if body_is_plain(&sidecar, enc_version) {
+    // an envelope with nothing encrypted in it (small helper kn5s): the body is already plain
+    if sidecar.is_empty() {
         let body = &data[..sidecar_offset as usize];
         parse_kn5_body(body)?;
         return Ok(body.to_vec());
+    }
+    if let Some(why) = unsupported(&sidecar, enc_version) {
+        bail!("{why}");
     }
 
     let salts = salt_candidates(folders, acd_bytes);
@@ -169,11 +176,57 @@ pub fn decrypt(data: &[u8], folders: &[String], acd_bytes: Option<&[u8]>) -> Res
     let decrypted_masks = decrypt_vertex_masks(&sidecar, &active_salt, enc_version)?;
 
     let body = &data[..sidecar_offset as usize];
-    if enc_version == 1 {
-        rebuild_kn5(body, &decrypted_textures, &decrypted_masks)
-    } else {
-        rebuild_kn5(body, &decrypted_textures, &HashMap::new())
+    let (out, check) = rebuild_kn5(body, &decrypted_textures, &decrypted_masks, enc_version)?;
+    // ⚠ the gate: restored meshes must have normals that agree with their
+    // triangles again. A wrong rule leaves unit normals on scrambled
+    // positions (that shipped once, silently); refuse instead.
+    if let Some(c) = check {
+        if !c.ok() {
+            bail!("the geometry did not come back right (normals {:.2}, edges {:.1}): this protection variant is not supported", c.after, c.spread);
+        }
     }
+    Ok(out)
+}
+
+/// The restored meshes, judged two ways (medians over the meshes):
+/// `after` = share of mesh edges whose two vertex normals agree (scrambled
+/// normals ~0.4, restored ~1.0; faked foliage normals still agree), and
+/// `spread` = p90 / p50 edge length (moved vertices make long edges: ~2 when
+/// right, up to ~25 on track props, ~90 when positions are scrambled).
+#[derive(Clone, Copy, Debug)]
+pub struct GeoCheck {
+    pub before: f32,
+    pub after: f32,
+    pub spread: f32,
+    pub meshes: usize,
+}
+
+impl GeoCheck {
+    /// Restored: normals agree again (or clearly improved: a wrong rule never
+    /// raises them), and no exploded positions (props mixing big and tiny
+    /// faces reach ~25; scrambled vertices ~90).
+    pub fn ok(&self) -> bool {
+        (self.after >= 0.75 || (self.after >= 0.5 && self.after - self.before >= 0.2)) && self.spread < 40.0
+    }
+}
+
+/// Decrypt `path` and report the geometry score (for checking every file).
+pub fn geometry_check(path: &std::path::Path) -> Result<(u32, Option<GeoCheck>)> {
+    let data = std::fs::read(path)?;
+    let (off, ver) = detect(&data).ok_or_else(|| anyhow::anyhow!("no CSP envelope"))?;
+    let sidecar = read_sidecar(&data, off as usize, data.len() - TAIL_LEN)?;
+    if sidecar.is_empty() {
+        return Ok((ver, None));
+    }
+    if let Some(why) = unsupported(&sidecar, ver) {
+        bail!("{why}");
+    }
+    let (folders, acd) = context_of(path);
+    let salt = resolve_salt(&sidecar, &salt_candidates(&folders, acd.as_deref()))
+        .ok_or_else(|| anyhow::anyhow!("could not work out the per-file key"))?;
+    let masks = decrypt_vertex_masks(&sidecar, &salt, ver)?;
+    let (_, check) = rebuild_kn5(&data[..off as usize], &HashMap::new(), &masks, ver)?;
+    Ok((ver, check))
 }
 
 // ── sidecar ──────────────────────────────────────────────────────────
@@ -316,7 +369,8 @@ fn decrypt_vertex_masks(
         let Some(iv) = sidecar.get(&format!("ver.{name}.i")) else { continue };
         let Some(cipher) = sidecar.get(&format!("ver.{name}.x")) else { continue };
 
-        let delta = if enc_version != 1 {
+        // format 1 moves vertices 3 cm; format 3 stores the distance per mesh
+        let delta = if enc_version == 3 {
             let Some(f) = sidecar.get(&format!("ver.{name}.f")) else { continue };
             if f.len() < 4 { continue; }
             f32::from_le_bytes(f[..4].try_into().unwrap())
@@ -424,6 +478,8 @@ struct MeshEntry {
     vertex_buffer_offset: usize,
     vertex_count: usize,
     stride: usize,
+    index_offset: usize,
+    index_count: usize,
 }
 
 fn parse_kn5_body(buf: &[u8]) -> Result<Kn5Body> {
@@ -480,9 +536,10 @@ fn read_node(buf: &[u8], pos: &mut usize, meshes: &mut Vec<MeshEntry>) -> Result
         2 => {
             *pos += 3;
             let vert_count = ru32(buf, pos) as usize;
-            meshes.push(MeshEntry { name, vertex_buffer_offset: *pos, vertex_count: vert_count, stride: 44 });
+            let vertex_buffer_offset = *pos;
             *pos += vert_count * 44;
             let idx_count = ru32(buf, pos) as usize;
+            meshes.push(MeshEntry { name, vertex_buffer_offset, vertex_count: vert_count, stride: 44, index_offset: *pos, index_count: idx_count });
             *pos += idx_count * 2;
             *pos += 4 + 4 + 4 + 4 + 12 + 4 + 1;
         }
@@ -491,9 +548,10 @@ fn read_node(buf: &[u8], pos: &mut usize, meshes: &mut Vec<MeshEntry>) -> Result
             let bone_count = ru32(buf, pos) as usize;
             for _ in 0..bone_count { skip_string(buf, pos); *pos += 64; }
             let vert_count = ru32(buf, pos) as usize;
-            meshes.push(MeshEntry { name, vertex_buffer_offset: *pos, vertex_count: vert_count, stride: 76 });
+            let vertex_buffer_offset = *pos;
             *pos += vert_count * 76;
             let idx_count = ru32(buf, pos) as usize;
+            meshes.push(MeshEntry { name, vertex_buffer_offset, vertex_count: vert_count, stride: 76, index_offset: *pos, index_count: idx_count });
             *pos += idx_count * 2;
             *pos += 4 + 4 + 8;
         }
@@ -509,16 +567,30 @@ fn rebuild_kn5(
     body: &[u8],
     textures: &HashMap<String, Vec<u8>>,
     masks: &HashMap<String, (Vec<u8>, f32)>,
-) -> Result<Vec<u8>> {
+    format: u32,
+) -> Result<(Vec<u8>, Option<GeoCheck>)> {
     let parsed = parse_kn5_body(body)?;
     let mut body_mut = body.to_vec();
 
-    // apply vertex masks
+    // apply vertex masks (`ver.<mesh>/<count>` names a mesh by its vertex count too)
+    let (mut before, mut after, mut spread) = (Vec::new(), Vec::new(), Vec::new());
     for mesh in &parsed.meshes {
-        if let Some((mask, delta)) = masks.get(&mesh.name) {
-            apply_mask(&mut body_mut, mesh, mask, *delta);
+        let m = masks.get(&format!("{}/{}", mesh.name, mesh.vertex_count)).or_else(|| masks.get(&mesh.name));
+        if let Some((mask, delta)) = m {
+            let s0 = mesh_shape(&body_mut, mesh);
+            if format == 3 {
+                apply_mask_v3(&mut body_mut, mesh, mask, *delta);
+            } else {
+                apply_mask(&mut body_mut, mesh, mask, *delta);
+            }
+            if let (Some(a), Some(b)) = (s0, mesh_shape(&body_mut, mesh)) {
+                before.push(a.0);
+                after.push(b.0);
+                spread.push(b.1);
+            }
         }
     }
+    let check = (!after.is_empty()).then(|| GeoCheck { before: median(&mut before), after: median(&mut after), spread: median(&mut spread), meshes: after.len() });
 
     let mut out = Vec::with_capacity(body.len());
     out.extend_from_slice(&body_mut[..parsed.tex_section_start]);
@@ -540,7 +612,49 @@ fn rebuild_kn5(
 
     // everything after textures (materials + nodes)
     out.extend_from_slice(&body_mut[parsed.tex_section_end..parsed.body_end]);
-    Ok(out)
+    Ok((out, check))
+}
+
+fn median(v: &mut [f32]) -> f32 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v[v.len() / 2]
+}
+
+/// (share of edges whose vertex normals agree, p90/p50 edge length) of one
+/// mesh; None for meshes too small to judge.
+fn mesh_shape(body: &[u8], m: &MeshEntry) -> Option<(f32, f32)> {
+    if m.vertex_count < 100 || m.index_count < 3 || m.index_count % 3 != 0 {
+        return None;
+    }
+    let f = |o: usize| f32::from_le_bytes(body[o..o + 4].try_into().unwrap());
+    let vtx = |i: usize, c: usize| f(m.vertex_buffer_offset + i * m.stride + c * 4);
+    let (mut agree, mut total) = (0usize, 0usize);
+    let mut lens = Vec::with_capacity(m.index_count);
+    for t in 0..m.index_count / 3 {
+        let ix: [usize; 3] = std::array::from_fn(|k| {
+            let o = m.index_offset + (t * 3 + k) * 2;
+            u16::from_le_bytes([body[o], body[o + 1]]) as usize
+        });
+        if ix.iter().any(|&i| i >= m.vertex_count) {
+            return None;
+        }
+        for (a, b) in [(ix[0], ix[1]), (ix[1], ix[2]), (ix[2], ix[0])] {
+            let d = vtx(a, 3) * vtx(b, 3) + vtx(a, 4) * vtx(b, 4) + vtx(a, 5) * vtx(b, 5);
+            total += 1;
+            if d > 0.5 {
+                agree += 1;
+            }
+            let (x, y, z) = (vtx(a, 0) - vtx(b, 0), vtx(a, 1) - vtx(b, 1), vtx(a, 2) - vtx(b, 2));
+            lens.push((x * x + y * y + z * z).sqrt());
+        }
+    }
+    if total == 0 {
+        return None;
+    }
+    let p50 = { let i = lens.len() / 2; *lens.select_nth_unstable_by(i, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).1 };
+    let p90 = { let i = lens.len() * 9 / 10; *lens.select_nth_unstable_by(i, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).1 };
+    let spread = if p50 > 0.0 { p90 / p50 } else { 0.0 };
+    Some((agree as f32 / total as f32, spread))
 }
 
 fn apply_mask(body: &mut [u8], mesh: &MeshEntry, mask: &[u8], delta: f32) {
@@ -557,6 +671,26 @@ fn apply_mask(body: &mut [u8], mesh: &MeshEntry, mask: &[u8], delta: f32) {
         if b & 32 != 0 { neg_f(body, o + 20); }
         if b & 64 != 0 { inv_f(body, o + 24); }
         if b & 128 != 0 { inv_f(body, o + 28); }
+    }
+}
+
+/// Format 3: the v1 rule on the COMPLEMENTED byte, with the position and
+/// normal bits mirrored (5 - bit) and the distance from the mesh's `.f`.
+/// Checked component-exact against the producer's own decrypted tracks.
+fn apply_mask_v3(body: &mut [u8], mesh: &MeshEntry, mask: &[u8], delta: f32) {
+    if mask.is_empty() { return; }
+    for i in 0..mesh.vertex_count {
+        let c = !mask[i % mask.len()];
+        let o = mesh.vertex_buffer_offset + i * mesh.stride;
+        if o + 32 > body.len() { break; }
+        add_f(body, o, if c & 32 != 0 { -delta } else { delta });
+        add_f(body, o + 4, if c & 16 != 0 { -delta } else { delta });
+        add_f(body, o + 8, if c & 8 != 0 { -delta } else { delta });
+        if c & 4 != 0 { neg_f(body, o + 12); }
+        if c & 2 != 0 { neg_f(body, o + 16); }
+        if c & 1 != 0 { neg_f(body, o + 20); }
+        if c & 64 != 0 { inv_f(body, o + 24); }
+        if c & 128 != 0 { inv_f(body, o + 28); }
     }
 }
 

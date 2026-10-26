@@ -381,6 +381,22 @@ fn run() -> Result<()> {
                 }
             }
         }
+        "kn5-decrypt" => {
+            // write the plain kn5 the converter reads (decrypted when CSP-encrypted)
+            let b = aceconv::ac1::kn5_decrypt::open(Path::new(arg(2)?))?;
+            std::fs::write(arg(3)?, &b[..])?;
+            println!("{} bytes", b.len());
+        }
+        "kn5-geocheck" => {
+            // decrypt each file and print its normals-vs-triangles score before/after
+            for p in &a[2..] {
+                match aceconv::ac1::kn5_decrypt::geometry_check(Path::new(p)) {
+                    Ok((v, Some(c))) => println!("v{v}	{:.3}	{:.3}	{:.1}	{}	{}	{p}", c.before, c.after, c.spread, c.meshes, if c.ok() { "ok" } else { "FAIL" }),
+                    Ok((v, None)) => println!("v{v}	-	-	-	0	plain	{p}"),
+                    Err(e) => println!("ERR	-	-	-	0	{e}	{p}"),
+                }
+            }
+        }
         "car-lock" => {
             // exit 0: the car's model opens (plain, or decryptable); 1: locked, reason on stdout
             // the key check on the model the converter would load: no decrypt
