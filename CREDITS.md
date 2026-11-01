@@ -13,6 +13,16 @@ included: everything is read from the user's own installation.
 - **evoview** (`tools/evoview.exe`): the 3D car and track viewer, by the same
   author, built from its own repository.
 
+## Upscaler library (third-party binary, not GPL)
+
+- **AMD FidelityFX Super Resolution** (`amd_fidelityfx_loader_vk.dll`,
+  `amd_fidelityfx_upscaler_vk.dll`), © Advanced Micro Devices, Inc. All
+  rights reserved. Separate, unmodified signed binaries that ship next to
+  `evoview.exe` and load only when the user picks the FSR upscaler. They are
+  not covered by ACECM's GPL: AMD's licence, copyright notice and disclaimers
+  are reproduced in full in `tools/licenses/AMD-FidelityFX-LICENSE.md`.
+  AMD, FidelityFX and FSR are trademarks of Advanced Micro Devices, Inc.
+
 ## Libraries (Rust crates)
 
 The app and the converter are built from crates.io crates whose licences are

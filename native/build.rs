@@ -43,6 +43,20 @@ fn bundle() {
             println!("cargo:warning=bundle: tools/{name} is missing");
         }
     }
+    // evoview's FSR upscaler, loaded from beside evoview.exe when picked:
+    // AMD's signed FidelityFX DLLs, NOT in git (CREDITS.md; AMD's licence
+    // ships as tools/licenses/AMD-FidelityFX-LICENSE.md). A build without
+    // them only warns, and evoview falls back to TAA. DLSS is not bundled:
+    // NVIDIA's terms need their approval first.
+    for name in ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll", "licenses/AMD-FidelityFX-LICENSE.md"] {
+        let p = repo.join("tools").join(name);
+        println!("cargo:rerun-if-changed={}", p.display());
+        if p.is_file() {
+            files.push((format!("tools/{name}"), p));
+        } else {
+            println!("cargo:warning=bundle: tools/{name} is missing (evoview upscaler)");
+        }
+    }
     // the AC1 -> EVO converter (converter/, its own crate), built here
     if let Some(p) = converter(&repo) {
         // a run from the source tree (no unpacked bundle) finds it here
