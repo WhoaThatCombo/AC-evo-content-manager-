@@ -175,6 +175,7 @@ const EVO_ROLES = [
   { role: 'pit_left', label: 'Pit menu left', kind: 'button', group: 'Pits', needs: 'pit_menu', game: [144, 1] },
   { role: 'pit_right', label: 'Pit menu right', kind: 'button', group: 'Pits', needs: 'pit_menu', game: [144, 2] },
   { role: 'pit_ok', label: 'Pit menu OK', kind: 'button', group: 'Pits', needs: 'pit_menu' },
+  { role: 'pit_return', label: 'Back to pits', kind: 'button', group: 'Pits', needs: 'pit_return' },
   { role: 'cam_next', label: 'Next camera', kind: 'button', group: 'View' },
   { role: 'look_back', label: 'Look back', kind: 'button', group: 'View' },
 ];
