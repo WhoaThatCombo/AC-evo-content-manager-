@@ -248,3 +248,39 @@ details > summary:hover{color:var(--fg)}
 @media (prefers-reduced-motion:no-preference){
   .upd-pop{animation:upd-in .2s ease-out}
   @keyframes upd-in{from{opacity:0;transform:translateY(8px)}}}
+
+/* ---- evoview (14d-evoview.js) ------------------------------------------
+   Built from the Play page's pieces (.drive, .drive-pick, pk-*); only what
+   those lack is here. Its own two-column grid: .sess-grid carries a Play
+   page rule that stretches its third field across both columns. */
+.evo-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+@media (max-width:520px){.evo-grid{grid-template-columns:1fr}}
+.evo-group + .evo-group{margin-top:4px}
+.evo-ghead{font:600 12px/1.3 var(--ui);color:var(--dim);margin:4px 0 8px}
+.evo-knob input[type=range]{padding:0;border:0;background:none;height:22px;
+  accent-color:var(--accent);cursor:pointer}
+.evo-knob > span b{color:var(--fg);font-weight:600;margin-left:3px}
+.evo-knob > span i{font-style:normal}
+.evo-hint{margin-top:3px;line-height:1.4}
+.evo-under{margin-top:12px}
+.evo-under label.f{margin-bottom:0}
+.evo-more{margin:2px 0 14px}
+.evo-more > summary{margin-bottom:10px}
+.evo-later{margin-top:6px}
+.evo-later > summary{margin-bottom:6px}
+.evo-tok{font:11px var(--mono);color:var(--dim2)}
+.evo-acts{margin-top:8px}
+.evo-acts button[hidden]{display:none}
+.evo-log{margin-top:10px;max-height:200px}
+.evo-devs{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+.evo-binds td{vertical-align:middle}
+.evo-bact{white-space:nowrap;text-align:right}
+.evo-bact > *{margin-left:6px}
+.evo-bact input,.evo-bact select{display:inline-block;width:auto;padding:4px 8px}
+.evo-ghrow td{color:var(--dim);font:600 12px/1.3 var(--ui);padding-top:16px;
+  border-bottom:1px solid var(--line)}
+.evo-ghrow:hover{background:none !important}
+.evo-keys{display:grid;grid-template-columns:max-content 1fr;gap:6px 18px;
+  margin-top:12px;font-size:13px}
+.evo-kk{color:var(--dim);font-weight:600;white-space:nowrap}
+.evo-ksep{grid-column:1/-1;margin-top:10px}

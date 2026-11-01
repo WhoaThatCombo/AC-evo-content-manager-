@@ -13,6 +13,10 @@ const PAGES = {
   logs: ['Logs', 'What ACECM did, and every error in full', logsPage],
   settings: ['Settings', 'Paths and ports', settingsPage],
   convert: ['Convert', 'Assetto Corsa cars and tracks into EVO mods', convertPage],
+  // evoview's driving mode (14d-evoview.js): its own section, not on Home
+  evodrive: ['evoview', 'Drive evoview on any track, with any car', evoDrivePage],
+  evocontrols: ['evoview controls', 'Wheel, buttons, force feedback and keys', evoControlsPage],
+  evographics: ['evoview graphics', 'Upscaler, sharpening, blur and head movement', evoGraphicsPage],
   // ⚠ Live map (telemetryPage, 13-telemetry.js) is deliberately NOT here:
   // telemetry is unfinished. The Servers page renders no telemetry controls
   // either, so nothing links to it - add it back here AND to Host below.
@@ -31,6 +35,9 @@ const SECTIONS = [
   { id: 'content', label: 'Content', pages: [['content', 'Install & share'],
                                              ['tracks', 'Tracks']] },
   { id: 'convert', label: 'Convert', pages: [['convert', 'Cars & tracks']] },
+  { id: 'evoview', label: 'evoview', pages: [['evodrive', 'Drive'],
+                                             ['evocontrols', 'Controls'],
+                                             ['evographics', 'Graphics']] },
 ];
 /* Sidebar icons: inline stroke SVG, no icon font or image to load. */
 const _ico = d => '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" '
@@ -48,6 +55,9 @@ const SECTION_ICON = {
   settings: _ico('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/>'
     + '<circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>'),
   convert: _ico('<path d="M4 7h12l-3-3M20 17H8l3 3"/>'),
+  // a gauge: evoview is where you drive
+  evoview: _ico('<path d="M4.5 17.5a8.5 8.5 0 1 1 15 0"/><path d="M12 14l4.5-5"/>'
+    + '<circle cx="12" cy="14" r="1.6"/><path d="M7.5 8.5 8.6 9.6M12 5.5V7"/>'),
   diagnostics: _ico('<path d="M3 12h4l3-8 4 16 3-8h4"/>'),
 };
 const SIDE_SECTIONS = [
@@ -60,7 +70,7 @@ const SIDE_SECTIONS = [
 ];
 // friendly aliases for links people type or share
 const PAGE_ALIAS = { play: 'drive', host: 'servers', diagnostics: 'backend',
-                     garage: 'cars' };
+                     garage: 'cars', evoview: 'evodrive' };
 function sectionOf(page) {
   return [...SECTIONS, ...SIDE_SECTIONS].find(sec =>
     sec.pages.some(([n]) => n === page)) || SECTIONS[0];

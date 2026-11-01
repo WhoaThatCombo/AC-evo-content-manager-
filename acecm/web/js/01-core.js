@@ -17,6 +17,9 @@
      12-remote      fetching content from other people's servers
      13-telemetry   live map page (unfinished; not in the nav)
      14-logs        Diagnostics > Logs
+     14b-home       Home
+     14c-convert    Convert
+     14d-evoview    evoview > Drive / Controls / Graphics
      15-nav         pages, sections, router, themes - and boot (keep LAST)
 
    ⚠ Not ES modules, on purpose: pages call each other by bare name and the

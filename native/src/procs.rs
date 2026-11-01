@@ -515,6 +515,50 @@ pub fn spawn_hidden_console(exe: &std::path::Path, args: &[String], cwd: &std::p
     }
 }
 
+/// Start a CONSOLE program in a VISIBLE console window of its own, for a
+/// tool that talks to the user there (evoview --wheel-setup waits for Enter).
+/// Run through cmd so the window stays up with its last words until a key.
+/// ⚠ No STARTF_USESTDHANDLES: our own handles are those of a GUI process
+/// (none), and passing them would leave the tool with no stdin to read.
+#[cfg(windows)]
+pub fn spawn_console_window(exe: &std::path::Path, args: &[String], cwd: &std::path::Path, title: &str) -> Result<u32, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{CreateProcessW, CREATE_NEW_CONSOLE, PROCESS_INFORMATION, STARTUPINFOW};
+    let w = |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain(Some(0)).collect() };
+    let mut inner = win_quote(&exe.to_string_lossy());
+    for a in args {
+        inner.push(' ');
+        inner.push_str(&win_quote(a));
+    }
+    let comspec = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+    // cmd /c "<cmd line> & pause": the outer quotes are stripped by cmd
+    let cmd = format!("{} /c \"{inner} & echo. & pause\"", win_quote(&comspec));
+    let mut cmdw: Vec<u16> = cmd.encode_utf16().chain(Some(0)).collect();
+    let tw = w(std::ffi::OsStr::new(title));
+    unsafe {
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.lpTitle = tw.as_ptr() as *mut u16;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let cw = w(cwd.as_os_str());
+        let ok = CreateProcessW(std::ptr::null(), cmdw.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0,
+                                CREATE_NEW_CONSOLE, std::ptr::null(), cw.as_ptr(), &si, &mut pi);
+        if ok == 0 {
+            return Err(format!("CreateProcessW failed ({})", std::io::Error::last_os_error()));
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        invalidate_snapshot();
+        Ok(pi.dwProcessId)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn spawn_console_window(exe: &std::path::Path, args: &[String], cwd: &std::path::Path, _title: &str) -> Result<u32, String> {
+    std::process::Command::new(exe).args(args).current_dir(cwd).spawn().map(|c| c.id()).map_err(|e| e.to_string())
+}
+
 #[cfg(not(windows))]
 pub fn spawn_hidden_console(exe: &std::path::Path, args: &[String], cwd: &std::path::Path, log: &std::path::Path, env: &[(&str, &str)]) -> Result<u32, String> {
     let f = std::fs::File::create(log).map_err(|e| e.to_string())?;

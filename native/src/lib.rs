@@ -23,6 +23,7 @@ pub mod damage;
 pub mod detect;
 pub mod drive;
 pub mod events;
+pub mod evodrive;
 pub mod evoreg;
 pub mod evoshare;
 pub mod gamesettings;

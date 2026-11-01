@@ -409,7 +409,9 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/patches" | "/api/patches/inspect"
             | "/api/state" | "/api/install" | "/api/overview" | "/api/update/check" | "/api/update/status"
             | "/api/convert" | "/api/convert/cars" | "/api/convert/status" | "/api/convert/tracks"
-            | "/api/convert/track_info" | "/api/convert/earlier"),
+            | "/api/convert/track_info" | "/api/convert/earlier"
+            | "/api/evoview/catalog" | "/api/evoview/caps" | "/api/evoview/setups" | "/api/evoview/state"
+            | "/api/evoview/controls"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -434,7 +436,9 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/install/run" | "/api/install/remove" | "/api/update/apply" | "/api/app/restart"
             | "/api/app/show" | "/api/server_shortcut"
             | "/api/convert/settings" | "/api/pick_folder" | "/api/convert/import" | "/api/convert/start" | "/api/convert/cancel" | "/api/convert/uninstall"
-            | "/api/convert/track_start" | "/api/convert/track_uninstall" | "/api/convert/track_open" | "/api/convert/track_install"),
+            | "/api/convert/track_start" | "/api/convert/track_uninstall" | "/api/convert/track_open" | "/api/convert/track_install"
+            | "/api/evoview/profile" | "/api/evoview/launch" | "/api/evoview/stop" | "/api/evoview/bind"
+            | "/api/evoview/ffb" | "/api/evoview/wheel_setup"),
         _ => false,
     }
 }
@@ -936,6 +940,20 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let f = { let f = bs("folder"); if f.is_empty() { bs("id") } else { f } };
             json_resp(200, &crate::viewer::start_open_track(&f))
         }
+        (false, "/api/evoview/catalog") => json_resp(200, &blocking(crate::evodrive::catalog).await),
+        (false, "/api/evoview/caps") => { let t = q_get(&query, "t").unwrap_or_default(); json_resp(200, &blocking(move || crate::evodrive::caps(&t)).await) }
+        (false, "/api/evoview/setups") => {
+            let (c, l) = (q_get(&query, "car").unwrap_or_default(), q_get(&query, "label").unwrap_or_default());
+            json_resp(200, &blocking(move || crate::evodrive::setups(&c, &l)).await)
+        }
+        (false, "/api/evoview/state") => json_resp(200, &blocking(crate::evodrive::state).await),
+        (false, "/api/evoview/controls") => json_resp(200, &blocking(crate::evodrive::controls).await),
+        (true, "/api/evoview/profile") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evodrive::save_profile(&b)).await) }
+        (true, "/api/evoview/launch") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evodrive::launch(&b)).await) }
+        (true, "/api/evoview/stop") => json_resp(200, &blocking(crate::evodrive::stop).await),
+        (true, "/api/evoview/bind") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evodrive::bind(&b)).await) }
+        (true, "/api/evoview/ffb") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evodrive::set_ffb(&b)).await) }
+        (true, "/api/evoview/wheel_setup") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evodrive::wheel_setup(&b)).await) }
         (false, "/api/compress") => { let r = q_flag(&query, "refresh"); json_resp(200, &blocking(move || crate::compress::measure(r, false)).await) }
         (false, "/api/compress/status") => json_resp(200, &crate::compress::status()),
         (true, "/api/compress/start") => { let u = bb("undo"); json_resp(200, &blocking(move || crate::compress::start(u)).await) }

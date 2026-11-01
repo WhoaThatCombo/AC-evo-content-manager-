@@ -41,6 +41,8 @@ pub fn defaults() -> Map<String, Value> {
         "backend_port": 448,
         // Convert page settings (convert.rs): ac1_root, out_dir, threads, memory_gb
         "convert": {},
+        // the evoview tab's last Drive choices (evodrive.rs, 14d-evoview.js)
+        "evoview": {},
         "backend_listen": "127.0.0.1",
         "auto_proxy": true,
         "default_tcp_port": 9700,
