@@ -38,6 +38,9 @@ const EVO_KNOBS = [
       ['bonnet', 'Bonnet'], ['bumper', 'Bumper'], ['farchase', 'Far chase'],
       ['chase', 'Viewer chase'], ['tv', 'TV cameras'], ['free', 'Free camera']],
     hint: 'Where you start. C cycles cameras while driving.' },
+  { id: 'units', pages: ['drive'], group: 'Driving', env: 'EVOVIEW_SPEED_UNITS', kind: 'select',
+    label: 'Speed', options: [['', 'km/h'], ['mph', 'mph']],
+    hint: 'Units on the driving cluster and the pit HUD.' },
   // ---- session
   { id: 'tod', pages: ['drive'], group: 'Session', env: 'EVOVIEW_TOD', kind: 'select',
     label: 'Time of day', options: [['', 'Default light'], ['07:00', '07:00 morning'],
