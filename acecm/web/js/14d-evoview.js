@@ -17,7 +17,8 @@
      pages    which pages draw it: drive / graphics / controls
      group    heading it sits under
      env      the EVOVIEW_* variable it sets
-     kind     select | toggle | range
+     kind     select | toggle | range | text
+     placeholder/max  text: grey hint inside the box, and its length limit
      options  select: [value, label] or {v, label, env: {VAR: value}} when one
               choice sets other variables (weather). '' = evoview's default,
               nothing is sent
@@ -94,6 +95,15 @@ const EVO_KNOBS = [
   { id: 'ai_pace', pages: ['drive'], group: 'Race', env: 'EVOVIEW_AI_PACE', kind: 'select',
     label: 'Opponent pace', options: [['', 'Mixed'], ['0.96,1.0', 'Fast'], ['0.85,0.93', 'Easier']],
     when: v => Number(v('ai')) > 0 },
+  // ---- online: join a dedicated server (the server's track and layout load
+  // whatever track is picked; your Steam account unless a name is set)
+  { id: 'mp_server', pages: ['drive'], group: 'Online', env: 'EVOVIEW_MP', kind: 'text',
+    label: 'Join server', placeholder: 'ip:port, e.g. 31.44.44.53:9031', max: 64,
+    hint: 'Leave empty to drive offline. The server’s track loads automatically; the car you pick must be one it allows.' },
+  { id: 'mp_name', pages: ['drive'], group: 'Online', env: 'EVOVIEW_MP_NAME', kind: 'text',
+    label: 'Driver name', placeholder: 'your Steam name', max: 32,
+    hint: 'What other drivers see in their list and in chat.',
+    when: v => !!String(v('mp_server') || '').trim() },
   // ---- driver aids at the start
   { id: 'no_tc', pages: ['drive'], group: 'Aids', env: 'EVOVIEW_NO_TC', kind: 'toggle',
     label: 'Remove the car’s traction control', on: '1', off: null, def: false,
@@ -281,7 +291,19 @@ function evoKnob(k, changed) {
   node = el('label', 'f evo-knob');
   const cap = el('span');
   node.append(cap);
-  if (k.kind === 'range') {
+  if (k.kind === 'text') {
+    cap.textContent = k.label;
+    const t = el('input');
+    t.type = 'text';
+    t.value = v || '';
+    t.placeholder = k.placeholder || '';
+    if (k.max) t.maxLength = k.max;
+    t.spellcheck = false;
+    // saved as you type; the group repaints (knobs with a `when`) on leaving
+    t.oninput = () => set(t.value.trim());
+    t.onchange = () => changed(true);
+    node.append(t);
+  } else if (k.kind === 'range') {
     const shown = x => (k.fmt ? k.fmt(Number(x)) : String(x));
     const paint = x => {
       cap.innerHTML = esc(k.label) + ' <b>' + esc(shown(x)) + '</b>'
