@@ -382,7 +382,11 @@ pub fn launch(body: &Value) -> Value {
     if !ok_id(&track) || !ok_id(&car) {
         return json!({"ok": false, "error": "that track or car id has characters evoview cannot take"});
     }
-    let _ = save_profile(&p);
+    // a launch from elsewhere (the Play page's Join in evoview) borrows the
+    // profile without becoming it
+    if body.get("no_save") != Some(&json!(true)) {
+        let _ = save_profile(&p);
+    }
     let Some(exe) = viewer::viewer_exe() else {
         return json!({"ok": false, "error": "evoview.exe not found. Put it in the tools folder next to ACECM, or set viewer_exe in Settings."});
     };

@@ -709,6 +709,13 @@ async function drivePage() {
                   mkf('Time multiplier', tmult), extras);
   sessionPane.append(sessGrid);
   const driveBtn = el('button', 'primary go-btn', 'Drive');
+  /* Join the picked server in evoview instead of the game: the server's
+     track loads by itself, the car is the one picked here (its exact
+     mechanical preset), the evoview tab's settings and Driver name ride
+     along. Online only. */
+  const evoBtn = el('button', 'go-btn evo-join', 'Join in evoview');
+  evoBtn.title = 'Drive this server in evoview (ACECM\'s own viewer) instead of the game';
+  evoBtn.style.display = 'none';
   const st = el('div', 'drive-status tiny dim');
   const pwField = el('label', 'f');
   pwField.style.display = 'none';
@@ -724,7 +731,7 @@ async function drivePage() {
   // the step checklist sits right under the button it reports on
   const stepsBox = el('div', 'jobsteps');
   stepsBox.hidden = true;
-  sessionPane.append(pwField, driveBtn, stepsBox, st, hint);
+  sessionPane.append(pwField, driveBtn, evoBtn, stepsBox, st, hint);
 
   /* ---- Online: ONE panel, laid out like any server browser -------------
      Tabs and tools across the top, the list filling the middle, and what
@@ -892,8 +899,9 @@ async function drivePage() {
     const parts = [[trkSearch, slotSearch], [directBox, slotDirect],
                    [srvBox, onlBody], [stepsBox, onlBody],
                    [trkHead, footSel], [favBtn, footSel], [carHead, footCar],
-                   [pwField, footGo], [assistBtn, footGo], [driveBtn, footGo],
+                   [pwField, footGo], [assistBtn, footGo], [driveBtn, footGo], [evoBtn, footGo],
                    [st, onlFoot]];
+    evoBtn.style.display = on ? '' : 'none';
     if (on) {
       parts.forEach(([n, into]) => borrow(n, into));
       hint.style.display = 'none';
@@ -1977,6 +1985,37 @@ async function drivePage() {
       setTimeout(() => { if (_page === 'drive') drivePage(); }, 500);
     }
   }
+
+  async function joinInEvoview(replace) {
+    const s = sel.via === 'local' ? localOf() : serverOf();
+    if (!s) { toast('Pick a server first', true); return; }
+    const addr = sel.via === 'local' ? `127.0.0.1:${s.tcp_port}` : `${s.server_ip}:${s.server_tcp_port}`;
+    const c = carOf(sel.car);
+    if (!c || !c.model) { toast('Pick a car first', true); return; }
+    const allow = allowedCars();
+    if (allow && !carAllowed(c, allow)) { toast('This server does not allow that car - pick one it does', true); return; }
+    // the evoview tab's saved profile: its knobs and Driver name, not changed
+    // by this (the backend is told not to save it)
+    const cfg = await api('config');
+    const ep = Object.assign({ knobs: {} }, (cfg && cfg.evoview) || {});
+    const env = (typeof evoEnv === 'function' && evoProf) ? evoEnv() : {};
+    Object.assign(env, { EVOVIEW_MP: addr, EVOVIEW_MP_PRESET: c.id });
+    const name = String((ep.knobs || {}).mp_name || '').trim();
+    if (name) env.EVOVIEW_MP_NAME = name;
+    // any track id will do: evoview loads the server's own track and layout
+    const profile = Object.assign({}, ep, { car: c.model, track: ep.track || 'brands_hatch', layout: '', livery: '', setup: '' });
+    evoBtn.disabled = true;
+    const r = await api('evoview/launch', { profile, env, replace: !!replace, no_save: true });
+    evoBtn.disabled = false;
+    if (r && r.busy) {
+      if (await ask('evoview is already running (' + (r.error || '') + ').\n\nStop it and join '
+                    + (s.name || addr) + ' instead?', 'Restart')) joinInEvoview(true);
+      return;
+    }
+    if (!r || !r.ok) { toast((r && r.error) || 'evoview could not start', true); return; }
+    toast('Joining ' + (s.name || addr) + ' in evoview - the server\'s track loads first');
+  }
+  evoBtn.onclick = () => joinInEvoview(false);
 
   driveBtn.onclick = async () => {
     if (!sel.car) { toast('Pick a car first', true); return; }
