@@ -390,6 +390,8 @@ fn build_track_pack(folder: &str) -> Option<PathBuf> {
     let want = format!("v2:{}", track_sig(&files));
     let have = std::fs::read_to_string(&sig_path).map(|s| s.trim().to_string()).unwrap_or_default();
     if have == want && tar_path.is_file() && sha_path.is_file() {
+        // the sig's mtime is the pack's last use (prune_track_packs)
+        let _ = std::fs::write(&sig_path, format!("{want}\n"));
         return Some(tar_path);
     }
     let tmp = d.join(format!("{folder}.tar.part.{}.{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
@@ -429,6 +431,42 @@ fn build_track_pack(folder: &str) -> Option<PathBuf> {
     let _ = std::fs::write(&sha_path, format!("{digest}\n"));
     flush_cache();
     Some(tar_path)
+}
+
+/// Delete track packs nobody has pulled, pushed or exported for 3 days (they
+/// are whole copies of the track, often GBs; ensure_track_pack rebuilds one
+/// on the next request) and part files a crash left behind.
+pub fn prune_track_packs() {
+    let Ok(rd) = std::fs::read_dir(packs_dir()) else { return };
+    let old = |p: &Path, days: u64| {
+        std::fs::metadata(p).and_then(|m| m.modified()).ok()
+            .and_then(|t| t.elapsed().ok())
+            .map_or(false, |a| a.as_secs() > days * 86400)
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.contains(".tar.part.") {
+            if old(&p, 1) {
+                let _ = std::fs::remove_file(&p);
+            }
+            continue;
+        }
+        let Some(folder) = name.strip_suffix(".tar") else { continue };
+        let sig = p.with_file_name(format!("{folder}.tar.sig"));
+        // not while ensure_track_pack (re)builds this one
+        let lk = PACK_LOCKS.lock().unwrap().get_or_insert_with(HashMap::new)
+            .entry(folder.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone();
+        let _g = lk.lock().unwrap();
+        if old(if sig.is_file() { &sig } else { &p }, 3) {
+            // a pack being served stays open, so Windows refuses its delete
+            if std::fs::remove_file(&p).is_ok() {
+                let _ = std::fs::remove_file(&sig);
+                let _ = std::fs::remove_file(p.with_file_name(format!("{folder}.tar.sha256")));
+                crate::logs::info(format!("track pack {folder}: unused for 3 days, removed"));
+            }
+        }
+    }
 }
 
 pub fn track_pack_sha(folder: &str) -> String {

@@ -230,6 +230,11 @@ fn main() {
     acecm::startup::run(listen.port);
     // leaked Python onefile folders from before the native build
     std::thread::spawn(|| { let _ = installer::sweep_bundles(); });
+    // track share packs nobody used for days (GBs each), now and every 6 h
+    std::thread::spawn(|| loop {
+        acecm::registry::prune_track_packs();
+        std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+    });
     // fill the Convert page's car / track list caches once the window is up,
     // so the first visit is as quick as the second (cold tracks list: ~0.5 s)
     std::thread::spawn(|| {
