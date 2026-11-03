@@ -99,13 +99,148 @@ fn dlls(exe: &Path) -> Value {
            "fsr": all(&["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll"])})
 }
 
+/// The FSR DLLs evoview loads; not shipped (36 MB), the player adds them.
+const FSR_DLLS: [&str; 2] = ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll"];
+
+/// Where AMD publishes them (the FidelityFX SDK's signed binaries).
+pub const FSR_URL: &str = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/main/Kits/FidelityFX/signedbin";
+
+/// POST /api/evoview/add_dlls {id}: the files of a drag-drop (loose DLLs or
+/// a .zip holding them, such as AMD's SDK) - each FSR DLL among them goes
+/// beside evoview.exe once Windows confirms a valid AMD signature, so a
+/// stray or tampered DLL is never put where evoview will load it.
+pub fn add_dlls(did: &str) -> Value {
+    let r = add_dlls_from(did);
+    crate::install::drop_cleanup(did);
+    r
+}
+
+fn add_dlls_from(did: &str) -> Value {
+    let Some(exe) = viewer::viewer_exe().map(PathBuf::from) else { return json!({"ok": false, "error": "evoview.exe not found"}) };
+    let Some(stage) = crate::install::drop_staging(did, false).filter(|d| d.is_dir()) else {
+        return json!({"ok": false, "error": "nothing was dropped"});
+    };
+    let wanted = |name: &str| {
+        let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_ascii_lowercase();
+        FSR_DLLS.iter().find(|n| **n == base).copied()
+    };
+    // (dll name, bytes) from loose files and from inside zips
+    let mut found: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let files: Vec<PathBuf> = std::fs::read_dir(&stage).map(|r| r.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect())
+        .unwrap_or_default();
+    for f in &files {
+        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Some(n) = wanted(&name) {
+            match std::fs::read(f) {
+                Ok(b) => found.push((n, b)),
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
+        } else if name.to_ascii_lowercase().ends_with(".zip") {
+            let zip = std::fs::File::open(f).map_err(|e| e.to_string())
+                .and_then(|h| zip::ZipArchive::new(h).map_err(|e| e.to_string()));
+            let mut zip = match zip {
+                Ok(z) => z,
+                Err(e) => { errors.push(format!("{name}: {e}")); continue; }
+            };
+            for i in 0..zip.len() {
+                use std::io::Read;
+                let Ok(mut ent) = zip.by_index(i) else { continue };
+                let Some(n) = wanted(ent.name()) else { continue };
+                if ent.size() > 128 << 20 || found.iter().any(|(m, _)| *m == n) {
+                    continue;
+                }
+                let mut b = Vec::with_capacity(ent.size() as usize);
+                if ent.read_to_end(&mut b).is_ok() {
+                    found.push((n, b));
+                }
+            }
+        } else {
+            errors.push(format!("{name}: not an FSR DLL ({})", FSR_DLLS.join(", ")));
+        }
+    }
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut added: Vec<&str> = Vec::new();
+    for (n, b) in found {
+        // checked where it was dropped, then moved into place
+        let tmp = stage.join(format!("{n}.check"));
+        if let Err(e) = std::fs::write(&tmp, &b) {
+            errors.push(format!("{n}: {e}"));
+            continue;
+        }
+        if let Err(e) = amd_signed(&tmp) {
+            errors.push(format!("{n}: {e} - not added"));
+            continue;
+        }
+        let dest = dir.join(n);
+        match std::fs::copy(&tmp, &dest) {
+            Ok(_) => added.push(n),
+            Err(e) => errors.push(format!("{n}: could not write beside evoview.exe ({e}) - close evoview and try again")),
+        }
+    }
+    if added.is_empty() && errors.is_empty() {
+        errors.push("no FSR DLLs in what was dropped".into());
+    }
+    crate::logs::info(format!("evoview: FSR DLLs added {added:?}, problems {errors:?}"));
+    json!({"ok": !added.is_empty(), "added": added, "errors": errors, "dlls": dlls(&exe)})
+}
+
+/// Windows' Authenticode check (WinVerifyTrust: valid, unrevoked chain to a
+/// trusted root), and AMD as the signer in the file's certificate table.
+#[cfg(windows)]
+fn amd_signed(p: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Security::WinTrust::*;
+    let wide: Vec<u16> = p.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
+    let mut file = WINTRUST_FILE_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: wide.as_ptr(),
+        hFile: std::ptr::null_mut(),
+        pgKnownSubject: std::ptr::null_mut(),
+    };
+    let mut data: WINTRUST_DATA = unsafe { std::mem::zeroed() };
+    data.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
+    data.dwUIChoice = WTD_UI_NONE;
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.dwUnionChoice = WTD_CHOICE_FILE;
+    data.Anonymous.pFile = &mut file;
+    data.dwStateAction = WTD_STATEACTION_VERIFY;
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let rc = unsafe { WinVerifyTrust(std::ptr::null_mut(), &mut action, &mut data as *mut _ as *mut _) };
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    unsafe { WinVerifyTrust(std::ptr::null_mut(), &mut action, &mut data as *mut _ as *mut _) };
+    if rc != 0 {
+        return Err(format!("no valid digital signature (0x{:08x})", rc as u32));
+    }
+    // the certificate table: PE data directory 4 (file offset, size)
+    let b = std::fs::read(p).map_err(|e| e.to_string())?;
+    let u32_at = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()) as usize);
+    let pe = u32_at(0x3c).unwrap_or(0);
+    let opt = pe + 24;
+    let dirs = match b.get(opt..opt + 2) {
+        Some([0x0b, 0x02]) => opt + 112,
+        Some([0x0b, 0x01]) => opt + 96,
+        _ => return Err("not a Windows DLL".into()),
+    };
+    let (off, len) = (u32_at(dirs + 32).unwrap_or(0), u32_at(dirs + 36).unwrap_or(0));
+    let certs = b.get(off..off.saturating_add(len)).unwrap_or(&[]);
+    if memchr::memmem::find(certs, b"Advanced Micro Devices").is_none() {
+        return Err("signed, but not by AMD".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn amd_signed(_: &Path) -> Result<(), String> {
+    Err("signature checks need Windows".into())
+}
+
 /// GET /api/evoview/caps?t=a,b: the tokens asked for, the env list, the keys.
 pub fn caps(tokens: &str) -> Value {
     let Some(exe) = viewer::viewer_exe() else { return json!({"ok": false, "error": "evoview.exe not found"}) };
     let exe = PathBuf::from(exe);
     let list: Vec<String> = tokens.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).take(200).collect();
     let e = scan(&exe);
-    json!({"ok": true, "exe": exe, "env": e.env, "keys": e.keys, "has": has_tokens(&exe, &list), "dlls": dlls(&exe)})
+    json!({"ok": true, "exe": exe, "env": e.env, "keys": e.keys, "has": has_tokens(&exe, &list), "dlls": dlls(&exe), "fsr_url": FSR_URL})
 }
 
 // ----------------------------------------------------------- catalogue --
@@ -738,5 +873,29 @@ pub fn wheel_setup(b: &Value) -> Value {
     match crate::procs::spawn_console_window(Path::new(&exe), &args, &paths::data(), "evoview wheel setup") {
         Ok(pid) => json!({"ok": true, "pid": pid, "roles": roles}),
         Err(e) => json!({"ok": false, "error": e}),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod fsr_tests {
+    use super::*;
+
+    #[test]
+    fn only_amd_signed_dlls_pass() {
+        let tools = crate::paths::repo().join("tools");
+        for n in FSR_DLLS {
+            let p = tools.join(n);
+            if p.is_file() {
+                assert_eq!(amd_signed(&p), Ok(()), "{n}");
+            }
+        }
+        let viewer = tools.join("evoview.exe");
+        if viewer.is_file() {
+            assert!(amd_signed(&viewer).is_err());
+        }
+        let steam = Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Assetto Corsa EVO\steam_api64.dll");
+        if steam.is_file() {
+            assert_eq!(amd_signed(steam), Err("signed, but not by AMD".into()));
+        }
     }
 }

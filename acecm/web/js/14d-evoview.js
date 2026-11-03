@@ -664,9 +664,12 @@ async function evoDrivePage() {
   const dl = d.dlls || {};
   const upNote = () => {
     const u = evoVal('upscaler');
-    if ((u === 'dlss' && !dl.dlss) || (u === 'fsr' && !dl.fsr)) {
-      return (u === 'dlss' ? 'DLSS' : 'FSR') + ' DLLs are not beside this evoview.exe - '
-        + 'it will fall back to TAA.';
+    if (u === 'fsr' && !dl.fsr) {
+      return 'FSR is not added yet, so evoview uses TAA. Get AMD’s two FSR files '
+        + '(evoview graphics page) and drag them onto this window.';
+    }
+    if (u === 'dlss' && !dl.dlss) {
+      return 'DLSS DLLs are not beside this evoview.exe - it will fall back to TAA.';
     }
     return '';
   };
@@ -1022,6 +1025,7 @@ async function evoGraphicsPage() {
     + 'own default; double-click one to go back to it. Upscaler DLLs beside evoview.exe: DLSS '
     + (dl.dlss ? 'yes' : 'no') + ', FSR ' + (dl.fsr ? 'yes' : 'no') + '.'));
   p.append(intro);
+  p.append(evoFsrCard(dl));
   const groups = [...new Set(EVO_KNOBS.filter(k => k.pages.includes('graphics')).map(k => k.group))];
   groups.forEach(g => {
     const c = el('div', 'card');
@@ -1031,4 +1035,72 @@ async function evoGraphicsPage() {
     c.append(box);
     p.append(c);
   });
+}
+
+/* ------------------------------------------------------------ FSR DLLs -- */
+/* AMD's two FSR files are not shipped with ACECM (36 MB). The player gets
+   them from AMD and drops them anywhere on the window - loose, or the zip
+   they came in - or picks them here. The app keeps only AMD-signed ones. */
+function evoIsFsrDrop(files) {
+  return files.length > 0 && files.every(f =>
+    /^amd_fidelityfx_.*\.dll$/i.test(f.name || '') || /fidelityfx.*\.zip$/i.test(f.name || ''));
+}
+
+async function evoAddDlls(files) {
+  const id = dropId();
+  const prog = dropProgress();
+  const total = files.reduce((n, f) => n + (f.size || 0), 0);
+  let done = 0;
+  prog.show('Adding FSR…');
+  progClaim('local');
+  try {
+    for (const f of files) {
+      const r = await putFile('/api/drop/part?id=' + encodeURIComponent(id) + '&name=' + encodeURIComponent(f.name), f,
+        loaded => prog.set(total ? (done + loaded) / total : 0, `${f.name} - ${mb(done + loaded)} of ${mb(total)}`));
+      if (!r.ok) { toast(r.error || 'Upload failed', true); return; }
+      done += f.size || 0;
+    }
+    prog.busy('Checking AMD’s signature…', '');
+    const r = await api('evoview/add_dlls', { id });
+    const errs = (r && r.errors) || [];
+    if (r && r.dlls && r.dlls.fsr) toast('FSR is ready - pick it under Upscaler');
+    else if (r && r.ok) toast('Added ' + r.added.join(', ') + ' - FSR still needs '
+      + (r.added.some(n => /loader/.test(n)) ? 'amd_fidelityfx_upscaler_vk.dll' : 'amd_fidelityfx_loader_vk.dll'), true);
+    if (errs.length) toast(errs.join('; '), true);
+    if (_wanted === 'evographics' || _wanted === 'evodrive') go(_wanted);
+  } finally {
+    prog.hide();
+    progRelease('local');
+  }
+}
+
+function evoFsrCard(dl) {
+  const c = el('div', 'card');
+  c.append(el('h2', null, 'AMD FSR'));
+  if (dl.fsr) {
+    c.append(el('div', 'tiny dim', 'Added. Pick FSR 3.1 under Upscaler below.'));
+    return c;
+  }
+  c.append(el('div', 'tiny', 'FSR (a sharper upscaler for any GPU) needs two files from AMD: '
+    + '<b>amd_fidelityfx_loader_vk.dll</b> and <b>amd_fidelityfx_upscaler_vk.dll</b>. '
+    + 'Download both from AMD’s page, then drag them onto this window.'));
+  const row = el('div', 'row wrap');
+  const get = el('button', 'sm primary', 'Open AMD’s download page');
+  get.onclick = async () => {
+    const r = await api('evoview/fsr_page', {});
+    if (!(r && r.ok)) toast('Could not open a browser', true);
+  };
+  const pick = el('button', 'sm', 'Choose files…');
+  const inp = el('input');
+  inp.type = 'file';
+  inp.multiple = true;
+  inp.accept = '.dll,.zip';
+  inp.hidden = true;
+  inp.onchange = () => { const f = [...inp.files]; inp.value = ''; if (f.length) evoAddDlls(f); };
+  pick.onclick = () => inp.click();
+  row.append(get, pick, inp);
+  c.append(row);
+  c.append(el('div', 'tiny dim', 'On AMD’s page, open each file and use “Download raw file”. '
+    + 'Only files signed by AMD are kept.'));
+  return c;
 }

@@ -421,7 +421,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/drive/list" | "/api/backend/ensure" | "/api/game/launch"
             | "/api/browser/install" | "/api/browser/scan" | "/api/tracks/restore" | "/api/push/send"
             | "/api/push/plan" | "/api/push/server_build" | "/api/server_build" | "/api/mods/install"
-            | "/api/drop" | "/api/drop/part" | "/api/library/remove" | "/api/library/export" | "/api/mods/fix"
+            | "/api/drop" | "/api/drop/part" | "/api/evoview/add_dlls" | "/api/evoview/fsr_page" | "/api/library/remove" | "/api/library/export" | "/api/mods/fix"
             | "/api/mods/remove" | "/api/mods/sync" | "/api/pack/build" | "/api/drive/direct"
             | "/api/drive/fav/add" | "/api/drive/fav/remove"
             | "/api/assists" | "/api/gamesettings/write" | "/api/gamesettings/restore"
@@ -532,6 +532,8 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let start = body.get("start").and_then(|v| v.as_str()).unwrap_or("").to_string();
             json_resp(200, &blocking(move || crate::convert::pick_folder(&start)).await)
         }
+        (true, "/api/evoview/fsr_page") => json_resp(200, &serde_json::json!({"ok": crate::launch::open_url(crate::evodrive::FSR_URL)})),
+        (true, "/api/evoview/add_dlls") => { let id = bs("id"); json_resp(200, &blocking(move || crate::evodrive::add_dlls(&id)).await) }
         (true, "/api/convert/import") => { let id = bs("id"); json_resp(200, &blocking(move || crate::convert::import_dropped(&id)).await) }
         (true, "/api/convert/settings") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::save_settings(&b)).await) }
         (true, "/api/convert/start") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::start(&b)).await) }

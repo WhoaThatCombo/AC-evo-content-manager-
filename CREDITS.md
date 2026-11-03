@@ -16,11 +16,11 @@ included: everything is read from the user's own installation.
 ## Upscaler library (third-party binary, not GPL)
 
 - **AMD FidelityFX Super Resolution** (`amd_fidelityfx_loader_vk.dll`,
-  `amd_fidelityfx_upscaler_vk.dll`), © Advanced Micro Devices, Inc. All
-  rights reserved. Separate, unmodified signed binaries that ship next to
-  `evoview.exe` and load only when the user picks the FSR upscaler. They are
-  not covered by ACECM's GPL: AMD's licence, copyright notice and disclaimers
-  are reproduced in full in `tools/licenses/AMD-FidelityFX-LICENSE.md`.
+  `amd_fidelityfx_upscaler_vk.dll`), © Advanced Micro Devices, Inc. NOT
+  shipped with ACECM: evoview loads them only if the user downloads them from
+  AMD's FidelityFX SDK (`Kits/FidelityFX/signedbin`) and drops them on the
+  app, which checks AMD's signature and places them beside `evoview.exe`.
+  AMD's licence is kept in `tools/licenses/AMD-FidelityFX-LICENSE.md`.
   AMD, FidelityFX and FSR are trademarks of Advanced Micro Devices, Inc.
 
 ## Libraries (Rust crates)

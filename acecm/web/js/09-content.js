@@ -579,6 +579,8 @@ function bindDropAnywhere() {
     if (!files.length) { toast('Nothing to install', true); return; }
     // on Convert, an archive is an AC1 mod to convert, not an EVO mod to install
     if (_page === 'convert' && files.every(cvIsArchive)) { await cvDropImport(files); return; }
+    // AMD's FSR DLLs (or their zip) belong beside evoview, from any page
+    if (evoIsFsrDrop(files)) { await evoAddDlls(files); return; }
     toast('Installing ' + files.map(f => f.name).join(', ') + '…');
     const r = await uploadDropped(files);
     ingestToast(r);
