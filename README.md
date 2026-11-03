@@ -167,7 +167,7 @@ The converter is new: tracks have had less in-game testing than cars, and the re
 
 ### Garage and tracks
 
-- **Cars** is the list the *dedicated server* can load. That is the list that matters for a join. Open a car in **evoview** (shipped inside `ACECM.exe`); it reads the `.kspkg` in place and does not extract the package. The viewer switches liveries in place (also from the car page), shows body kits and the seated driver, and has a drive / demo mode with suspension, lights, live dash and effects.
+- **Cars** is the list the *dedicated server* can load. That is the list that matters for a join. Open a car in **evoview** (shipped inside `ACECM.exe`, source at [WhoaThatCombo/evoview](https://github.com/WhoaThatCombo/evoview), GPL-3.0); it reads the `.kspkg` in place and does not extract the package. The viewer switches liveries in place (also from the car page), shows body kits and the seated driver, and has a drive / demo mode with suspension, lights, live dash and effects.
 - **Tracks** use the same index as the launcher’s `EVENT_IDX` (for example Touristenfahrten is 18, not 0). Custom tracks appear alongside stock layouts after install.
 
 ### evoview upscalers (AMD FSR, NVIDIA DLSS)
@@ -246,9 +246,6 @@ are listed in [CREDITS.md](CREDITS.md).
 
 The older Python app that Linux 1.0.21 was built from is no longer in this
 repository; it returns when Linux is ported.
-
-The DLSS bridge `tools/evoview_ngx.dll` (evoview's own shim around NVIDIA's
-NGX library) is not in git; a build without it warns and leaves DLSS off.
 
 Windows releases are built and signed locally, then published with
 `tools/publish_release.py`, which refuses to upload without a signature that

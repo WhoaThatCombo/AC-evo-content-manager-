@@ -95,14 +95,13 @@ fn exe_has(exe: &Path, token: &str) -> bool {
 fn dlls(exe: &Path) -> Value {
     let d = exe.parent().map(Path::to_path_buf).unwrap_or_default();
     let all = |names: &[&str]| names.iter().all(|n| d.join(n).is_file());
-    json!({"dlss": all(&["evoview_ngx.dll", "nvngx_dlss.dll"]),
+    json!({"dlss": all(&["nvngx_dlss.dll"]),
            "fsr": all(&["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll"])})
 }
 
 /// The upscaler DLLs the player adds (not shipped: FSR's are 36 MB, and
 /// NVIDIA's terms keep nvngx_dlss.dll out of the GPL bundle), each with the
-/// company whose signature it must carry. evoview_ngx.dll, our NGX shim, is
-/// bundled.
+/// company whose signature it must carry.
 const UPSCALER_DLLS: [(&str, &str, &str); 3] = [
     ("amd_fidelityfx_loader_vk.dll", "AMD", "Advanced Micro Devices"),
     ("amd_fidelityfx_upscaler_vk.dll", "AMD", "Advanced Micro Devices"),

@@ -10,10 +10,12 @@ included: everything is read from the user's own installation.
 - **aceconv** (`converter/`): the Assetto Corsa -> Assetto Corsa EVO car and
   track converter, GPL-3.0-or-later. Its own credits are in
   `converter/CREDITS.md`.
-- **evoview** (`tools/evoview.exe`): the 3D car and track viewer, by the same
-  author, built from its own repository.
+- **evoview** (`tools/evoview.exe`): the 3D car and track viewer and driving
+  sim, GPL-3.0-or-later, built from its own repository:
+  <https://github.com/WhoaThatCombo/evoview>. Its credits are in that
+  repository's `THIRD-PARTY-NOTICES.md`.
 
-## Upscaler library (third-party binary, not GPL)
+## Upscaler libraries (third-party binaries, not shipped)
 
 - **AMD FidelityFX Super Resolution** (`amd_fidelityfx_loader_vk.dll`,
   `amd_fidelityfx_upscaler_vk.dll`), © Advanced Micro Devices, Inc. NOT
@@ -24,13 +26,9 @@ included: everything is read from the user's own installation.
   AMD, FidelityFX and FSR are trademarks of Advanced Micro Devices, Inc.
 - **NVIDIA DLSS** (`nvngx_dlss.dll`), © NVIDIA Corporation. NOT shipped:
   the user downloads it from NVIDIA's DLSS SDK and drops it on the app, which
-  checks NVIDIA's signature and places it beside `evoview.exe`.
-- **NVIDIA NGX SDK**: `evoview_ngx.dll`, shipped inside ACECM, is evoview's
-  own bridge to DLSS and contains NVIDIA's NGX SDK in object code form,
-  © NVIDIA Corporation, used under the NVIDIA RTX SDKs licence. It is a
-  separate library loaded at runtime and is not covered by ACECM's GPL;
-  NVIDIA's terms apply to it. This software contains source code provided by
-  NVIDIA Corporation. NVIDIA and DLSS are trademarks of NVIDIA Corporation.
+  checks NVIDIA's signature and places it beside `evoview.exe`. evoview uses
+  it through the NGX runtime in NVIDIA's driver; ACECM and evoview contain no
+  NVIDIA SDK code. NVIDIA and DLSS are trademarks of NVIDIA Corporation.
 
 ## Libraries (Rust crates)
 

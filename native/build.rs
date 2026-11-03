@@ -43,19 +43,10 @@ fn bundle() {
             println!("cargo:warning=bundle: tools/{name} is missing");
         }
     }
-    // Upscalers: the player adds the vendors' DLLs (AMD's FSR pair, NVIDIA's
-    // nvngx_dlss.dll) by dropping them on the app (evodrive::add_dlls).
-    // Bundled: only evoview_ngx.dll, evoview's own shim around NVIDIA's NGX
-    // library (evoview ngx_shim/; NOT in git, CREDITS.md), loaded at runtime.
-    for name in ["evoview_ngx.dll"] {
-        let p = repo.join("tools").join(name);
-        println!("cargo:rerun-if-changed={}", p.display());
-        if p.is_file() {
-            files.push((format!("tools/{name}"), p));
-        } else {
-            println!("cargo:warning=bundle: tools/{name} is missing (evoview DLSS)");
-        }
-    }
+    // Upscalers: nothing bundled. The player adds the vendors' DLLs (AMD's
+    // FSR pair, NVIDIA's nvngx_dlss.dll) by dropping them on the app
+    // (evodrive::add_dlls); evoview reaches DLSS through the NGX runtime in
+    // NVIDIA's driver, so no NVIDIA code ships either.
     // the AC1 -> EVO converter (converter/, its own crate), built here
     if let Some(p) = converter(&repo) {
         // a run from the source tree (no unpacked bundle) finds it here
