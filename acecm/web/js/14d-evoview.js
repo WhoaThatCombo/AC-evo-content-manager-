@@ -177,9 +177,9 @@ const EVO_KNOBS = [
   { id: 'ffb_smooth', pages: ['controls'], group: 'Force feedback', env: 'EVOVIEW_FFB_SMOOTH',
     kind: 'range', label: 'Smoothing', min: 0, max: 0.9, step: 0.05, def: 0 },
   { id: 'ffb_damp_scale', pages: ['controls'], group: 'Force feedback', env: 'EVOVIEW_FFB_DAMP_SCALE',
-    kind: 'range', label: 'Steering damping', min: 0, max: 1.5, step: 0.05, def: 1,
+    kind: 'range', label: 'Dynamic damping', min: 0, max: 1.5, step: 0.05, def: 1,
     fmt: x => Math.round(x * 100) + ' %',
-    hint: 'Resists fast wheel movement, more with speed. Lower lets the wheel snap into countersteer when drifting.' },
+    hint: 'Scales the game’s Dynamic damping: a light resistance to fast steering that grows with speed. Its effect is small.' },
   { id: 'ffb_softclip', pages: ['controls'], group: 'Force feedback', env: 'EVOVIEW_FFB_SOFTCLIP',
     kind: 'toggle', label: 'Soft clipping', on: '1', off: null, def: false,
     hint: 'Rounds off the strongest forces instead of flattening them, so a slide still has feel at the top end.' },
@@ -187,6 +187,14 @@ const EVO_KNOBS = [
     kind: 'range', label: 'Minimum force', min: 0, max: 0.2, step: 0.01, def: 0,
     fmt: x => x ? Math.round(x * 100) + ' %' : 'off',
     hint: 'Lifts small forces past your wheel’s dead zone (belt and gear wheels).' },
+  // the game's FFB enhancements; leftmost = the value in the game's settings
+  ...[['ffb_curbs', 'EVOVIEW_FFB_CURBS', 'Kerbs', 'A buzz over kerbs, grass and gravel, set by each surface.'],
+      ['ffb_gforce', 'EVOVIEW_FFB_GFORCE', 'Bumps', 'Road texture, stronger the harder the car is jolted up and down.'],
+      ['ffb_slips', 'EVOVIEW_FFB_SLIPS', 'Slips', 'A vibration once the tyres slide past their grip: wheelspin, lock-ups and drifts.'],
+      ['ffb_abs', 'EVOVIEW_FFB_ABS', 'ABS', 'Pulses while ABS is working.']].map(([id, env, label, hint]) => (
+    { id, pages: ['controls'], group: 'Force feedback effects', env,
+      kind: 'range', label, min: -0.05, max: 1, step: 0.05, def: -0.05,
+      fmt: x => x < 0 ? 'as in game' : Math.round(x * 100) + ' %', hint })),
 ];
 
 /* Wheel roles in %APPDATA%\evoview\wheel.cfg. `needs` is the literal the exe
