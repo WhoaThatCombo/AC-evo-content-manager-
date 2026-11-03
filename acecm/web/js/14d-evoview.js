@@ -669,7 +669,8 @@ async function evoDrivePage() {
         + '(evoview graphics page) and drag them onto this window.';
     }
     if (u === 'dlss' && !dl.dlss) {
-      return 'DLSS DLLs are not beside this evoview.exe - it will fall back to TAA.';
+      return 'DLSS is not added yet, so evoview uses TAA. Get NVIDIA’s nvngx_dlss.dll '
+        + '(evoview graphics page) and drag it onto this window.';
     }
     return '';
   };
@@ -1025,7 +1026,7 @@ async function evoGraphicsPage() {
     + 'own default; double-click one to go back to it. Upscaler DLLs beside evoview.exe: DLSS '
     + (dl.dlss ? 'yes' : 'no') + ', FSR ' + (dl.fsr ? 'yes' : 'no') + '.'));
   p.append(intro);
-  p.append(evoFsrCard(dl));
+  p.append(evoFsrCard(dl), evoDlssCard(dl));
   const groups = [...new Set(EVO_KNOBS.filter(k => k.pages.includes('graphics')).map(k => k.group))];
   groups.forEach(g => {
     const c = el('div', 'card');
@@ -1037,21 +1038,27 @@ async function evoGraphicsPage() {
   });
 }
 
-/* ------------------------------------------------------------ FSR DLLs -- */
-/* AMD's two FSR files are not shipped with ACECM (36 MB). The player gets
-   them from AMD and drops them anywhere on the window - loose, or the zip
-   they came in - or picks them here. The app keeps only AMD-signed ones. */
-function evoIsFsrDrop(files) {
-  return files.length > 0 && files.every(f =>
-    /^amd_fidelityfx_.*\.dll$/i.test(f.name || '') || /fidelityfx.*\.zip$/i.test(f.name || ''));
+/* ------------------------------------------------------- upscaler DLLs -- */
+/* The vendors' upscaler files are not shipped with ACECM: AMD's two FSR
+   DLLs (36 MB) and NVIDIA's nvngx_dlss.dll (its terms keep it out of a GPL
+   app). The player gets them from the vendor and drops them anywhere on the
+   window - loose, or the zip they came in - or picks them on the evoview
+   graphics page. The app keeps only files signed by their maker. */
+function evoIsUpscalerDrop(files) {
+  return files.length > 0 && files.every(f => {
+    const n = f.name || '';
+    return /^amd_fidelityfx_.*\.dll$/i.test(n) || /^nvngx_dlss\.dll$/i.test(n)
+      || /(fidelityfx|dlss).*\.zip$/i.test(n);
+  });
 }
 
 async function evoAddDlls(files) {
   const id = dropId();
   const prog = dropProgress();
   const total = files.reduce((n, f) => n + (f.size || 0), 0);
+  const before = (await api('evoview/caps') || {}).dlls || {};
   let done = 0;
-  prog.show('Adding FSR…');
+  prog.show('Adding upscaler files…');
   progClaim('local');
   try {
     for (const f of files) {
@@ -1060,12 +1067,16 @@ async function evoAddDlls(files) {
       if (!r.ok) { toast(r.error || 'Upload failed', true); return; }
       done += f.size || 0;
     }
-    prog.busy('Checking AMD’s signature…', '');
+    prog.busy('Checking the signature…', '');
     const r = await api('evoview/add_dlls', { id });
     const errs = (r && r.errors) || [];
-    if (r && r.dlls && r.dlls.fsr) toast('FSR is ready - pick it under Upscaler');
-    else if (r && r.ok) toast('Added ' + r.added.join(', ') + ' - FSR still needs '
-      + (r.added.some(n => /loader/.test(n)) ? 'amd_fidelityfx_upscaler_vk.dll' : 'amd_fidelityfx_loader_vk.dll'), true);
+    const now = (r && r.dlls) || {};
+    const added = (r && r.added) || [];
+    const ready = [now.fsr && !before.fsr && 'FSR', now.dlss && !before.dlss && 'DLSS'].filter(Boolean);
+    if (ready.length) toast(ready.join(' and ') + ' is ready - pick it under Upscaler');
+    else if (added.some(n => /fidelityfx/.test(n)) && !now.fsr) toast('Added ' + added.join(', ') + ' - FSR still needs '
+      + (added.some(n => /loader/.test(n)) ? 'amd_fidelityfx_upscaler_vk.dll' : 'amd_fidelityfx_loader_vk.dll'), true);
+    else if (added.length) toast('Added ' + added.join(', '));
     if (errs.length) toast(errs.join('; '), true);
     if (_wanted === 'evographics' || _wanted === 'evodrive') go(_wanted);
   } finally {
@@ -1074,20 +1085,21 @@ async function evoAddDlls(files) {
   }
 }
 
-function evoFsrCard(dl) {
+/* One card per vendor: what to get, a button to the vendor's page, a picker. */
+function evoDllCard(title, have, what, files, page, how) {
   const c = el('div', 'card');
-  c.append(el('h2', null, 'AMD FSR'));
-  if (dl.fsr) {
-    c.append(el('div', 'tiny dim', 'Added. Pick FSR 3.1 under Upscaler below.'));
+  c.append(el('h2', null, title));
+  if (have) {
+    c.append(el('div', 'tiny dim', 'Added. Pick it under Upscaler below.'));
     return c;
   }
-  c.append(el('div', 'tiny', 'FSR (a sharper upscaler for any GPU) needs two files from AMD: '
-    + '<b>amd_fidelityfx_loader_vk.dll</b> and <b>amd_fidelityfx_upscaler_vk.dll</b>. '
-    + 'Download both from AMD’s page, then drag them onto this window.'));
+  c.append(el('div', 'tiny', what + ' needs ' + files + '. Download '
+    + (files.includes(' and ') ? 'both' : 'it') + ' from the maker’s page, then drag '
+    + (files.includes(' and ') ? 'them' : 'it') + ' onto this window.'));
   const row = el('div', 'row wrap');
-  const get = el('button', 'sm primary', 'Open AMD’s download page');
+  const get = el('button', 'sm primary', 'Open the download page');
   get.onclick = async () => {
-    const r = await api('evoview/fsr_page', {});
+    const r = await api(page, {});
     if (!(r && r.ok)) toast('Could not open a browser', true);
   };
   const pick = el('button', 'sm', 'Choose files…');
@@ -1100,7 +1112,18 @@ function evoFsrCard(dl) {
   pick.onclick = () => inp.click();
   row.append(get, pick, inp);
   c.append(row);
-  c.append(el('div', 'tiny dim', 'On AMD’s page, open each file and use “Download raw file”. '
-    + 'Only files signed by AMD are kept.'));
+  c.append(el('div', 'tiny dim', how + ' Only files signed by their maker are kept.'));
   return c;
+}
+
+function evoFsrCard(dl) {
+  return evoDllCard('AMD FSR', dl.fsr, 'FSR (a sharper upscaler for any GPU)',
+    '<b>amd_fidelityfx_loader_vk.dll</b> and <b>amd_fidelityfx_upscaler_vk.dll</b> from AMD',
+    'evoview/fsr_page', 'On AMD’s page, open each file and use “Download raw file”.');
+}
+
+function evoDlssCard(dl) {
+  return evoDllCard('NVIDIA DLSS', dl.dlss, 'DLSS (NVIDIA RTX graphics cards only)',
+    '<b>nvngx_dlss.dll</b> from NVIDIA',
+    'evoview/dlss_page', 'On NVIDIA’s page, open nvngx_dlss.dll and use “Download raw file”.');
 }

@@ -22,6 +22,15 @@ included: everything is read from the user's own installation.
   app, which checks AMD's signature and places them beside `evoview.exe`.
   AMD's licence is kept in `tools/licenses/AMD-FidelityFX-LICENSE.md`.
   AMD, FidelityFX and FSR are trademarks of Advanced Micro Devices, Inc.
+- **NVIDIA DLSS** (`nvngx_dlss.dll`), © NVIDIA Corporation. NOT shipped:
+  the user downloads it from NVIDIA's DLSS SDK and drops it on the app, which
+  checks NVIDIA's signature and places it beside `evoview.exe`.
+- **NVIDIA NGX SDK**: `evoview_ngx.dll`, shipped inside ACECM, is evoview's
+  own bridge to DLSS and contains NVIDIA's NGX SDK in object code form,
+  © NVIDIA Corporation, used under the NVIDIA RTX SDKs licence. It is a
+  separate library loaded at runtime and is not covered by ACECM's GPL;
+  NVIDIA's terms apply to it. This software contains source code provided by
+  NVIDIA Corporation. NVIDIA and DLSS are trademarks of NVIDIA Corporation.
 
 ## Libraries (Rust crates)
 

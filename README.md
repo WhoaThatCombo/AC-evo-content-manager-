@@ -170,6 +170,21 @@ The converter is new: tracks have had less in-game testing than cars, and the re
 - **Cars** is the list the *dedicated server* can load. That is the list that matters for a join. Open a car in **evoview** (shipped inside `ACECM.exe`); it reads the `.kspkg` in place and does not extract the package. The viewer switches liveries in place (also from the car page), shows body kits and the seated driver, and has a drive / demo mode with suspension, lights, live dash and effects.
 - **Tracks** use the same index as the launcher’s `EVENT_IDX` (for example Touristenfahrten is 18, not 0). Custom tracks appear alongside stock layouts after install.
 
+### evoview upscalers (AMD FSR, NVIDIA DLSS)
+
+evoview uses TAA out of the box. AMD FSR and NVIDIA DLSS are optional and need files from AMD or NVIDIA, which are not shipped with ACECM:
+
+| Upscaler | Works on | Files | Get them from |
+|---|---|---|---|
+| AMD FSR 3.1 | any GPU | `amd_fidelityfx_loader_vk.dll`, `amd_fidelityfx_upscaler_vk.dll` | [AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/main/Kits/FidelityFX/signedbin) |
+| NVIDIA DLSS / DLAA | NVIDIA RTX | `nvngx_dlss.dll` | [NVIDIA DLSS SDK](https://github.com/NVIDIA/DLSS/tree/main/lib/Windows_x86_64/rel) |
+
+1. Download the files: open each one on the page above and use **Download raw file**. The **evoview graphics** page has a button that opens the right page.
+2. Drag them onto the ACECM window, on any page. The SDK's zip works too, or use **Choose files…** on the evoview graphics page.
+3. Pick the upscaler under **evoview graphics → Upscaler**.
+
+ACECM keeps a file only if it carries a valid digital signature from its maker (AMD or NVIDIA). Updates never remove files you added.
+
 ### Dedicated servers
 
 Save profiles (name, track or custom track, slots, weather, time, allowed cars) and Start / Stop them.
@@ -232,6 +247,9 @@ are listed in [CREDITS.md](CREDITS.md).
 The older Python app that Linux 1.0.21 was built from is no longer in this
 repository; it returns when Linux is ported.
 
+The DLSS bridge `tools/evoview_ngx.dll` (evoview's own shim around NVIDIA's
+NGX library) is not in git; a build without it warns and leaves DLSS off.
+
 Windows releases are built and signed locally, then published with
 `tools/publish_release.py`, which refuses to upload without a signature that
 verifies.
@@ -243,6 +261,7 @@ Contributor rules so a feature works on a **fresh `ACECM.exe`**, not only the au
 - The game, dedicated server, or any Kunos assets (the converter builds what it needs from your own install, on your machine)
 - Protobuf schemas extracted from the game binary (generated per machine on first use)
 - TLS keys (the lobby proxy creates a self-signed pair locally)
+- AMD's and NVIDIA's upscaler DLLs (users add them, see [evoview upscalers](#evoview-upscalers-amd-fsr-nvidia-dlss))
 - `config.json` and `data/` — those stay on the machine that runs ACECM
 
 ACECM is an independent tool. It is not affiliated with Kunos Simulazioni or 505 Games.

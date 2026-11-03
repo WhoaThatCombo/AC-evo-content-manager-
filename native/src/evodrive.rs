@@ -99,16 +99,26 @@ fn dlls(exe: &Path) -> Value {
            "fsr": all(&["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll"])})
 }
 
-/// The FSR DLLs evoview loads; not shipped (36 MB), the player adds them.
-const FSR_DLLS: [&str; 2] = ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll"];
+/// The upscaler DLLs the player adds (not shipped: FSR's are 36 MB, and
+/// NVIDIA's terms keep nvngx_dlss.dll out of the GPL bundle), each with the
+/// company whose signature it must carry. evoview_ngx.dll, our NGX shim, is
+/// bundled.
+const UPSCALER_DLLS: [(&str, &str, &str); 3] = [
+    ("amd_fidelityfx_loader_vk.dll", "AMD", "Advanced Micro Devices"),
+    ("amd_fidelityfx_upscaler_vk.dll", "AMD", "Advanced Micro Devices"),
+    ("nvngx_dlss.dll", "NVIDIA", "NVIDIA Corporation"),
+];
 
-/// Where AMD publishes them (the FidelityFX SDK's signed binaries).
+/// Where AMD publishes FSR (the FidelityFX SDK's signed binaries) and
+/// NVIDIA publishes DLSS (the DLSS SDK's release DLL).
 pub const FSR_URL: &str = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/main/Kits/FidelityFX/signedbin";
+pub const DLSS_URL: &str = "https://github.com/NVIDIA/DLSS/tree/main/lib/Windows_x86_64/rel";
 
 /// POST /api/evoview/add_dlls {id}: the files of a drag-drop (loose DLLs or
-/// a .zip holding them, such as AMD's SDK) - each FSR DLL among them goes
-/// beside evoview.exe once Windows confirms a valid AMD signature, so a
-/// stray or tampered DLL is never put where evoview will load it.
+/// a .zip holding them, such as AMD's or NVIDIA's SDK) - each upscaler DLL
+/// among them goes beside evoview.exe once Windows confirms a valid
+/// signature from its maker, so a stray or tampered DLL is never put where
+/// evoview will load it.
 pub fn add_dlls(did: &str) -> Value {
     let r = add_dlls_from(did);
     crate::install::drop_cleanup(did);
@@ -122,10 +132,10 @@ fn add_dlls_from(did: &str) -> Value {
     };
     let wanted = |name: &str| {
         let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_ascii_lowercase();
-        FSR_DLLS.iter().find(|n| **n == base).copied()
+        UPSCALER_DLLS.iter().find(|d| d.0 == base).copied()
     };
     // (dll name, bytes) from loose files and from inside zips
-    let mut found: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut found: Vec<((&str, &str, &str), Vec<u8>)> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let files: Vec<PathBuf> = std::fs::read_dir(&stage).map(|r| r.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect())
         .unwrap_or_default();
@@ -147,7 +157,7 @@ fn add_dlls_from(did: &str) -> Value {
                 use std::io::Read;
                 let Ok(mut ent) = zip.by_index(i) else { continue };
                 let Some(n) = wanted(ent.name()) else { continue };
-                if ent.size() > 128 << 20 || found.iter().any(|(m, _)| *m == n) {
+                if ent.size() > 128 << 20 || found.iter().any(|(m, _)| m.0 == n.0) {
                     continue;
                 }
                 let mut b = Vec::with_capacity(ent.size() as usize);
@@ -156,19 +166,20 @@ fn add_dlls_from(did: &str) -> Value {
                 }
             }
         } else {
-            errors.push(format!("{name}: not an FSR DLL ({})", FSR_DLLS.join(", ")));
+            let names: Vec<&str> = UPSCALER_DLLS.iter().map(|d| d.0).collect();
+            errors.push(format!("{name}: not an upscaler DLL ({})", names.join(", ")));
         }
     }
     let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut added: Vec<&str> = Vec::new();
-    for (n, b) in found {
+    for ((n, maker, signer), b) in found {
         // checked where it was dropped, then moved into place
         let tmp = stage.join(format!("{n}.check"));
         if let Err(e) = std::fs::write(&tmp, &b) {
             errors.push(format!("{n}: {e}"));
             continue;
         }
-        if let Err(e) = amd_signed(&tmp) {
+        if let Err(e) = signed_by(&tmp, maker, signer) {
             errors.push(format!("{n}: {e} - not added"));
             continue;
         }
@@ -179,16 +190,17 @@ fn add_dlls_from(did: &str) -> Value {
         }
     }
     if added.is_empty() && errors.is_empty() {
-        errors.push("no FSR DLLs in what was dropped".into());
+        errors.push("no FSR or DLSS DLLs in what was dropped".into());
     }
-    crate::logs::info(format!("evoview: FSR DLLs added {added:?}, problems {errors:?}"));
+    crate::logs::info(format!("evoview: upscaler DLLs added {added:?}, problems {errors:?}"));
     json!({"ok": !added.is_empty(), "added": added, "errors": errors, "dlls": dlls(&exe)})
 }
 
 /// Windows' Authenticode check (WinVerifyTrust: valid, unrevoked chain to a
-/// trusted root), and AMD as the signer in the file's certificate table.
+/// trusted root), and `signer` (the maker's company name) in the file's
+/// certificate table.
 #[cfg(windows)]
-fn amd_signed(p: &Path) -> Result<(), String> {
+fn signed_by(p: &Path, maker: &str, signer: &str) -> Result<(), String> {
     use windows_sys::Win32::Security::WinTrust::*;
     let wide: Vec<u16> = p.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
     let mut file = WINTRUST_FILE_INFO {
@@ -209,7 +221,7 @@ fn amd_signed(p: &Path) -> Result<(), String> {
     data.dwStateAction = WTD_STATEACTION_CLOSE;
     unsafe { WinVerifyTrust(std::ptr::null_mut(), &mut action, &mut data as *mut _ as *mut _) };
     if rc != 0 {
-        return Err(format!("no valid digital signature (0x{:08x})", rc as u32));
+        return Err(format!("not {maker}'s signed file (Windows found no valid signature, 0x{:08x})", rc as u32));
     }
     // the certificate table: PE data directory 4 (file offset, size)
     let b = std::fs::read(p).map_err(|e| e.to_string())?;
@@ -223,14 +235,14 @@ fn amd_signed(p: &Path) -> Result<(), String> {
     };
     let (off, len) = (u32_at(dirs + 32).unwrap_or(0), u32_at(dirs + 36).unwrap_or(0));
     let certs = b.get(off..off.saturating_add(len)).unwrap_or(&[]);
-    if memchr::memmem::find(certs, b"Advanced Micro Devices").is_none() {
-        return Err("signed, but not by AMD".into());
+    if memchr::memmem::find(certs, signer.as_bytes()).is_none() {
+        return Err(format!("signed, but not by {maker}"));
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn amd_signed(_: &Path) -> Result<(), String> {
+fn signed_by(_: &Path, _: &str, _: &str) -> Result<(), String> {
     Err("signature checks need Windows".into())
 }
 
@@ -240,7 +252,7 @@ pub fn caps(tokens: &str) -> Value {
     let exe = PathBuf::from(exe);
     let list: Vec<String> = tokens.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).take(200).collect();
     let e = scan(&exe);
-    json!({"ok": true, "exe": exe, "env": e.env, "keys": e.keys, "has": has_tokens(&exe, &list), "dlls": dlls(&exe), "fsr_url": FSR_URL})
+    json!({"ok": true, "exe": exe, "env": e.env, "keys": e.keys, "has": has_tokens(&exe, &list), "dlls": dlls(&exe), "fsr_url": FSR_URL, "dlss_url": DLSS_URL})
 }
 
 // ----------------------------------------------------------- catalogue --
@@ -881,21 +893,24 @@ mod fsr_tests {
     use super::*;
 
     #[test]
-    fn only_amd_signed_dlls_pass() {
+    fn only_maker_signed_dlls_pass() {
         let tools = crate::paths::repo().join("tools");
-        for n in FSR_DLLS {
+        for (n, maker, signer) in UPSCALER_DLLS {
             let p = tools.join(n);
             if p.is_file() {
-                assert_eq!(amd_signed(&p), Ok(()), "{n}");
+                assert_eq!(signed_by(&p, maker, signer), Ok(()), "{n}");
+                // and never under the other maker's name
+                let other = if maker == "AMD" { ("NVIDIA", "NVIDIA Corporation") } else { ("AMD", "Advanced Micro Devices") };
+                assert!(signed_by(&p, other.0, other.1).is_err(), "{n}");
             }
         }
         let viewer = tools.join("evoview.exe");
         if viewer.is_file() {
-            assert!(amd_signed(&viewer).is_err());
+            assert!(signed_by(&viewer, "AMD", "Advanced Micro Devices").is_err());
         }
         let steam = Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Assetto Corsa EVO\steam_api64.dll");
         if steam.is_file() {
-            assert_eq!(amd_signed(steam), Err("signed, but not by AMD".into()));
+            assert_eq!(signed_by(steam, "AMD", "Advanced Micro Devices"), Err("signed, but not by AMD".into()));
         }
     }
 }
