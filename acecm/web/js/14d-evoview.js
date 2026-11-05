@@ -117,7 +117,8 @@ const EVO_KNOBS = [
   { id: 'novsync', pages: ['graphics'], group: 'Frame rate', env: 'EVOVIEW_NOVSYNC', kind: 'toggle',
     label: 'Vsync off', on: '1', off: null, def: false, hint: 'Still held to the frame cap.' },
   { id: 'sharpen', pages: ['graphics'], group: 'Image', env: 'EVOVIEW_SHARPEN', kind: 'range',
-    label: 'Sharpening', min: 0, max: 2, step: 0.05, def: 1 },
+    label: 'Sharpening', min: 0, max: 2, step: 0.05, def: 0.5,
+    hint: 'Above 0.5 the picture gains detail that is not in the textures: a fine grain.' },
   { id: 'taa_move', pages: ['graphics'], group: 'Image', env: 'EVOVIEW_TAA_MOVE_W', kind: 'range',
     label: 'TAA in motion', min: 0.1, max: 0.35, step: 0.01, def: 0.2,
     hint: 'Higher: sharper moving scenery, more shimmer.' },
@@ -140,7 +141,7 @@ const EVO_KNOBS = [
     label: 'Sun shafts', min: 0, max: 0.5, step: 0.05, def: 0,
     fmt: x => x ? String(x) : 'off', hint: 'Light rays through trees and stands when the sun is low.' },
   { id: 'tex_lod', pages: ['graphics'], group: 'Image', env: 'EVOVIEW_TEX_LOD', kind: 'select',
-    label: 'Track textures', options: [['', 'Auto (half above 4K)'], ['0', 'Full'], ['1', 'Half']] },
+    label: 'Track textures', options: [['', 'Auto (full; very large tracks trim the biggest)'], ['0', 'Full'], ['1', 'Half']] },
   { id: 'lod_scale', pages: ['graphics'], group: 'Image', env: 'EVOVIEW_LOD_SCALE', kind: 'range',
     label: 'Detail distance', min: 1, max: 5, step: 0.5, def: 3, fmt: x => '×' + x,
     hint: 'How far detailed models are kept. 1 is the old look.' },
@@ -278,10 +279,12 @@ function evoNeeds(k) {
 function evoHas(k) {
   return !!evoEnvSet && evoNeeds(k).every(n => evoEnvSet.has(n));
 }
-// the knob table turned into EVOVIEW_* values for one launch
-function evoEnv() {
+// the knob table turned into EVOVIEW_* values for one launch; `pages` keeps
+// only the knobs drawn on those pages (a replay takes the graphics ones)
+function evoEnv(pages) {
   const env = {};
   EVO_KNOBS.forEach(k => {
+    if (pages && !k.pages.some(pg => pages.includes(pg))) return;
     if (!evoHas(k) || (k.when && !k.when(evoVal))) return;
     const v = evoVal(k.id);
     if (k.kind === 'toggle') {
@@ -743,6 +746,326 @@ async function evoDrivePage() {
   if (d.state && (d.state.state === 'starting' || d.state.state === 'running')) watch();
   // a picked default (first visit) is worth remembering straight away
   evoSave();
+}
+
+/* -------------------------------------------------------------- Replays -- */
+/* The game's replays (Saved Games\ACE\Replay: Saved, and the recent ones it
+   keeps by itself), watched in evoview: `evoview --replay <file> --pkg ...`
+   with the Graphics page's settings. The list comes from the file names at
+   once; what is inside (track, cars, how long) is read in the background by
+   `evoview --replay-info`, a few files at a time, and cached by the backend
+   (evoreplay.rs) so each file is only read once. */
+const EVO_REPLAY_KEYS = [
+  'P play / pause',
+  ', and . step back / forward, - and = slower / faster',
+  'R back to the start, [ and ] the previous / next car',
+  'C changes camera, the mouse orbits the free camera',
+  'The bar at the bottom: click to jump anywhere in the replay',
+];
+let evoRepSel = '';
+let evoRepFilter = { q: '', folder: 'all' };
+
+const evoDur = s => {
+  s = Math.round(Number(s) || 0);
+  if (!s) return '';
+  const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60;
+  return h ? `${h} h ${m} min` : m ? `${m} min ${String(x).padStart(2, '0')} s` : `${x} s`;
+};
+const evoMb = b => (b > 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB');
+
+async function evoReplaysPage() {
+  const [d, cat] = await Promise.all([api('evoview/replays'), api('evoview/catalog')]);
+  const p = $('#page');
+  p.innerHTML = '';
+  if (!d || !d.ok) {
+    p.append(el('div', 'err', esc((d && d.error) || 'Replays are not available')));
+    return;
+  }
+  if (cat && cat.ok) {
+    evoProf = evoProfile(cat.profile);
+    evoEnvSet = new Set(cat.env || []);
+  }
+  if (!d.exe) {
+    p.append(el('div', 'err', 'evoview.exe not found. Put it in the tools folder next to '
+      + 'ACECM, or set viewer_exe in Settings.'));
+  }
+  const reps = d.replays || [];
+  const tracks = (cat && cat.tracks) || d.tracks || [];
+  const cars = (cat && cat.cars) || [];
+  const carLabel = id => (cars.find(c => c.id === id) || {}).label || id || '';
+  const carOf = id => cars.find(c => c.id === id);
+  // the track a replay plays on: its own metadata once read, else the name
+  // in the file matched against the installed tracks' names
+  const trackOf = r => {
+    const f = r.info && r.info.track;
+    if (f) return tracks.find(t => t.folder === f) || { folder: f, name: (r.parsed || {}).track_name || f, missing: true };
+    const n = ((r.parsed || {}).track_name || '').toLowerCase();
+    return tracks.find(t => (t.name || '').toLowerCase() === n) || null;
+  };
+
+  const wrap = el('div', 'drive evo-drive evo-replays');
+  const listCol = el('div', 'card drive-col evo-rep-list');
+  const goCol = el('div', 'card drive-col drive-go');
+  wrap.append(listCol, goCol);
+  p.append(wrap);
+  const fit = () => {
+    if (!wrap.isConnected) { removeEventListener('resize', fit); return; }
+    const top = wrap.getBoundingClientRect().top;
+    const pad = parseFloat(getComputedStyle(wrap.parentNode).paddingBottom) || 0;
+    wrap.style.height = Math.max(440, Math.round(innerHeight - top - pad)) + 'px';
+  };
+  addEventListener('resize', fit);
+  requestAnimationFrame(fit);
+
+  // ---- the list -------------------------------------------------------------
+  const head = el('div', 'row wrap evo-rep-head');
+  const search = el('input');
+  search.placeholder = 'Filter by track, car or date…';
+  search.value = evoRepFilter.q;
+  const fsel = el('select');
+  [['all', 'All replays'], ['saved', 'Saved'], ['recent', 'Recent (kept by the game)']].forEach(([v, l]) => {
+    const o = el('option', null, l);
+    o.value = v;
+    if (evoRepFilter.folder === v) o.selected = true;
+    fsel.append(o);
+  });
+  const openBtn = el('button', 'sm', 'Open folder');
+  openBtn.onclick = () => api('evoview/replay_folder', {});
+  head.append(el('h2', 'grow', 'Replays'), fsel, openBtn);
+  const list = el('div', 'list drive-list evo-rep-rows');
+  const reading = el('div', 'tiny dim evo-rep-reading');
+  listCol.append(head, search, reading, list);
+
+  const rowOf = {};
+  function rowText(r) {
+    const pr = r.parsed || {}, inf = r.info || {};
+    const t = trackOf(r);
+    const n = (inf.cars || []).length;
+    const sub = [pr.date, pr.kind,
+                 pr.car === 'spectator' ? 'spectating' : carLabel(pr.car),
+                 inf.captured ? evoDur(inf.captured) : '',
+                 n > 1 ? n + ' cars' : '', evoMb(r.size)].filter(Boolean).join(' · ');
+    return { title: (t && t.name) || pr.track_name || r.name, sub, t };
+  }
+  function paintRow(r) {
+    const row = rowOf[r.path];
+    if (!row) return;
+    const { title, sub, t } = rowText(r);
+    row.innerHTML = '';
+    const img = el('img');
+    img.loading = 'lazy';
+    img.alt = '';
+    if (t && !t.missing) img.src = evoTrackImg(t.folder);
+    img.onerror = () => { img.style.visibility = 'hidden'; };
+    if (!t || t.missing) img.style.visibility = 'hidden';
+    const tx = el('div', 'grow');
+    tx.innerHTML = `<div class="name">${esc(title)}</div><div class="tiny dim">${esc(sub)}</div>`;
+    row.append(img, tx);
+    if (r.folder === 'recent') row.append(el('span', 'pill', 'recent'));
+    if (r.info && r.info.ok === false) row.append(el('span', 'pill warn', 'unreadable'));
+    else if (t && t.missing) row.append(el('span', 'pill warn', 'track not installed'));
+    row.classList.toggle('on', r.path === evoRepSel);
+  }
+  function paintList() {
+    const q = search.value.trim().toLowerCase();
+    evoRepFilter = { q: search.value, folder: fsel.value };
+    list.innerHTML = '';
+    const hits = reps.filter(r => (fsel.value === 'all' || r.folder === fsel.value)
+      && (!q || (r.name + ' ' + rowText(r).title + ' ' + rowText(r).sub).toLowerCase().includes(q)));
+    if (!reps.length) {
+      list.append(el('div', 'empty', 'No replays yet. Save one in the game (the replay screen after '
+        + 'a session) and it shows here.'));
+      return;
+    }
+    if (!hits.length) { list.append(el('div', 'empty', 'No matches')); return; }
+    hits.forEach(r => {
+      const row = el('div', 'drive-row');
+      rowOf[r.path] = row;
+      row.onclick = () => { evoRepSel = r.path; paintList(); paintSel(); };
+      list.append(row);
+      paintRow(r);
+    });
+    const on = list.querySelector('.on');
+    if (on && !q) on.scrollIntoView({ block: 'nearest' });
+  }
+  search.oninput = paintList;
+  fsel.onchange = paintList;
+
+  // ---- the chosen replay ----------------------------------------------------
+  goCol.append(el('h2', null, 'Replay'));
+  const tile = el('div', 'drive-pick evo-rep-tile');
+  const facts = el('div', 'evo-rep-facts');
+  const startBox = el('div');
+  const knobBox = el('div');
+  const goBtn = el('button', 'primary go-btn', 'Watch in evoview');
+  const status = el('div', 'drive-status tiny dim');
+  const acts = el('div', 'row wrap evo-acts');
+  const stopBtn = el('button', 'sm', 'Stop evoview');
+  const showBtn = el('button', 'sm', 'Show file');
+  acts.append(stopBtn, showBtn);
+  const keys = el('details', 'evo-more');
+  keys.append(el('summary', null, 'Keys while watching'));
+  const kl = el('ul', 'tiny evo-rep-keys');
+  EVO_REPLAY_KEYS.forEach(k => kl.append(el('li', null, esc(k))));
+  keys.append(kl);
+  const logBox = el('pre', 'log evo-log');
+  logBox.hidden = true;
+  goCol.append(tile, facts, startBox, knobBox, goBtn, status, acts, keys, logBox);
+  evoKnobs(knobBox, 'graphics', { groups: ['Upscaler'], noLater: true });
+  let startAt = 0;
+
+  function paintSel() {
+    const r = reps.find(x => x.path === evoRepSel);
+    goBtn.disabled = !r;
+    showBtn.disabled = !r;
+    facts.innerHTML = '';
+    startBox.innerHTML = '';
+    if (!r) {
+      evoTile(tile, '', 'Pick a replay', 'from the list', () => {});
+      return;
+    }
+    const { title, t } = rowText(r);
+    const pr = r.parsed || {}, inf = r.info || {};
+    evoTile(tile, t && !t.missing ? evoTrackImg(t.folder) : '', title,
+      [pr.date, pr.kind].filter(Boolean).join(' · '), () => {});
+    const add = (k, v) => { if (v) facts.append(el('div', 'evo-rep-fact', `<span class="dim">${esc(k)}</span> ${esc(v)}`)); };
+    add('Recorded with', pr.car === 'spectator' ? 'spectator camera' : carLabel(pr.car || inf.model));
+    if (inf.captured) {
+      add('Motion recorded', evoDur(inf.captured)
+        + (inf.duration && inf.duration > inf.captured + 30 ? ` (the last part of a ${evoDur(inf.duration)} session)` : ''));
+    }
+    if (inf.cars && inf.cars.length) {
+      const count = {};
+      inf.cars.forEach(c => { count[c.model] = (count[c.model] || 0) + 1; });
+      const line = Object.entries(count).sort((a, b) => b[1] - a[1])
+        .map(([m, n]) => (n > 1 ? n + ' × ' : '') + carLabel(m)).join(', ');
+      add(inf.cars.length === 1 ? 'Car' : inf.cars.length + ' cars', line);
+      const missing = [...new Set(inf.cars.map(c => c.model))].filter(m => cars.length && !carOf(m));
+      if (missing.length) add('Not installed', missing.join(', ') + ' (shown with a stand-in)');
+    }
+    if (t && t.missing) add('Track', `${t.folder} is not installed - evoview cannot play this one`);
+    if (inf.ok === false) add('Problem', inf.error || 'evoview could not read this replay');
+    add('File', evoMb(r.size) + (r.folder === 'recent' ? ' · recent, the game replaces these' : ''));
+    // where to start: the captured motion in steps
+    if (inf.captured > 20) {
+      const s = el('input');
+      s.type = 'range';
+      s.min = 0;
+      s.max = Math.floor(inf.captured);
+      s.step = 1;
+      startAt = Math.min(startAt, inf.captured);
+      s.value = startAt;
+      const lab = el('span');
+      const show = () => { lab.textContent = 'Start at ' + (startAt ? evoDur(startAt) : 'the beginning'); };
+      s.oninput = () => { startAt = Number(s.value); show(); };
+      show();
+      const l = el('label', 'f evo-range');
+      l.append(lab, s);
+      startBox.append(l);
+    } else {
+      startAt = 0;
+    }
+    goBtn.disabled = !r || (t && t.missing) || inf.ok === false;
+  }
+
+  // ---- evoview's state (shared with Drive: one evoview at a time) ----------
+  function paintState(s) {
+    s = s || {};
+    const busy = s.state === 'starting' || s.state === 'running';
+    goBtn.textContent = busy ? 'Watching…' : 'Watch in evoview';
+    stopBtn.hidden = !busy;
+    const lines = {
+      starting: `Loading ${s.what || ''}…`,
+      running: `${s.what || 'evoview'} · ${s.seconds || 0} s · Esc in evoview quits`,
+      exited: '',
+      idle: '',
+    };
+    if (s.state === 'error') {
+      status.innerHTML = `<b>evoview could not start ${esc(s.what || '')}</b><br>${esc(s.detail || '')}`;
+      status.style.color = 'var(--red)';
+    } else {
+      status.textContent = lines[s.state] || '';
+      status.style.color = '';
+    }
+    const log = (s.log || '').trim();
+    logBox.hidden = !log || !(busy || s.state === 'error');
+    logBox.textContent = log;
+    logBox.scrollTop = logBox.scrollHeight;
+    if (!busy && evoPoll) { clearInterval(evoPoll); evoPoll = null; }
+  }
+  function watchState() {
+    if (evoPoll) return;
+    evoPoll = setInterval(async () => {
+      if (_wanted !== 'evoreplays') { clearInterval(evoPoll); evoPoll = null; return; }
+      paintState(await api('evoview/state'));
+    }, 1500);
+  }
+  async function play(replace) {
+    const r = reps.find(x => x.path === evoRepSel);
+    if (!r) return;
+    goBtn.disabled = true;
+    const res = await api('evoview/replay_play', { path: r.path, time: startAt, env: evoEnv(['graphics']),
+                                                    replace: !!replace });
+    goBtn.disabled = false;
+    if (res && res.busy) {
+      if (await ask('evoview is already running (' + (res.error || '') + ').\n\nStop it and '
+                    + 'watch this replay instead?', 'Restart')) play(true);
+      return;
+    }
+    if (!res || !res.ok) { paintState({ state: 'error', detail: (res && res.error) || 'launch failed' }); return; }
+    if (res.skipped && res.skipped.length) toast('Left out: ' + res.skipped.join(', '), true);
+    paintState({ state: 'starting', what: res.what });
+    watchState();
+  }
+  goBtn.onclick = () => play(false);
+  stopBtn.onclick = async () => {
+    stopBtn.disabled = true;
+    await api('evoview/stop', {});
+    stopBtn.disabled = false;
+    paintState(await api('evoview/state'));
+  };
+  showBtn.onclick = () => evoRepSel && api('evoview/replay_folder', { path: evoRepSel });
+
+  // ---- read what is inside, a few files at a time, newest first ------------
+  async function readInfo() {
+    let todo = reps.filter(r => !r.info);
+    let done = 0;
+    const total = todo.length;
+    let tries = 0;
+    while (todo.length && wrap.isConnected) {
+      // the chosen one first, then in list order. ⚠ Batches by SIZE: four
+      // big replays (300-700 MB each) took longer to read than api()'s 12 s.
+      todo.sort((a, b) => (b.path === evoRepSel) - (a.path === evoRepSel));
+      let n = 0, bytes = 0;
+      while (n < todo.length && n < 6 && (n === 0 || bytes + todo[n].size < 300e6)) bytes += todo[n++].size;
+      const batch = todo.slice(0, n);
+      reading.textContent = `Reading replays… ${done} of ${total}`;
+      const res = await api('evoview/replay_info', { paths: batch.map(r => r.path) });
+      if (!res || !res.ok) {
+        // a timeout still finishes (and caches) on the backend: ask again
+        if (res && /timed out/.test(res.error || '') && ++tries < 4) continue;
+        reading.textContent = (res && res.error) || 'Could not read the replays';
+        return;
+      }
+      tries = 0;
+      todo.splice(0, n);
+      batch.forEach(r => {
+        r.info = (res.info || {})[r.path] || { ok: false, error: 'not read' };
+        paintRow(r);
+        if (r.path === evoRepSel) paintSel();
+      });
+      done += batch.length;
+    }
+    reading.textContent = '';
+  }
+
+  if (!reps.some(r => r.path === evoRepSel)) evoRepSel = (reps[0] || {}).path || '';
+  paintList();
+  paintSel();
+  const st = await api('evoview/state');
+  paintState(st);
+  if (st && (st.state === 'starting' || st.state === 'running')) watchState();
+  readInfo();
 }
 
 /* ------------------------------------------------------------- Controls -- */

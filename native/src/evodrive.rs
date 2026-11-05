@@ -307,7 +307,7 @@ fn pretty_layout(id: &str) -> String {
 
 /// Every track the client can load (tracks.table: name -> folder), with its
 /// racing-line layouts and, where the events list knows them, their lengths.
-fn tracks(pkg: &Path) -> Vec<Value> {
+pub(crate) fn tracks(pkg: &Path) -> Vec<Value> {
     let map = crate::trackimport::track_map(false);
     let lays = layouts(pkg);
     let ev = crate::content::tracks();
@@ -540,19 +540,6 @@ pub fn launch(body: &Value) -> Value {
         return json!({"ok": false, "error": "game install not found - set the game folder in Settings"});
     };
     let exe_p = PathBuf::from(&exe);
-    {
-        let mut g = RUN.lock().unwrap();
-        if let Some(r) = g.as_mut() {
-            if matches!(r.child.try_wait(), Ok(None)) {
-                if body.get("replace") != Some(&json!(true)) {
-                    return json!({"ok": false, "busy": true, "error": format!("evoview is already running ({}) - stop it first", r.what)});
-                }
-                let _ = r.child.kill();
-                let _ = r.child.wait();
-            }
-            *g = None;
-        }
-    }
     let mut args = vec![pkg.clone(), "--track".to_string(), track.clone(), "--drive-car".to_string(), car.clone()];
     let mut skipped: Vec<String> = vec![];
     let layout = s("layout");
@@ -569,13 +556,24 @@ pub fn launch(body: &Value) -> Value {
             skipped.push("--setup (this evoview has no saved-setup support yet)".into());
         }
     }
-    let asked: Vec<String> = body.get("env").and_then(|e| e.as_object()).map(|m| m.keys().cloned().collect()).unwrap_or_default();
-    let known = has_tokens(&exe_p, &asked);
     let mut env: Vec<(String, String)> = vec![];
     let livery = s("livery");
     if !livery.is_empty() && ok_id(&livery) {
         env.push(("EVOVIEW_VISUAL".into(), livery));
     }
+    for (k, v) in env_from(body, &exe_p, &mut skipped) {
+        env.retain(|(n, _)| *n != k);
+        env.push((k, v));
+    }
+    spawn(&exe, args, env, format!("{car} on {track}"), skipped, body.get("replace") == Some(&json!(true)))
+}
+
+/// The page's `env` (knob table already turned into EVOVIEW_* values): each
+/// must be a valid name this exe contains, or it is left out and reported.
+pub(crate) fn env_from(body: &Value, exe_p: &Path, skipped: &mut Vec<String>) -> Vec<(String, String)> {
+    let asked: Vec<String> = body.get("env").and_then(|e| e.as_object()).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let known = has_tokens(exe_p, &asked);
+    let mut env: Vec<(String, String)> = vec![];
     if let Some(m) = body.get("env").and_then(|e| e.as_object()) {
         for (k, v) in m {
             let val = match v {
@@ -597,12 +595,32 @@ pub fn launch(body: &Value) -> Value {
             env.push((k.clone(), val));
         }
     }
+    env
+}
+
+/// Start evoview (one at a time: a running one is replaced only when asked),
+/// log to evoview.log, become the drive `state()` reports.
+pub(crate) fn spawn(exe: &str, args: Vec<String>, env: Vec<(String, String)>, what: String,
+                    skipped: Vec<String>, replace: bool) -> Value {
+    {
+        let mut g = RUN.lock().unwrap();
+        if let Some(r) = g.as_mut() {
+            if matches!(r.child.try_wait(), Ok(None)) {
+                if !replace {
+                    return json!({"ok": false, "busy": true, "error": format!("evoview is already running ({}) - stop it first", r.what)});
+                }
+                let _ = r.child.kill();
+                let _ = r.child.wait();
+            }
+            *g = None;
+        }
+    }
     let log = log_path();
     let f = match std::fs::File::create(&log) {
         Ok(f) => f,
         Err(e) => return json!({"ok": false, "error": format!("cannot write {}: {e}", log.display())}),
     };
-    let mut c = std::process::Command::new(&exe);
+    let mut c = std::process::Command::new(exe);
     c.args(&args).current_dir(paths::data()).stdin(std::process::Stdio::piped());
     match f.try_clone() {
         Ok(f2) => { c.stdout(f2).stderr(f); }
@@ -623,14 +641,13 @@ pub fn launch(body: &Value) -> Value {
         Ok(ch) => ch,
         Err(e) => return json!({"ok": false, "error": format!("could not start evoview: {e}")}),
     };
-    let what = format!("{car} on {track}");
     let stdin = child.stdin.take();
     let pid = child.id();
     *RUN.lock().unwrap() = Some(Run { child, stdin, started: std::time::Instant::now(), what: what.clone() });
     *LAST.lock().unwrap() = None;
     let mut ps: Vec<String> = vec!["Get-ChildItem Env:EVOVIEW_* | Remove-Item".into()];
     ps.extend(env.iter().map(|(k, v)| format!("$env:{k}={}", ps_quote(v))));
-    let cmd = format!("{}\n& {} {}", ps.join("; "), ps_quote(&exe), args.iter().map(|a| if a.starts_with("--") { a.clone() } else { ps_quote(a) }).collect::<Vec<_>>().join(" "));
+    let cmd = format!("{}\n& {} {}", ps.join("; "), ps_quote(exe), args.iter().map(|a| if a.starts_with("--") { a.clone() } else { ps_quote(a) }).collect::<Vec<_>>().join(" "));
     crate::logs::info(format!("evoview drive: pid {pid} {what} env {:?} skipped {:?}", env, skipped));
     json!({"ok": true, "pid": pid, "what": what, "args": args, "env": env.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
            "skipped": skipped, "command": cmd, "log": log})

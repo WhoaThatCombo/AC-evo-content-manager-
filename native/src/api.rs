@@ -411,7 +411,7 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/convert" | "/api/convert/cars" | "/api/convert/status" | "/api/convert/tracks"
             | "/api/convert/track_info" | "/api/convert/earlier"
             | "/api/evoview/catalog" | "/api/evoview/caps" | "/api/evoview/setups" | "/api/evoview/state"
-            | "/api/evoview/controls"),
+            | "/api/evoview/controls" | "/api/evoview/replays"),
         Method::POST => matches!(path, "/api/config" | "/api/splines/ship"
             | "/api/trackdeploy/deploy" | "/api/trackdeploy/restore"
             | "/api/trackdeploy/redeclare" | "/api/trackdeploy/redeclare_client"
@@ -438,7 +438,8 @@ fn ported(m: &Method, path: &str) -> bool {
             | "/api/convert/settings" | "/api/pick_folder" | "/api/convert/import" | "/api/convert/start" | "/api/convert/cancel" | "/api/convert/uninstall"
             | "/api/convert/track_start" | "/api/convert/track_uninstall" | "/api/convert/track_open" | "/api/convert/track_install"
             | "/api/evoview/profile" | "/api/evoview/launch" | "/api/evoview/stop" | "/api/evoview/bind"
-            | "/api/evoview/ffb" | "/api/evoview/wheel_setup"),
+            | "/api/evoview/ffb" | "/api/evoview/wheel_setup"
+            | "/api/evoview/replay_info" | "/api/evoview/replay_play" | "/api/evoview/replay_folder"),
         _ => false,
     }
 }
@@ -951,6 +952,10 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         }
         (false, "/api/evoview/state") => json_resp(200, &blocking(crate::evodrive::state).await),
         (false, "/api/evoview/controls") => json_resp(200, &blocking(crate::evodrive::controls).await),
+        (false, "/api/evoview/replays") => json_resp(200, &blocking(crate::evoreplay::list).await),
+        (true, "/api/evoview/replay_info") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evoreplay::info(&b)).await) }
+        (true, "/api/evoview/replay_play") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evoreplay::play(&b)).await) }
+        (true, "/api/evoview/replay_folder") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evoreplay::reveal(&b)).await) }
         (true, "/api/evoview/profile") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evodrive::save_profile(&b)).await) }
         (true, "/api/evoview/launch") => { let b = body.clone(); json_resp(200, &blocking(move || crate::evodrive::launch(&b)).await) }
         (true, "/api/evoview/stop") => json_resp(200, &blocking(crate::evodrive::stop).await),

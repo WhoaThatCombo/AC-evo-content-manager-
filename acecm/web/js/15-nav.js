@@ -17,6 +17,7 @@ const PAGES = {
   evodrive: ['evoview', 'Drive evoview on any track, with any car', evoDrivePage],
   evocontrols: ['evoview controls', 'Wheel, buttons, force feedback and keys', evoControlsPage],
   evographics: ['evoview graphics', 'Upscaler, sharpening, blur and head movement', evoGraphicsPage],
+  evoreplays: ['evoview replays', 'Watch the game’s replays in evoview', evoReplaysPage],
   // ⚠ Live map (telemetryPage, 13-telemetry.js) is deliberately NOT here:
   // telemetry is unfinished. The Servers page renders no telemetry controls
   // either, so nothing links to it - add it back here AND to Host below.
@@ -37,7 +38,8 @@ const SECTIONS = [
   { id: 'convert', label: 'Convert', pages: [['convert', 'Cars & tracks']] },
   { id: 'evoview', label: 'evoview', pages: [['evodrive', 'Drive'],
                                              ['evocontrols', 'Controls'],
-                                             ['evographics', 'Graphics']] },
+                                             ['evographics', 'Graphics'],
+                                             ['evoreplays', 'Replays']] },
 ];
 /* Sidebar icons: inline stroke SVG, no icon font or image to load. */
 const _ico = d => '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" '

@@ -284,3 +284,18 @@ details > summary:hover{color:var(--fg)}
   margin-top:12px;font-size:13px}
 .evo-kk{color:var(--dim);font-weight:600;white-space:nowrap}
 .evo-ksep{grid-column:1/-1;margin-top:10px}
+/* evoview Replays: the list beside the chosen replay */
+.evo-replays{grid-template-columns:1.4fr 1fr}
+.evo-rep-list{min-width:0}
+.evo-rep-head{align-items:center;gap:8px;margin-bottom:8px}
+.evo-rep-head h2{margin:0}
+.evo-rep-head select{width:auto}
+.evo-rep-reading{min-height:16px;margin:6px 0}
+.evo-rep-rows{flex:1 1 0;min-height:0;overflow:auto;max-height:none}
+.evo-rep-tile{flex:0 0 auto;aspect-ratio:16/9;cursor:default}
+.evo-rep-tile.empty-pick{aspect-ratio:auto}
+.evo-rep-tile .dp-kebab{display:none}
+.evo-rep-facts{display:flex;flex-direction:column;gap:5px;margin:12px 0;font-size:13px}
+.evo-rep-fact .dim{display:inline-block;min-width:120px}
+.evo-rep-keys{margin:6px 0 0 18px;line-height:1.7}
+.evo-range{margin:4px 0 12px}
