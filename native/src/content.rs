@@ -53,7 +53,11 @@ pub fn pretty(name: &str) -> String {
     let s = re(r"^(ks|preset)_").replace(&s, "").into_owned();
     s.split('_').filter(|p| !p.is_empty()).map(|p| {
         let low = p.to_lowercase();
-        if p.chars().count() <= 3 && p.chars().all(|c| c.is_alphabetic()) && low != "the" && low != "and" {
+        // short codes mixing letters and digits are model names: GT3, MX5,
+        // RS6, V10, F2004 (title case gave "Gt3", "Mx5")
+        let code = p.chars().count() <= 6 && p.chars().any(|c| c.is_ascii_digit())
+            && p.chars().any(|c| c.is_alphabetic()) && p.chars().all(|c| c.is_ascii_alphanumeric());
+        if code || (p.chars().count() <= 3 && p.chars().all(|c| c.is_alphabetic()) && low != "the" && low != "and") {
             p.to_uppercase()
         } else {
             capitalize(p)

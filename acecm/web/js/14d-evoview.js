@@ -772,6 +772,41 @@ const evoDur = s => {
   return h ? `${h} h ${m} min` : m ? `${m} min ${String(x).padStart(2, '0')} s` : `${x} s`;
 };
 const evoMb = b => (b > 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB');
+const EVO_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const EVO_MONTH = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+                   'September', 'October', 'November', 'December'];
+// "2026-11-02 19:24" (from the file name) as a Date, or null
+const evoRepDate = r => {
+  const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)$/.exec((r.parsed || {}).date || '');
+  return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5]) : null;
+};
+const evoWhen = d => d ? `${d.getDate()} ${EVO_MON[d.getMonth()]} ${d.getFullYear()}, `
+  + `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` : '';
+// the list's date headings: Today, Yesterday, then the month
+const evoDayGroup = d => {
+  if (!d) return 'Undated';
+  const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(new Date()) - day(d)) / 864e5);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return EVO_MONTH[d.getMonth()] + ' ' + d.getFullYear();
+};
+// a track picture, or a drawn track outline where there is none
+function evoTrackThumb(t, cls) {
+  const box = el('div', 'evo-rep-thumb ' + (cls || ''));
+  const blank = () => {
+    box.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17c-2-3 0-8 4-9s5 2 8 1 4 3 2 6-6 3-9 3-4 1-5-1z"/></svg>';
+    box.classList.add('none');
+  };
+  if (!t || t.missing) { blank(); return box; }
+  const img = el('img');
+  img.loading = 'lazy';
+  img.alt = '';
+  img.src = evoTrackImg(t.folder);
+  img.onerror = () => { img.remove(); blank(); };
+  box.append(img);
+  return box;
+}
 
 async function evoReplaysPage() {
   const [d, cat] = await Promise.all([api('evoview/replays'), api('evoview/catalog')]);
@@ -841,7 +876,7 @@ async function evoReplaysPage() {
     const pr = r.parsed || {}, inf = r.info || {};
     const t = trackOf(r);
     const n = (inf.cars || []).length;
-    const sub = [pr.date, pr.kind,
+    const sub = [evoWhen(evoRepDate(r)), pr.kind,
                  pr.car === 'spectator' ? 'spectating' : carLabel(pr.car),
                  inf.captured ? evoDur(inf.captured) : '',
                  n > 1 ? n + ' cars' : '', evoMb(r.size)].filter(Boolean).join(' · ');
@@ -852,12 +887,7 @@ async function evoReplaysPage() {
     if (!row) return;
     const { title, sub, t } = rowText(r);
     row.innerHTML = '';
-    const img = el('img');
-    img.loading = 'lazy';
-    img.alt = '';
-    if (t && !t.missing) img.src = evoTrackImg(t.folder);
-    img.onerror = () => { img.style.visibility = 'hidden'; };
-    if (!t || t.missing) img.style.visibility = 'hidden';
+    const img = evoTrackThumb(t);
     const tx = el('div', 'grow');
     tx.innerHTML = `<div class="name">${esc(title)}</div><div class="tiny dim">${esc(sub)}</div>`;
     row.append(img, tx);
@@ -878,10 +908,23 @@ async function evoReplaysPage() {
       return;
     }
     if (!hits.length) { list.append(el('div', 'empty', 'No matches')); return; }
+    let group = null;
     hits.forEach(r => {
+      const g = evoDayGroup(evoRepDate(r));
+      if (g !== group) {
+        group = g;
+        list.append(el('div', 'evo-rep-group', esc(g)));
+      }
       const row = el('div', 'drive-row');
       rowOf[r.path] = row;
-      row.onclick = () => { evoRepSel = r.path; paintList(); paintSel(); };
+      // only the highlight moves: a repaint would jump the list's scroll
+      row.onclick = () => {
+        const was = rowOf[evoRepSel];
+        if (was) was.classList.remove('on');
+        evoRepSel = r.path;
+        row.classList.add('on');
+        paintSel();
+      };
       list.append(row);
       paintRow(r);
     });
@@ -922,12 +965,14 @@ async function evoReplaysPage() {
     startBox.innerHTML = '';
     if (!r) {
       evoTile(tile, '', 'Pick a replay', 'from the list', () => {});
+      tile.title = '';
       return;
     }
     const { title, t } = rowText(r);
     const pr = r.parsed || {}, inf = r.info || {};
     evoTile(tile, t && !t.missing ? evoTrackImg(t.folder) : '', title,
-      [pr.date, pr.kind].filter(Boolean).join(' · '), () => {});
+      [evoWhen(evoRepDate(r)), pr.kind].filter(Boolean).join(' · '), () => {});
+    tile.title = '';
     const add = (k, v) => { if (v) facts.append(el('div', 'evo-rep-fact', `<span class="dim">${esc(k)}</span> ${esc(v)}`)); };
     add('Recorded with', pr.car === 'spectator' ? 'spectator camera' : carLabel(pr.car || inf.model));
     if (inf.captured) {
