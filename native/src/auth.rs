@@ -6,6 +6,13 @@
 //! remote administration is on. ⚠ Separately, a WEB PAGE in the user's
 //! browser can reach loopback too, so writes must come from our own origin
 //! and loopback requests must use our own host names (DNS rebinding).
+//!
+//! ⚠ Remote administration is plain HTTP on the same port as the public
+//! content share, and the admin token is equivalent to running code on this
+//! PC (upload a file, point server_exe at it, start it). So the token is
+//! only ever taken from a header or the SameSite cookie - never from the URL
+//! - and remote admin should only be used over a LAN you trust, or through an
+//! SSH tunnel / VPN to 127.0.0.1 (where no token is needed at all).
 
 use std::net::IpAddr;
 
@@ -67,15 +74,11 @@ pub fn enabled(cfg: &Map<String, Value>) -> bool {
     cfg.get("remote_admin").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
-fn query_token(query: &str) -> Option<String> {
-    query.split('&').find_map(|kv| {
-        let (k, v) = kv.split_once('=')?;
-        (k == "token" && !v.is_empty()).then(|| v.to_string())
-    })
-}
-
-/// The token a request carries: header, bearer, query, then cookie.
-pub fn presented(h: &HeaderMap, query: &str) -> String {
+/// The token a request carries: header, bearer, then cookie. ⚠ Never the
+/// URL query: URLs end up in browser history, logs and pasted links, and
+/// this token is as good as running code on the PC. (The web UI still takes
+/// `?token=` from a pasted link once, client-side, and sends it as a header.)
+pub fn presented(h: &HeaderMap, _query: &str) -> String {
     let hv = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_string();
     let got = hv("x-acecm-token");
     if !got.is_empty() {
@@ -84,9 +87,6 @@ pub fn presented(h: &HeaderMap, query: &str) -> String {
     let a = hv("authorization");
     if a.to_ascii_lowercase().starts_with("bearer ") {
         return a[7..].trim().to_string();
-    }
-    if let Some(t) = query_token(query) {
-        return t.trim().to_string();
     }
     for part in hv("cookie").split(';') {
         if let Some((k, v)) = part.trim().split_once('=') {
@@ -115,37 +115,36 @@ pub fn token_ok(cfg: &Map<String, Value>, h: &HeaderMap, query: &str) -> bool {
     !want.is_empty() && !got.is_empty() && ct_eq(want.as_bytes(), got.as_bytes())
 }
 
-/// A token in a header or the query - never the ambient cookie.
-fn explicit_token(h: &HeaderMap, query: &str) -> bool {
-    let has = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(|s| !s.trim().is_empty()).unwrap_or(false);
-    has("x-acecm-token") || has("authorization") || query_token(query).is_some()
-}
-
 pub fn admin_ok(cfg: &Map<String, Value>, peer: &IpAddr, h: &HeaderMap, query: &str) -> bool {
     is_loopback(peer) || token_ok(cfg, h, query)
 }
 
 /// Refuse requests a web PAGE made without the user meaning to.
-pub fn browser_ok(write: bool, peer: &IpAddr, h: &HeaderMap, query: &str) -> bool {
+///
+/// ⚠ Applies to GETs too: several GET routes take raw paths (a cross-site
+/// `<img src=".../api/mods/scan?path=\\host\x">` would make Windows hand the
+/// user's NTLM hash to that host), so a cross-site page gets nothing.
+/// ⚠ The loopback Host-name (DNS rebinding) check is skipped only when the
+/// request carries a token that actually VERIFIES - carrying any token is not
+/// enough, or `?token=x` would turn the rebinding check off.
+pub fn browser_ok(cfg: &Map<String, Value>, _write: bool, peer: &IpAddr, h: &HeaderMap, query: &str) -> bool {
     let hv = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_ascii_lowercase();
     let host = hv("host");
-    if write {
-        if hv("sec-fetch-site") == "cross-site" {
+    if hv("sec-fetch-site") == "cross-site" {
+        return false;
+    }
+    let origin = hv("origin");
+    if !origin.is_empty() {
+        if origin == "null" {
             return false;
         }
-        let origin = hv("origin");
-        if !origin.is_empty() {
-            if origin == "null" {
-                return false;
-            }
-            // netloc of the origin must be exactly our Host
-            let netloc = origin.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
-            if netloc != host {
-                return false;
-            }
+        // netloc of the origin must be exactly our Host
+        let netloc = origin.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
+        if netloc != host {
+            return false;
         }
     }
-    if is_loopback(peer) && !host.is_empty() && !explicit_token(h, query) {
+    if is_loopback(peer) && !host.is_empty() && !token_ok(cfg, h, query) {
         let name = if host.starts_with('[') {
             format!("{}]", host.split(']').next().unwrap_or(""))
         } else {
@@ -163,7 +162,7 @@ pub fn deny_remote(cfg: &Map<String, Value>) -> (u16, Value) {
         return (401, json!({
             "ok": false, "need_token": true,
             "error": "this ACECM is managed remotely - send the admin token as \
-                      X-ACECM-Token, ?token=... or the acecm_token cookie"}));
+                      X-ACECM-Token, an Authorization: Bearer header or the acecm_token cookie"}));
     }
     (403, json!({"ok": false, "error": "that action is only allowed from this PC"}))
 }
@@ -176,4 +175,62 @@ pub fn deny_browser() -> (u16, Value) {
 #[allow(dead_code)]
 pub fn cfg() -> Map<String, Value> {
     config::load()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hdrs(kv: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in kv {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    const LO: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    #[test]
+    fn loopback_own_ui_passes() {
+        let cfg = Map::new();
+        assert!(browser_ok(&cfg, false, &LO, &hdrs(&[("host", "127.0.0.1:8092"), ("sec-fetch-site", "same-origin")]), ""));
+        assert!(browser_ok(&cfg, true, &LO, &hdrs(&[("host", "localhost:8092"), ("origin", "http://localhost:8092")]), ""));
+        // a non-browser client (curl, the app itself)
+        assert!(browser_ok(&cfg, true, &LO, &hdrs(&[("host", "127.0.0.1:8092")]), ""));
+    }
+
+    #[test]
+    fn rebinding_not_bypassed_by_any_token() {
+        // remote admin off: no token can verify, so the Host check always applies
+        let cfg = Map::new();
+        for h in [hdrs(&[("host", "evil.example:8092"), ("x-acecm-token", "x")]),
+                  hdrs(&[("host", "evil.example:8092"), ("authorization", "Bearer x")]),
+                  hdrs(&[("host", "evil.example:8092")])] {
+            assert!(!browser_ok(&cfg, false, &LO, &h, "token=x"));
+            assert!(!browser_ok(&cfg, true, &LO, &h, "token=x"));
+        }
+        // remote admin on, wrong token: still refused
+        let mut on = Map::new();
+        on.insert("remote_admin".into(), json!(true));
+        let h = hdrs(&[("host", "evil.example:8092"), ("x-acecm-token", "definitely-not-the-token")]);
+        assert!(!browser_ok(&on, false, &LO, &h, ""));
+    }
+
+    #[test]
+    fn cross_site_gets_refused() {
+        let cfg = Map::new();
+        // <img src="http://127.0.0.1:8092/api/mods/scan?path=\\host\x">
+        assert!(!browser_ok(&cfg, false, &LO, &hdrs(&[("host", "127.0.0.1:8092"), ("sec-fetch-site", "cross-site")]), ""));
+        assert!(!browser_ok(&cfg, false, &LO, &hdrs(&[("host", "127.0.0.1:8092"), ("origin", "http://evil.example")]), ""));
+        assert!(!browser_ok(&cfg, false, &LO, &hdrs(&[("host", "127.0.0.1:8092"), ("origin", "null")]), ""));
+    }
+
+    #[test]
+    fn token_never_from_query() {
+        assert_eq!(presented(&hdrs(&[]), "token=abc"), "");
+        assert_eq!(presented(&hdrs(&[("x-acecm-token", "abc")]), ""), "abc");
+        assert_eq!(presented(&hdrs(&[("authorization", "Bearer abc")]), ""), "abc");
+        assert_eq!(presented(&hdrs(&[("cookie", "a=b; acecm_token=abc")]), ""), "abc");
+    }
 }

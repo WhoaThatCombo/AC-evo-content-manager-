@@ -5,6 +5,13 @@ async function settingsPage() {
   const cfg = await api('config');
   const p = $('#page');
   p.innerHTML = '';
+  // config.json did not parse: say so, rather than let saves fail one by one
+  if (cfg && cfg.config_error) {
+    const bad = el('div', 'card');
+    bad.style.borderLeft = '3px solid var(--red)';
+    bad.append(el('h2', null, 'Settings file problem'), el('div', 'tiny', esc(cfg.config_error)));
+    p.append(bad);
+  }
 
   /* ---- disk space ------------------------------------------------------
      EVO content is enormous - about 600 MB a car, several GB a track - so a
@@ -141,7 +148,7 @@ async function settingsPage() {
     lbtn.disabled = true;
     lnote.textContent = 'launching…';
     try {
-      const r = await api('game/launch', {});
+      const r = await apiLong('game/launch', {}, 120000);
       lnote.textContent = r && r.ok
         ? 'launched' + (r.via ? ' (' + r.via + ')' : '')
         : ((r && r.error) || 'could not launch');
@@ -370,7 +377,11 @@ async function settingsPage() {
   });
   c.append(g);
   const save = el('button', 'primary', 'Save settings');
-  save.onclick = async () => { await api('config', draft); toast('Saved — restart ACECM to apply ports'); };
+  save.onclick = async () => {
+    const r = await api('config', draft);
+    if (r && r.error) return; // api() already showed why
+    toast('Saved — restart ACECM to apply ports');
+  };
 
   // ---- detected locations -----------------------------------------------
   const dc = el('div', 'card');

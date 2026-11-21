@@ -2,7 +2,6 @@
 //! servers.load / save_all, shared with the backend until the servers
 //! subsystem moves here as a whole.
 
-use std::io::Write;
 use std::path::Path;
 
 use serde_json::Value;
@@ -32,9 +31,8 @@ pub fn write_json_indent2(p: &Path, v: &Value) -> std::io::Result<()> {
     // CRLF; match it, or the file flips format whichever side wrote last
     #[cfg(windows)]
     let s = s.replace('\n', "\r\n");
-    let tmp = p.with_extension("json.part");
-    std::fs::File::create(&tmp)?.write_all(s.as_bytes())?;
-    std::fs::rename(&tmp, p)
+    // unique temp name + fsync + rename (two writers never share a temp)
+    crate::safefs::write_atomic(p, s.as_bytes())
 }
 
 fn py_str(s: &str, out: &mut String) {
@@ -114,17 +112,27 @@ fn py_dump(v: &Value, ind: usize, out: &mut String) {
     }
 }
 
-/// srv<unix seconds><4 hex>: the id format the backend uses (random tail,
-/// because two made in the same second collided).
+/// srv<unix seconds><32 hex>: the backend's id format with a 128-bit random
+/// tail. ⚠ A share entry's id is what lets a stranger download it (an
+/// unlisted entry included), so it must not be guessable from its creation
+/// second - the old 16-bit tail was.
 pub fn new_id() -> String {
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let mut b = [0u8; 2];
+    let mut b = [0u8; 16];
     let _ = getrandom::fill(&mut b);
-    format!("srv{t}{:02x}{:02x}", b[0], b[1])
+    format!("srv{t}{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ids_are_128_bit_random() {
+        let (a, b) = (super::new_id(), super::new_id());
+        assert_ne!(a, b);
+        assert!(a.starts_with("srv") && a.len() >= 3 + 10 + 32);
+        assert!(a[a.len() - 32..].bytes().all(|c| c.is_ascii_hexdigit()));
+    }
+
     #[test]
     fn python_indent2() {
         let v = serde_json::json!({"a": [1, 2.0, "é"], "b": {}, "c": []});

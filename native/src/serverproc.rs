@@ -77,14 +77,53 @@ fn sane(v: Option<&Value>, d: i64, lo: i64, hi: i64) -> i64 {
     match x { Some(y) if (lo..=hi).contains(&y) => y, _ => d }
 }
 
-pub fn server_log(name: &str) -> PathBuf {
-    Path::new(&detect::effective_server_dir()).join("serverConfig").join(if name.is_empty() { "vai_server.log" } else { name })
+const LEGACY_LOG: &str = "vai_server.log";
+
+/// A plain file name: no folder, drive or stream part, nothing like "..".
+fn bare_log_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 120 && !n.contains(['/', '\\', ':']) && !n.chars().any(|c| c.is_control())
+        && !n.trim_matches('.').is_empty() && Path::new(n).file_name().map(|f| f == n).unwrap_or(false)
 }
+
+fn default_log(id: &str) -> String {
+    let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(48).collect();
+    if safe.is_empty() { LEGACY_LOG.into() } else { format!("server_{safe}.log") }
+}
+
+/// The log file NAME a profile's server writes. ⚠ Every profile used to
+/// default to one shared name, and a second server truncated the first
+/// one's log; a profile still carrying that default gets its own.
+pub fn log_name(profile: &Value) -> String {
+    let n = sv(profile, "log");
+    if bare_log_name(&n) && n != LEGACY_LOG { n } else { default_log(&sv(profile, "id")) }
+}
+
+/// <server>/serverConfig/<name>; anything but a bare file name falls back
+/// to the shared legacy name (the "log" field must not point elsewhere).
+pub fn server_log(name: &str) -> PathBuf {
+    Path::new(&detect::effective_server_dir()).join("serverConfig").join(if bare_log_name(name) { name } else { LEGACY_LOG })
+}
+
+pub fn profile_log(profile: &Value) -> PathBuf {
+    server_log(&log_name(profile))
+}
+
+/// profiles.json exists but does not read as a list: saving "the list"
+/// now would replace every profile with the one being saved.
+fn profiles_unreadable() -> bool {
+    let p = profiles::path();
+    p.exists() && !std::fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).map(|v| v.is_array()).unwrap_or(false)
+}
+
+const UNREADABLE: &str = "profiles.json could not be read - not saving over it (fix or move the file, then try again)";
 
 // -------------------------------------------------------------- profiles --
 /// Merge over the EXISTING profile (a partial save must not reset the rest),
 /// sanitise the date (some years crash this exe), give new ones an id.
 pub fn upsert(profile: &Value) -> Value {
+    if profiles_unreadable() {
+        return json!({"ok": false, "error": UNREADABLE});
+    }
     let mut items = profiles::load();
     let id = sv(profile, "id");
     let current = items.iter().find(|p| !id.is_empty() && sv(p, "id") == id).cloned().unwrap_or(json!({}));
@@ -100,8 +139,16 @@ pub fn upsert(profile: &Value) -> Value {
     m.insert("tod_month".into(), json!(sane(m.get("tod_month"), 8, 1, 12)));
     m.insert("tod_day".into(), json!(sane(m.get("tod_day"), 15, 1, 31)));
     let mut p = Value::Object(m);
-    if !truthy(p.get("id")) {
+    let new = !truthy(p.get("id"));
+    if new {
         p["id"] = json!(profiles::new_id());
+    }
+    // its own log: a path, or a name another profile already writes, is replaced
+    let mine = log_name(&p);
+    if !bare_log_name(&sv(&p, "log")) || items.iter().any(|o| o.get("id") != p.get("id") && log_name(o) == mine) {
+        p["log"] = json!(default_log(&sv(&p, "id")));
+    }
+    if new {
         items.push(p.clone());
     } else {
         let mut found = false;
@@ -121,6 +168,9 @@ pub fn upsert(profile: &Value) -> Value {
 }
 
 pub fn delete(id: &str) {
+    if profiles_unreadable() {
+        return;
+    }
     let items: Vec<Value> = profiles::load().into_iter().filter(|p| sv(p, "id") != id).collect();
     let _ = profiles::save_all(&items);
     autoshare::prune(&profiles::load());
@@ -136,14 +186,35 @@ pub fn runtime() -> Map<String, Value> {
         .and_then(|v| v.as_object().cloned()).unwrap_or_default()
 }
 
+/// ⚠ runtime.json is read-modify-written from the events thread (status)
+/// and from starts/stops: one lock, or a freshly bound pid is lost.
+static RT_LOCK: Mutex<()> = Mutex::new(());
+
+fn rt_lock() -> std::sync::MutexGuard<'static, ()> {
+    RT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn save_runtime(r: &Map<String, Value>) {
     let _ = profiles::write_json_indent2(&runtime_path(), &Value::Object(r.clone()));
 }
 
 pub fn bind_pid(id: &str, rec: Value) {
+    let _g = rt_lock();
     let mut r = runtime();
     r.insert(id.to_string(), rec);
     save_runtime(&r);
+}
+
+/// Drop a profile's record - only while it still names `pid` (when given),
+/// so a record a new start just wrote survives.
+fn forget_pid(id: &str, pid: Option<u32>) {
+    let _g = rt_lock();
+    let mut r = runtime();
+    let cur = r.get(id).and_then(|v| v.get("pid")).and_then(|v| v.as_u64()).map(|v| v as u32);
+    if cur.is_some() && (pid.is_none() || cur == pid) {
+        r.remove(id);
+        save_runtime(&r);
+    }
 }
 
 pub fn server_pids() -> HashSet<u32> {
@@ -172,10 +243,10 @@ pub fn status(profile: &Value) -> Value {
     if pid != 0 && live.contains(&pid) {
         st["running"] = json!(true);
         st["pid"] = json!(pid);
-    } else if pid != 0 && !procs::alive(pid) {
-        let mut r = runtime();
-        r.remove(&id);
-        save_runtime(&r);
+        watch(pid); // a server started by an earlier ACECM gets its watcher back
+    } else if pid != 0 {
+        // dead, or the pid now belongs to something else: not our server
+        forget_pid(&id, Some(pid));
     } else if !port_shared(profile) {
         // ⚠ only when the listener IS a dedicated server (NVIDIA Broadcast
         // sits on 8080 and made a stopped server look running)
@@ -194,7 +265,7 @@ pub fn status(profile: &Value) -> Value {
             .and_then(|v| v.get("clients").cloned());
         st["clients"] = c.unwrap_or(Value::Null);
     }
-    let log = server_log(&sv(profile, "log"));
+    let log = profile_log(profile);
     if let Ok(m) = std::fs::metadata(&log) {
         let age = m.modified().ok().and_then(|t| SystemTime::now().duration_since(t).ok())
             .map(|d| (d.as_secs_f64() * 10.0).round() / 10.0).unwrap_or(0.0);
@@ -234,7 +305,8 @@ pub fn port_clashes() -> Value {
 static START_LOCK: Mutex<()> = Mutex::new(());
 pub static STARTING: Mutex<Option<HashMap<String, Value>>> = Mutex::new(None);
 pub static LAST_START: Mutex<Option<HashMap<String, Value>>> = Mutex::new(None);
-static LAUNCHING: Mutex<Option<HashMap<i64, Instant>>> = Mutex::new(None);
+/// port -> (claimed at, pid once launched)
+static LAUNCHING: Mutex<Option<HashMap<i64, (Instant, u32)>>> = Mutex::new(None);
 const STARTUP_GRACE: u64 = 45;
 
 pub fn start_state() -> Value {
@@ -246,14 +318,24 @@ pub fn start_state() -> Value {
 /// One start at a time; see START_LOCK.
 pub fn start(profile: &Value) -> Value {
     let id = sv(profile, "id");
-    let Ok(_g) = START_LOCK.try_lock() else {
-        let who = STARTING.lock().unwrap().as_ref().and_then(|m| m.values().next().cloned())
-            .map(|v| sv(&v, "name")).filter(|n| !n.is_empty()).unwrap_or_else(|| "another server".into());
-        return json!({"ok": false, "busy": true, "error": format!("{who} is already starting - wait for it to finish")});
+    // ⚠ a panic in an earlier start poisons the lock: that is not "busy"
+    let _g = match START_LOCK.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let who = STARTING.lock().unwrap().as_ref().and_then(|m| m.values().next().cloned())
+                .map(|v| sv(&v, "name")).filter(|n| !n.is_empty()).unwrap_or_else(|| "another server".into());
+            return json!({"ok": false, "busy": true, "error": format!("{who} is already starting - wait for it to finish")});
+        }
     };
     STARTING.lock().unwrap().get_or_insert_with(HashMap::new)
         .insert(id.clone(), json!({"at": now_secs(), "name": sv(profile, "name")}));
-    let r = start_inner(profile.clone());
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start_inner(profile.clone())))
+        .unwrap_or_else(|p| {
+            let msg = p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "panic".into());
+            json!({"ok": false, "error": format!("the start failed unexpectedly: {msg}")})
+        });
     STARTING.lock().unwrap().get_or_insert_with(HashMap::new).remove(&id);
     LAST_START.lock().unwrap().get_or_insert_with(HashMap::new).insert(id, json!({
         "at": now_secs(), "ok": r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -335,6 +417,9 @@ pub fn build_blobs(profile: &Value) -> Result<(Value, Value), String> {
     if idx < 0 || idx as usize >= evs.len() {
         idx = 0; // a stale index falls back visibly, it must not stop the server
     }
+    if evs.is_empty() {
+        return Err(format!("{events_file} lists no events"));
+    }
     let mut ev = evs[idx as usize].clone();
     if let Some(c) = custom_event(profile) {
         if let (Some(e), Value::Object(w)) = (ev.as_object_mut(), c) {
@@ -414,9 +499,13 @@ pub fn build_blobs(profile: &Value) -> Result<(Value, Value), String> {
     Ok((cfg, season))
 }
 
+/// Seconds since a launch claimed `port`, while the claim holds: for the
+/// grace period, and after it for as long as that launch's server lives
+/// (a slow server can take longer than the grace period to bind).
 fn claimed(port: i64) -> Option<u64> {
-    let g = LAUNCHING.lock().unwrap();
-    g.as_ref().and_then(|m| m.get(&port)).map(|t| t.elapsed().as_secs()).filter(|s| *s < STARTUP_GRACE)
+    let (at, pid) = LAUNCHING.lock().unwrap().as_ref().and_then(|m| m.get(&port)).copied()?;
+    let s = at.elapsed().as_secs();
+    (s < STARTUP_GRACE || (pid != 0 && server_pids().contains(&pid))).then_some(s)
 }
 
 fn release(ports: &[i64]) {
@@ -456,11 +545,20 @@ fn start_inner(mut profile: Value) -> Value {
     let mut http = iv(&profile, "http_port", 8080);
     for port in [tcp, http] {
         if let Some(ago) = claimed(port) {
-            return json!({"ok": false, "error": format!("a server is already starting on port {port} ({ago}s ago) - give it up to {STARTUP_GRACE}s to come up")});
+            return json!({"ok": false, "error": if ago < STARTUP_GRACE {
+                format!("a server is already starting on port {port} ({ago}s ago) - wait for it to come up")
+            } else {
+                format!("a server ACECM started is still running on port {port} - stop it first")
+            }});
         }
     }
     let rt = runtime();
     let live = server_pids();
+    // ⚠ this profile's own server first: a slow one has not bound its ports yet
+    let own = rt.get(&id).and_then(|r| r.get("pid")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if recorded_pid_usable(own, &live) {
+        return json!({"ok": false, "error": format!("this server is already running (pid {own}) - stop it first")});
+    }
     for other in profiles::load() {
         if sv(&other, "id") == id {
             continue;
@@ -478,7 +576,10 @@ fn start_inner(mut profile: Value) -> Value {
             if let Some(c) = (http + 1..http + 60).find(|c| !taken.contains(c) && *c != tcp && !port_busy(*c)) {
                 profile["http_port"] = json!(c);
                 http = c;
-                profile = upsert(&profile);
+                let saved = upsert(&profile);
+                if saved.get("id").is_some() {
+                    profile = saved;
+                }
             }
         }
     }
@@ -487,8 +588,24 @@ fn start_inner(mut profile: Value) -> Value {
             return json!({"ok": false, "error": format!("{label} port {port} is already in use - stop whatever is on it first (a server left running on these ports will spin and eat all memory)")});
         }
     }
+    // ⚠ damage is global to the install: say so when this start cannot have its own
+    let want_damage = profile.get("damage_pct").and_then(|v| v.as_f64()).map(|v| v as i64).unwrap_or(100);
+    let mut warning = String::new();
     if live.is_empty() {
-        let _ = damage::apply_for(&profile);
+        let r = damage::apply_for(&profile);
+        if r["ok"] != true {
+            warning = format!("damage could not be set to {want_damage}%: {} - the server uses the archive's current setting",
+                              r["error"].as_str().unwrap_or("unknown error"));
+        }
+    } else {
+        let cur = damage::status()["damage"].as_i64();
+        if cur != Some(want_damage) {
+            warning = format!("another server is running, so damage stays at {} instead of {want_damage}% (it is one setting for every server)",
+                              cur.map(|c| format!("{c}%")).unwrap_or_else(|| "its current setting".into()));
+        }
+    }
+    if !warning.is_empty() {
+        crate::logs::warn(format!("server start: {warning}"));
     }
     let exe = detect::find("server_exe", false);
     if exe.is_empty() || !Path::new(&exe).is_file() {
@@ -499,7 +616,7 @@ fn start_inner(mut profile: Value) -> Value {
         Err(e) => return json!({"ok": false, "error": e}),
     };
     // claim the ports BEFORE launching: nothing listens for ~30 s
-    LAUNCHING.lock().unwrap().get_or_insert_with(HashMap::new).extend([(tcp, Instant::now()), (http, Instant::now())]);
+    LAUNCHING.lock().unwrap().get_or_insert_with(HashMap::new).extend([(tcp, (Instant::now(), 0)), (http, (Instant::now(), 0))]);
     let mut args = vec![format!("-serverconfig={}", encode_blob(&cfg)), format!("-seasondefinition={}", encode_blob(&season))];
     if truthy(profile.get("no_lobby")) {
         args.push("-no_lobby=true".into());
@@ -508,7 +625,7 @@ fn start_inner(mut profile: Value) -> Value {
         args.push("-write_server_results=true".into());
     }
     let srv = detect::effective_server_dir();
-    let log = server_log(&sv(&profile, "log"));
+    let log = profile_log(&profile);
     if let Some(d) = log.parent() {
         let _ = std::fs::create_dir_all(d);
     }
@@ -519,6 +636,13 @@ fn start_inner(mut profile: Value) -> Value {
             return json!({"ok": false, "error": format!("could not start the server: {e}")});
         }
     };
+    if let Some(m) = LAUNCHING.lock().unwrap().as_mut() {
+        for p in [tcp, http] {
+            if let Some(e) = m.get_mut(&p) {
+                e.1 = pid;
+            }
+        }
+    }
     // a CRT abort (0xC0000409) shows up within ~3 s - wait long enough to see it
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(6) {
@@ -532,20 +656,63 @@ fn start_inner(mut profile: Value) -> Value {
     }
     bind_pid(&id, json!({"pid": pid, "started": now_secs(), "http_port": http}));
     lobby::write(&profile);
-    std::thread::spawn(move || watch_memory(pid));
-    json!({"ok": true, "pid": pid})
+    watch(pid);
+    let mut out = json!({"ok": true, "pid": pid});
+    if !warning.is_empty() {
+        out["warning"] = json!(warning);
+    }
+    out
+}
+
+static WATCHED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+
+/// One memory watcher per live server pid.
+fn watch(pid: u32) {
+    if !WATCHED.lock().unwrap().get_or_insert_with(HashSet::new).insert(pid) {
+        return;
+    }
+    // ⚠ a server we may not open (started elevated) stays in the set, or
+    // every status poll would spawn a thread that exits at once
+    if procs::Held::open(pid).is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        watch_memory(pid);
+        if let Some(s) = WATCHED.lock().unwrap().as_mut() {
+            s.remove(&pid);
+        }
+    });
+}
+
+/// Commit limit in bytes: ACECM_SERVER_MEM_LIMIT_GB, else 12 GB, but at
+/// most 3/4 of the RAM (never under 6 GB) - past that the PC is paging.
+fn mem_limit(ram: Option<u64>, env: Option<f64>) -> u64 {
+    const GB: u64 = 1 << 30;
+    if let Some(g) = env.filter(|g| *g > 0.0) {
+        return (g * GB as f64) as u64;
+    }
+    let cap = ram.map(|r| (r / 4 * 3).max(6 * GB)).unwrap_or(12 * GB);
+    (12 * GB).min(cap)
 }
 
 /// ⚠ The backstop for every runaway cause we have not thought of: a healthy
-/// server sits at 1-2 GB.
+/// server sits at 1-2 GB. Measured as COMMIT, not working set (the runaway
+/// reserved ~120 GB; a working set is capped by RAM and stops growing), on
+/// a held handle so the pid cannot be reused under us.
 fn watch_memory(pid: u32) {
-    let limit_gb: f64 = std::env::var("ACECM_SERVER_MEM_LIMIT_GB").ok().and_then(|v| v.parse().ok()).unwrap_or(12.0);
+    let Some(h) = procs::Held::open(pid) else { return };
+    let env = std::env::var("ACECM_SERVER_MEM_LIMIT_GB").ok().and_then(|v| v.parse::<f64>().ok());
+    let limit = mem_limit(procs::physical_ram(), env);
     loop {
         std::thread::sleep(Duration::from_secs(5));
-        let Some(ws) = procs::working_set(pid) else { return };
-        if ws as f64 > limit_gb * (1u64 << 30) as f64 {
+        if !h.alive() {
+            return;
+        }
+        let Some(c) = h.commit() else { return };
+        if c > limit {
             procs::kill(pid);
-            eprintln!("KILLED runaway server pid {pid}: {:.1} GB exceeded the {limit_gb:.0} GB limit", ws as f64 / (1u64 << 30) as f64);
+            let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
+            crate::logs::warn(format!("KILLED runaway server pid {pid}: {:.1} GB committed, over the {:.1} GB limit", gb(c), gb(limit)));
             return;
         }
     }
@@ -596,6 +763,7 @@ pub fn launch_hidden_console(exe: &Path, args: &[String], cwd: &Path, log: &Path
         }
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
+        procs::invalidate_snapshot();
         Ok(pi.dwProcessId)
     }
 }
@@ -604,6 +772,10 @@ pub fn launch_hidden_console(exe: &Path, args: &[String], cwd: &Path, log: &Path
 fn denied_msg(pids: &[u32]) -> String {
     let ids = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
     format!("could not stop the server (PID {ids}). It was most likely started by an ACECM running as administrator, so this one has no rights over it. Restart ACECM as administrator and stop it again, or end AssettoCorsaEVOServer.exe in Task Manager (also as administrator).")
+}
+
+fn recorded_pid_usable(pid: u32, live: &HashSet<u32>) -> bool {
+    pid != 0 && live.contains(&pid)
 }
 
 fn pid_on_port(port: i64) -> Option<u32> {
@@ -629,7 +801,8 @@ pub fn stop(profile_id: &str) -> Value {
     };
     let rec = runtime().get(profile_id).cloned().unwrap_or(json!({}));
     let mut pid = rec.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    if !(pid != 0 && procs::alive(pid)) {
+    // ⚠ the recorded pid only while it IS a server: Windows reuses pids
+    if !recorded_pid_usable(pid, &server_pids()) {
         pid = pid_on_port(iv(&prof, "http_port", 8080)).unwrap_or(0);
     }
     if pid == 0 {
@@ -638,9 +811,7 @@ pub fn stop(profile_id: &str) -> Value {
     if !procs::kill(pid) {
         return json!({"ok": false, "stopped": [], "scope": prof.get("name").cloned().unwrap_or(Value::Null), "error": denied_msg(&[pid])});
     }
-    let mut r = runtime();
-    r.remove(profile_id);
-    save_runtime(&r);
+    forget_pid(profile_id, None);
     release(&[iv(&prof, "tcp_port", 9700), iv(&prof, "http_port", 8080)]);
     json!({"ok": true, "stopped": [pid], "scope": prof.get("name").cloned().unwrap_or(Value::Null)})
 }
@@ -651,7 +822,7 @@ pub fn stop(profile_id: &str) -> Value {
 /// the tail rather than splicing one run onto another.
 pub fn log_tail(profile: &Value, lines: usize, since: u64) -> Value {
     use std::io::{Read, Seek, SeekFrom};
-    let path = server_log(&sv(profile, "log"));
+    let path = profile_log(profile);
     let Ok(mut f) = std::fs::File::open(&path) else {
         return json!({"lines": [], "error": "no log yet", "size": 0});
     };
@@ -677,4 +848,49 @@ pub fn log_tail(profile: &Value, lines: usize, since: u64) -> Value {
         keep = keep.split_off(n);
     }
     json!({"lines": keep, "size": size, "reset": reset || since == 0})
+}
+
+#[cfg(test)]
+mod fix_tests {
+    use super::*;
+
+    #[test]
+    fn log_field_is_a_bare_file_name() {
+        for ok in ["server_a.log", "my server.log", "x"] {
+            assert!(bare_log_name(ok), "{ok}");
+        }
+        for bad in ["", "..", ".", "../x.log", r"..\x.log", r"C:\Windows\x.log", "C:x.log", "a/b.log", "x.log:ads", "a\u{1}b"] {
+            assert!(!bare_log_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn each_profile_gets_its_own_log() {
+        let a = json!({"id": "srv1a", "log": "vai_server.log"});
+        let b = json!({"id": "srv2b"});
+        assert_eq!(log_name(&a), "server_srv1a.log");
+        assert_eq!(log_name(&b), "server_srv2b.log");
+        assert_eq!(log_name(&json!({"id": "x", "log": "mine.log"})), "mine.log");
+        assert_eq!(log_name(&json!({"id": "x", "log": r"C:\x.log"})), "server_x.log");
+        assert_eq!(default_log(r"..\a"), "server_a.log");
+    }
+
+    #[test]
+    fn a_reused_pid_is_not_a_server() {
+        let live: HashSet<u32> = [100, 200].into_iter().collect();
+        assert!(recorded_pid_usable(100, &live));
+        // alive or not, a pid that is not a dedicated server is never killed by Stop
+        assert!(!recorded_pid_usable(std::process::id(), &live));
+        assert!(!recorded_pid_usable(0, &live));
+    }
+
+    #[test]
+    fn memory_limit_follows_ram() {
+        const GB: u64 = 1 << 30;
+        assert_eq!(mem_limit(Some(64 * GB), None), 12 * GB);
+        assert_eq!(mem_limit(Some(16 * GB), None), 12 * GB);
+        assert_eq!(mem_limit(Some(8 * GB), None), 6 * GB);
+        assert_eq!(mem_limit(None, None), 12 * GB);
+        assert_eq!(mem_limit(Some(8 * GB), Some(20.0)), 20 * GB);
+    }
 }

@@ -144,15 +144,10 @@ pub fn apply_fix(name: &str) -> Value {
     json!({"ok": true, "copied": dst, "what": fix.get("what")})
 }
 
-/// shutil.copy2: bytes plus the modification time
+/// shutil.copy2: bytes plus the modification time - through a temp file,
+/// so a failed copy never leaves a truncated mod in place
 fn copy2(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::copy(src, dst)?;
-    if let Ok(t) = std::fs::metadata(src).and_then(|m| m.modified()) {
-        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(dst) {
-            let _ = f.set_modified(t);
-        }
-    }
-    Ok(())
+    crate::safefs::copy_atomic(src, dst)
 }
 
 fn copy_file(src: &Path, dst: &Path, force: bool) -> std::io::Result<&'static str> {
@@ -250,7 +245,8 @@ pub fn scan_source(path: &str) -> Value {
             Ok(es) => for e in es {
                 let (base, ext) = splitext(&basename(&e.name));
                 let ext = ext.to_lowercase();
-                if ext == ".kspkg" || ext == ".json" {
+                // ⚠ a member name becomes a file name: "x:stream", "C:evil" are not
+                if (ext == ".kspkg" || ext == ".json") && !base.is_empty() && safe_base(&base) == base {
                     found.entry(base).or_default().insert(ext);
                 }
             },
@@ -433,7 +429,8 @@ pub fn install(path: &str, only: Option<Vec<String>>, overwrite: bool) -> Value 
         }
         let r = archive::each_file(p, |n, _size, r| {
             let (base, ext) = splitext(&basename(n));
-            if !matches!(ext.to_lowercase().as_str(), ".kspkg" | ".json") || !names.contains(&base) {
+            if !matches!(ext.to_lowercase().as_str(), ".kspkg" | ".json") || !names.contains(&base)
+                || base.is_empty() || safe_base(&base) != base {
                 return Ok(true);
             }
             write_mod_file(&base, &ext, Ok(r)).map_err(|e| e.to_string())?;
@@ -965,7 +962,7 @@ fn rand_tag() -> String {
 
 /// An empty folder BESIDE the tracks folder (same volume, so the final move
 /// is a rename; not inside it, where it would look like a track).
-fn staging_dir(tracks: &str) -> Result<PathBuf, String> {
+pub(crate) fn staging_dir(tracks: &str) -> Result<PathBuf, String> {
     let t = std::path::absolute(tracks).map_err(|e| e.to_string())?;
     let parent = t.parent().map(Path::to_path_buf).unwrap_or_else(|| t.clone());
     let s = parent.join(format!("acecm-staging-{}", rand_tag()));
@@ -976,7 +973,7 @@ fn staging_dir(tracks: &str) -> Result<PathBuf, String> {
 /// Put `staging` where `dest` is, all or nothing: the old copy is moved
 /// aside, the new one renamed in, and the old one deleted only after that
 /// worked (or moved back if it did not).
-fn swap_in(staging: &Path, dest: &Path) -> Result<(), String> {
+pub(crate) fn swap_in(staging: &Path, dest: &Path) -> Result<(), String> {
     let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let old = dest.with_file_name(format!("{name}.acecm-old-{}", rand_tag()));
     let had = dest.exists();
@@ -1035,16 +1032,19 @@ pub fn install_track_folder(path: &Path, folder: Option<&str>, overwrite: bool) 
         }
     }
     if !same_dir {
-        if dest.is_dir() {
-            if !overwrite {
-                return track_conflict(&folder, &dest, &dir_file_sizes(path), &label).unwrap_or(json!({"ok": false, "error": "track already exists"}));
-            }
-            if let Err(e) = std::fs::remove_dir_all(&dest) {
-                return json!({"ok": false, "error": e.to_string()});
-            }
+        if dest.is_dir() && !overwrite {
+            return track_conflict(&folder, &dest, &dir_file_sizes(path), &label).unwrap_or(json!({"ok": false, "error": "track already exists"}));
         }
-        if let Err(e) = copytree(path, &dest) {
+        // ⚠ copy into a staging folder and swap it in when complete (as
+        // install_track_pack does): deleting first left half a track
+        let staging = match staging_dir(&contentsync::tracks_dir()) { Ok(s) => s, Err(e) => return json!({"ok": false, "error": e}) };
+        if let Err(e) = copytree(path, &staging) {
+            let _ = std::fs::remove_dir_all(&staging);
             return json!({"ok": false, "error": e.to_string()});
+        }
+        if let Err(e) = swap_in(&staging, &dest) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return json!({"ok": false, "error": e});
         }
     }
     if truthy(Some(&meta)) {
@@ -1292,15 +1292,22 @@ pub fn remove_track(folder: &str) -> Value {
     if !dest.is_dir() {
         return json!({"ok": false, "error": "that track is not installed"});
     }
-    let unreg = match crate::trackdeploy::client_kspkg() {
-        Some(p) => crate::trackdeploy::unregister_track_into(Path::new(&p), &folder, "", true),
+    let pkg = crate::trackdeploy::client_kspkg();
+    let unreg = match &pkg {
+        Some(p) => crate::trackdeploy::unregister_track_into(Path::new(p), &folder, "", true),
         None => json!({"ok": false, "error": "client content.kspkg not found"}),
     };
     if unreg.get("ok") != Some(&json!(true)) {
         if truthy(unreg.get("needs_close")) {
             return json!({"ok": false, "needs_close": true, "error": "close the game first - removing a track edits the client tables, and deleting the files without that leaves the game listing a track it cannot load"});
         }
-        logs::warn(format!("could not unregister {folder} before deleting: {}", sv(&unreg, "error")));
+        // ⚠ the files stay while their table rows do: deleting them would
+        // leave the game listing a track it cannot load. (No client archive
+        // at all: nothing can list it, so the files may go.)
+        if pkg.is_some() {
+            return json!({"ok": false, "error": format!("could not remove {folder} from the game's track list, so its files were kept: {}", sv(&unreg, "error"))});
+        }
+        logs::warn(format!("no client archive; deleting {folder} without unregistering"));
     }
     if let Err(e) = std::fs::remove_dir_all(&dest) {
         return json!({"ok": false, "error": e.to_string()});

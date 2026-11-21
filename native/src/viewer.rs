@@ -31,8 +31,11 @@ pub fn package() -> Option<String> {
     if let Ok(p) = std::env::var("ACECM_CLIENT_KSPKG") {
         return Path::new(&p).is_file().then_some(p);
     }
-    let g = detect::steam_app_dir(detect::APPID_GAME);
-    let g = if g.is_empty() { detect::find("game_dir", true) } else { g };
+    // ⚠ the SAME install the exe patches go to (backend::game_exe: the
+    // setting first): Steam-first here could pick another copy's archive
+    let exe = crate::backend::game_exe();
+    let g = Path::new(&exe).parent().filter(|d| !exe.is_empty() && d.join("content.kspkg").is_file())
+        .map(s).unwrap_or_else(|| detect::find("game_dir", false));
     if g.is_empty() {
         return None;
     }

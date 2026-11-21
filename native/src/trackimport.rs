@@ -1,7 +1,7 @@
 //! Imported tracks on this machine - ported from contentsync.tracks_dir /
 //! installed_tracks / track_map and tracks.importable (read side only).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Map, Value};
@@ -16,8 +16,9 @@ pub fn tracks_dir() -> String {
     if !c.is_empty() {
         return c;
     }
-    let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
-    home.join("Saved Games").join("ACE").join("mods").join("content").join("tracks")
+    // ⚠ the client mods folder the game really reads (Saved Games can be
+    // moved or redirected; a hand-built %USERPROFILE% path missed that)
+    Path::new(&crate::mods::client_mods_dir()).join("content").join("tracks")
         .to_string_lossy().into_owned()
 }
 

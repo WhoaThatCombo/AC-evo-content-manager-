@@ -27,8 +27,8 @@ const TOGGLES: &[(&str, &str, bool)] = &[
 ];
 
 pub fn dir_path() -> PathBuf {
-    let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
-    home.join("Saved Games").join("ACE").join("AssistSettings")
+    // the real Saved Games\ACE (moved or OneDrive-redirected included)
+    PathBuf::from(crate::gamesettings::settings_dir()).join("AssistSettings")
 }
 
 fn num(m: &DynamicMessage, name: &str) -> f64 {
@@ -102,6 +102,24 @@ fn py_float(v: &Value) -> Option<f64> {
     }
 }
 
+const KEEP_BACKUPS: usize = 20;
+
+/// Keep the newest `keep` timestamped backups of `path` (<name>.<stamp>.bak).
+fn prune_backups(path: &std::path::Path, keep: usize) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().map(|n| n.to_string_lossy().into_owned())) else { return };
+    let pre = format!("{name}.");
+    let mut baks: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter(|e| { let n = e.file_name().to_string_lossy().into_owned(); n.starts_with(&pre) && n.ends_with(".bak") })
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok().map(|t| (t, e.path()))).collect();
+    if baks.len() <= keep {
+        return;
+    }
+    baks.sort();
+    for (_, p) in &baks[..baks.len() - keep] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Apply only the keys present in `values`; everything else is preserved.
 /// ⚠ Changing anything makes it a CUSTOM preset, as the game's own page does.
 pub fn write(values: &Value) -> Value {
@@ -110,8 +128,12 @@ pub fn write(values: &Value) -> Value {
     if !d.is_dir() {
         return json!({"ok": false, "error": "no AssistSettings folder - run the game once"});
     }
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    // ⚠ the game rewrites these files on exit: an edit now would be lost
+    if crate::procs::game_running() {
+        return json!({"ok": false, "needs_close": true, "error": "close the game first - it saves its own assists on exit and would undo this"});
+    }
     let mut changed: Vec<String> = Vec::new();
+    let mut out: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let custom = d.join("AssistPresetListType_CUSTOM.racingsettingsassistpreset");
     let current = d.join("current.assistpresetsave");
     for (path, wrap) in [(custom, false), (current, true)] {
@@ -148,16 +170,22 @@ pub fn write(values: &Value) -> Value {
             }
             set_num(p, "type", 4.0);
         }
-        let blob = msg.encode_to_vec();
-        if let Err(e) = crate::safefs::copy_atomic(&path, std::path::Path::new(&format!("{}.{stamp}.bak", path.display()))) {
+        out.push((path, msg.encode_to_vec()));
+    }
+    // nothing recognised: touch nothing (no type flip, no backups)
+    if changed.is_empty() {
+        return json!({"ok": false, "error": "nothing to change"});
+    }
+    for (path, blob) in out {
+        // a unique name per save: two saves in one second must not overwrite
+        // the pre-edit copy with an already-edited one
+        if let Err(e) = crate::safefs::copy_atomic(&path, &crate::gamesettings::history_path(&path)) {
             return json!({"ok": false, "error": format!("could not back the preset up first ({e}) - nothing was changed")});
         }
         if let Err(e) = crate::safefs::write_atomic(&path, &blob) {
             return json!({"ok": false, "error": e.to_string()});
         }
-    }
-    if changed.is_empty() {
-        return json!({"ok": false, "error": "nothing to change"});
+        prune_backups(&path, KEEP_BACKUPS);
     }
     changed.sort();
     changed.dedup();

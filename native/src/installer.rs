@@ -1,7 +1,9 @@
 //! Putting ACECM somewhere permanent, with shortcuts - ported from
 //! installer.py.
 //!
-//!     %LOCALAPPDATA%\Programs\ACECM\ACECM.exe
+//! ```text
+//! %LOCALAPPDATA%\Programs\ACECM\ACECM.exe
+//! ```
 //!
 //! Per-user on purpose: no admin prompt. ⚠ The data folder is never touched:
 //! installing, reinstalling and uninstalling all leave profiles alone.

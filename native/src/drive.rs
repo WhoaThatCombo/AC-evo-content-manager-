@@ -476,24 +476,20 @@ fn car_model(preset_id: &str) -> String {
     m.unwrap_or_else(|| preset_id.to_string())
 }
 
-fn backup(path: &Path) {
+/// The first original once (.bak_acecm) plus a history copy, both atomic.
+/// ⚠ The caller stops on Err: no save is rewritten without its backup.
+fn backup(path: &Path) -> std::io::Result<()> {
     if !path.is_file() {
-        return;
+        return Ok(());
     }
     let bak = PathBuf::from(format!("{}.bak_acecm", path.display()));
-    if !bak.is_file() {
-        let _ = std::fs::copy(path, &bak);
-    }
-    let hist = format!("{}.{}.bak", path.display(), chrono::Local::now().format("%Y%m%d-%H%M%S"));
-    let _ = std::fs::copy(path, hist);
+    crate::safefs::backup_once(path, &bak)?;
+    crate::safefs::copy_atomic(path, &gamesettings::history_path(path))
 }
 
+/// Atomic and flushed: the game we launch next reads it at once.
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(bytes)?;
-    f.flush()?;
-    f.sync_all()
+    crate::safefs::write_atomic(path, bytes)
 }
 
 /// Stamp GameModeSave + lastgamemode under `root` so startup_gamemode has
@@ -582,7 +578,9 @@ pub fn write_gamemode_into(root: &Path, pick: &Map<String, Value>, check_game: b
         m.set_field_by_name("is_enabled", PV::Bool(true));
         sess.set_field(&mfd, PV::List(vec![PV::Message(m)]));
     }
-    backup(&save_path);
+    if let Err(e) = backup(&save_path) {
+        return json!({"ok": false, "error": format!("could not back up {}: {e}", save_path.display())});
+    }
     // ⚠ explicit flush + fsync: the game we launch next reads it at once
     use prost::Message;
     if let Err(e) = write_synced(&save_path, &obj.encode_to_vec()) {
@@ -612,8 +610,10 @@ pub fn write_gamemode_into(root: &Path, pick: &Map<String, Value>, check_game: b
                 // grip is PER WEATHER PRESET: only the one this session uses
                 let grip = { let g = s_or(get(pick, "grip")); if g.is_empty() { "OPTIMUM".into() } else { g } };
                 set_grip(&mut last, &wname, &grip);
-                backup(&last_path);
-                let _ = write_synced(&last_path, &last.encode_to_vec());
+                match backup(&last_path) {
+                    Ok(()) => { let _ = write_synced(&last_path, &last.encode_to_vec()); }
+                    Err(e) => logs::warn(format!("drive: {} not updated, backup failed: {e}", last_path.display())),
+                }
             }
         }
     }
@@ -671,13 +671,23 @@ pub fn ensure_backend() -> Value {
         logs::info(format!("backend on the port serves {}, not {mine:?}; replacing it",
             if theirs.is_empty() { "'(unknown)'".to_string() } else { format!("{theirs:?}") }));
         backend::stop();
+        // ⚠ only OUR proxy/backend, by its command line: anything else on
+        // these ports belongs to another program and is not ours to kill
         let port = config::load().get("backend_port").and_then(|v| v.as_i64()).unwrap_or(448);
         for p in [port as u16, 8093] {
-            for pid in procs::tcp_listen_pids(p) {
+            for pid in backend::ours_on_port(p) {
                 procs::kill(pid);
             }
         }
         let _ = sleep(1.0);
+        for p in [port as u16, 8093] {
+            let me = std::process::id();
+            if let Some(pid) = procs::tcp_listen_pids(p).into_iter().find(|x| *x != me) {
+                let exe = procs::exe_path(pid);
+                let name = Path::new(&exe).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| format!("pid {pid}"));
+                return json!({"ok": false, "error": format!("port {p} is held by {name} - close it (or change backend_port in Settings) and try again")});
+            }
+        }
     }
     backend::start("proxy")
 }
@@ -1589,6 +1599,8 @@ fn game_still_up() -> bool {
     game_running() || gameui::window_open()
 }
 
+const GAME_EXE: &str = "AssettoCorsaEVO";
+
 /// Ask the menu to quit, close the window, then force-kill the tree.
 fn close_game() -> bool {
     logs::info(format!("drive quit: {}", py_repr(&gameui::quit_game())));
@@ -1602,11 +1614,9 @@ fn close_game() -> bool {
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    let mut pids = procs::pids_named(&["AssettoCorsaEVO"]);
-    pids.extend(procs::pids_named_prefix(&["assettocorsaevo"]));
-    pids.sort();
-    pids.dedup();
-    for pid in pids {
+    // ⚠ the game exe by its EXACT name: a prefix match also hit
+    // AssettoCorsaEVOServer.exe and killed every hosted server
+    for pid in procs::pids_named(&[GAME_EXE]) {
         procs::kill(pid);
         logs::info(format!("drive killed leftover EVO pid {pid}"));
     }
@@ -1735,10 +1745,14 @@ fn run_capture_inner(launched_us: &mut bool) -> Result<(), Cancelled> {
             return Ok(());
         }
     }
-    set(json!({"phase": "quitting_game", "hint": format!("got {last_n} servers — closing the game")}));
-    close_game();
+    // ⚠ only a game WE started is closed: the user's own session stays up
+    if *launched_us {
+        set(json!({"phase": "quitting_game", "hint": format!("got {last_n} servers — closing the game")}));
+        close_game();
+    }
     job_put("captured", json!(last_n));
-    set(json!({"phase": "launched", "hint": format!("captured {last_n} public servers — game closed, Drive is ready")}));
+    let closed = if *launched_us { "game closed, " } else { "" };
+    set(json!({"phase": "launched", "hint": format!("captured {last_n} public servers — {closed}Drive is ready")}));
     Ok(())
 }
 

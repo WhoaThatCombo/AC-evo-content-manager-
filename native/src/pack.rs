@@ -197,8 +197,17 @@ pub fn install(path: &Path) -> Value {
                 let tmp = PathBuf::from(format!("{}.part", dest.display()));
                 {
                     let mut src = z.by_name(&rel).map_err(|e| e.to_string())?;
+                    // ⚠ at most the member's DECLARED size (what archive_budget
+                    // summed): the zip crate bounds the compressed input, not
+                    // what it inflates to (same rule as archive::Capped)
+                    let lim = src.size();
                     let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-                    std::io::copy(&mut src, &mut out).map_err(|e| e.to_string())?;
+                    let n = std::io::copy(&mut (&mut src).take(lim + 1), &mut out).map_err(|e| e.to_string())?;
+                    if n > lim {
+                        drop(out);
+                        let _ = std::fs::remove_file(&tmp);
+                        return Err(format!("{rel} is larger than the archive declares"));
+                    }
                 }
                 if !want.is_empty() && digest(&tmp) != want {
                     let _ = std::fs::remove_file(&tmp);

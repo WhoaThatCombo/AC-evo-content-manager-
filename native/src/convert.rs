@@ -394,7 +394,7 @@ pub fn earlier_api(kind: &str, folder: &str) -> Value {
 /// <data>\convert_backups\<time>\. The game re-applies a saved entry over a
 /// reinstalled car, so a replaced conversion would keep its old cameras.
 pub(crate) fn reset_car_settings(ids: &[String]) -> Value {
-    let Some(saved) = std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("Saved Games").join("ACE")).filter(|d| d.is_dir()) else {
+    let Some(saved) = Some(PathBuf::from(crate::gamesettings::settings_dir())).filter(|d| d.is_dir()) else {
         return json!({"ok": true, "skipped": "no Saved Games\\ACE folder"});
     };
     if procs::game_running() {

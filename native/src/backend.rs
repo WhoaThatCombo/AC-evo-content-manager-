@@ -138,14 +138,28 @@ pub fn redirect_url() -> String {
     format!("wss://127.0.0.1:{}/communicationNode/dev", backend_port())
 }
 
-fn local_markers() -> Vec<Vec<u8>> {
-    let p = backend_port();
-    vec![redirect_url().into_bytes(), format!("wss://localhost:{p}/communicationNode/dev").into_bytes(),
-         b"wss://localhost:448/communicationNode/dev".to_vec(), b"wss://127.0.0.1:448/communicationNode/dev".to_vec()]
-}
-
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     memchr::memmem::find(hay, needle)
+}
+
+/// A local backend URL we wrote, on ANY port: wss://127.0.0.1:<digits> or
+/// wss://localhost:<digits>, then /communicationNode/dev.
+/// ⚠ Not just the current backend_port: patched on one port and then
+/// changed in Settings, the slot must still be found to re-patch or restore.
+fn find_local_url(data: &[u8]) -> Option<usize> {
+    const TAIL: &[u8] = b"/communicationNode/dev";
+    let mut best: Option<usize> = None;
+    for head in [&b"wss://127.0.0.1:"[..], &b"wss://localhost:"[..]] {
+        for i in memchr::memmem::find_iter(data, head) {
+            let rest = &data[i + head.len()..];
+            let n = rest.iter().take(6).take_while(|c| c.is_ascii_digit()).count();
+            if n > 0 && rest[n..].starts_with(TAIL) {
+                best = Some(best.map_or(i, |b| b.min(i)));
+                break;
+            }
+        }
+    }
+    best
 }
 
 /// (offset, kind) for the 58-byte client URL slot.
@@ -153,25 +167,24 @@ fn find_url_slot(data: &[u8]) -> Option<(usize, &'static str)> {
     if let Some(i) = find(data, KUNOS_CLIENT_URL) {
         return Some((i, "kunos"));
     }
-    local_markers().iter().find_map(|m| find(data, m)).map(|i| (i, "local"))
+    find_local_url(data).map(|i| (i, "local"))
 }
 
 /// Keep a backup only while it belongs to the CURRENT game build (a patch
 /// flips a few bytes, so the same build is the same size).
-fn refresh_backup(exe: &Path, bak: &Path, len: u64) -> Value {
+/// ⚠ The caller stops on Err: patching after a failed backup leaves no way back.
+fn refresh_backup(exe: &Path, bak: &Path, len: u64) -> Result<Value, String> {
     if let Ok(m) = std::fs::metadata(bak) {
         if m.len() == len {
-            return json!({"kept": true});
+            return Ok(json!({"kept": true}));
         }
         let stale = PathBuf::from(format!("{}.stale", bak.display()));
         if std::fs::rename(bak, &stale).is_err() {
             let _ = std::fs::remove_file(bak);
         }
     }
-    match std::fs::copy(exe, bak) {
-        Ok(_) => json!({"made": true}),
-        Err(e) => json!({"error": e.to_string()}),
-    }
+    crate::safefs::copy_atomic(exe, bak).map(|_| json!({"made": true}))
+        .map_err(|e| format!("could not back up the client to {}: {e}", bak.display()))
 }
 
 static PROBE: Mutex<Option<(String, Value)>> = Mutex::new(None);
@@ -238,9 +251,11 @@ pub fn apply_redirect() -> Value {
         return json!({"ok": false, "error": "Kunos URL site is not intact — refusing"});
     }
     let bak = PathBuf::from(format!("{exe}.bak_prebackend"));
-    let _ = refresh_backup(Path::new(&exe), &bak, data.len() as u64);
+    if let Err(e) = refresh_backup(Path::new(&exe), &bak, data.len() as u64) {
+        return json!({"ok": false, "error": e});
+    }
     data[off..off + slot].copy_from_slice(&want);
-    if let Err(e) = std::fs::write(&exe, &data) {
+    if let Err(e) = crate::safefs::write_atomic(Path::new(&exe), &data) {
         *PROBE.lock().unwrap() = None;
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             return json!({"ok": false, "needs_admin": true, "error": format!("no permission to modify {exe}. Run ACECM as administrator once — Steam drops -backend=, so this rewrite is what actually points the client at us")});
@@ -267,7 +282,7 @@ pub fn restore_redirect() -> Value {
     }
     let Some((off, _)) = find_url_slot(&data) else { return json!({"ok": false, "error": "no local backend URL found to restore"}) };
     data[off..off + KUNOS_CLIENT_URL.len()].copy_from_slice(KUNOS_CLIENT_URL);
-    if let Err(e) = std::fs::write(&exe, &data) {
+    if let Err(e) = crate::safefs::write_atomic(Path::new(&exe), &data) {
         return json!({"ok": false, "error": e.to_string()});
     }
     *PROBE.lock().unwrap() = None;
@@ -355,11 +370,13 @@ pub fn apply_inspector() -> Value {
         return json!({"ok": false, "error": "the game is running — close it before enabling the menu inspector"});
     }
     let bak = PathBuf::from(format!("{exe}.bak_preinspector"));
-    let _ = refresh_backup(Path::new(&exe), &bak, data.len() as u64);
+    if let Err(e) = refresh_backup(Path::new(&exe), &bak, data.len() as u64) {
+        return json!({"ok": false, "error": e});
+    }
     data[pf + 3..pf + 7].copy_from_slice(&port.to_le_bytes());
     data[gf + 4] = 0x01;
     data[gf + 5] = 0x01;
-    if let Err(e) = std::fs::write(&exe, &data) {
+    if let Err(e) = crate::safefs::write_atomic(Path::new(&exe), &data) {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             return json!({"ok": false, "needs_admin": true, "error": format!("no permission to modify {exe}. Run ACECM as administrator once — Drive talks to the menu on :{port}, and stock EVO leaves that inspector off")});
         }
@@ -376,6 +393,11 @@ struct Child {
 
 static PROCS: Mutex<Option<HashMap<String, Child>>> = Mutex::new(None);
 pub const CONTROL: &str = "http://127.0.0.1:8093";
+
+/// A control-port request with the per-launch secret the proxy was given.
+fn ctl(r: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
+    r.header(crate::lobbyproxy::CONTROL_SECRET_HEADER, crate::lobbyproxy::control_secret())
+}
 const MODES: &[(&str, &str)] = &[("proxy", "acevo_proxy"), ("standalone", "acevo_backend")];
 
 fn tool_name(mode: &str) -> Option<&'static str> {
@@ -416,10 +438,19 @@ fn is_descendant(pid: u32, ancestor: u32) -> bool {
 
 /// An ACECM backend from a PREVIOUS session still holding the port,
 /// identified by COMMAND LINE (the exe may be "ACECM(3).exe").
-fn orphan_on_port() -> Option<u32> {
+/// Listeners on `port` that are OUR proxy/backend (by command line).
+pub fn ours_on_port(port: u16) -> Vec<u32> {
     let me = std::process::id();
-    procs::tcp_listen_pids(backend_port()).into_iter().filter(|p| *p != me)
-        .find(|p| { let c = procs::cmdline(*p); MODES.iter().any(|(_, t)| c.contains(t)) })
+    procs::tcp_listen_pids(port).into_iter().filter(|p| *p != me)
+        .filter(|p| is_ours_cmdline(&procs::cmdline(*p))).collect()
+}
+
+fn is_ours_cmdline(c: &str) -> bool {
+    MODES.iter().any(|(_, t)| c.contains(t))
+}
+
+fn orphan_on_port() -> Option<u32> {
+    ours_on_port(backend_port()).into_iter().next()
 }
 
 pub fn stop() -> Value {
@@ -500,6 +531,8 @@ pub fn start(mode: &str) -> Value {
         .env("PYTHONUNBUFFERED", "1")
         // it goes with us, even when we are killed rather than closed
         .env("ACECM_PARENT_PID", std::process::id().to_string())
+        // the control port (8093) answers only callers holding this secret
+        .env(crate::lobbyproxy::CONTROL_SECRET_ENV, crate::lobbyproxy::control_secret())
         .stderr(match log.try_clone() { Ok(l) => l, Err(e) => return json!({"ok": false, "error": format!("cannot open the backend log: {e}")}) })
         .stdout(log);
     if !lan.is_empty() {
@@ -604,7 +637,7 @@ pub fn join_state() -> Value {
         return json!({"control": false, "error": "proxy not listening", "hint": "start the proxy backend to enable direct join"});
     }
     let got = reqwest::blocking::Client::builder().timeout(Duration::from_millis(400)).build().ok()
-        .and_then(|c| c.get(format!("{CONTROL}/")).send().ok())
+        .and_then(|c| ctl(c.get(format!("{CONTROL}/"))).send().ok())
         .and_then(|r| r.text().ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok());
     match got {
         Some(Value::Object(mut m)) => {
@@ -675,7 +708,7 @@ pub fn join(server_id: &Value, shape: &str, tcp: Value, udp: Value, password: &s
     let udp = if udp.is_null() || udp == json!(0) { tcp.clone() } else { udp };
     let body = json!({"id": server_id, "shape": shape, "tcp": tcp, "udp": udp, "password": password});
     let r = reqwest::blocking::Client::builder().timeout(Duration::from_secs(8)).build().ok()
-        .map(|c| c.post(format!("{CONTROL}/join")).header("Content-Type", "application/json")
+        .map(|c| ctl(c.post(format!("{CONTROL}/join"))).header("Content-Type", "application/json")
             .body(profiles::py_dumps(&body)).send());
     match r {
         Some(Ok(resp)) => resp.text().ok().and_then(|t| serde_json::from_str(&t).ok())
@@ -818,7 +851,7 @@ pub fn server_list() -> Value {
     let cache = list_cache();
     if !procs::tcp_listen_pids(8093).is_empty() {
         let got = reqwest::blocking::Client::builder().timeout(Duration::from_millis(1500)).build().ok()
-            .and_then(|c| c.get(format!("{CONTROL}/servers")).send().ok())
+            .and_then(|c| ctl(c.get(format!("{CONTROL}/servers"))).send().ok())
             .and_then(|r| r.text().ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok());
         if let Some(Value::Object(mut g)) = got {
             let live = g.get("servers").and_then(|s| s.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
@@ -853,5 +886,32 @@ pub fn server_list() -> Value {
         }
         _ => json!({"ok": false, "error": "FileNotFoundError",
                     "hint": "start the proxy backend, then open Multiplayer in-game once so the list passes through - after that it is remembered and usable with the game closed"}),
+    }
+}
+
+#[cfg(test)]
+mod fix_tests {
+    use super::*;
+
+    #[test]
+    fn finds_a_local_url_on_any_port() {
+        let slot = |url: &str| { let mut d = vec![0x41u8; 100]; let mut u = url.as_bytes().to_vec(); u.resize(KUNOS_CLIENT_URL.len(), 0); d.extend(u); d.extend([0x42u8; 50]); d };
+        for u in ["wss://127.0.0.1:448/communicationNode/dev", "wss://127.0.0.1:12345/communicationNode/dev",
+                  "wss://localhost:9000/communicationNode/dev"] {
+            assert_eq!(find_url_slot(&slot(u)), Some((100, "local")), "{u}");
+        }
+        assert_eq!(find_url_slot(&slot("wss://127.0.0.1:/communicationNode/dev")), None);
+        assert_eq!(find_url_slot(&slot("wss://127.0.0.1:448/other")), None);
+        let mut k = vec![0u8; 10];
+        k.extend(KUNOS_CLIENT_URL);
+        assert_eq!(find_url_slot(&k), Some((10, "kunos")));
+    }
+
+    #[test]
+    fn only_our_helpers_count_as_ours() {
+        assert!(is_ours_cmdline(r#""C:\x\ACECM.exe" --tool acevo_proxy"#));
+        assert!(is_ours_cmdline("acecm --tool acevo_backend --port 448"));
+        assert!(!is_ours_cmdline(r#""C:\dev\node.exe" server.js --port 448"#));
+        assert!(!is_ours_cmdline(""));
     }
 }

@@ -29,8 +29,8 @@
 const $ = (s, r) => (r || document).querySelector(s);
 const el = (t, c, h) => { const e = document.createElement(t);
   if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
-const esc = s => String(s ?? '').replace(/[&<>"]/g,
-  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* Admin token, for an ACECM being managed from another machine.
    Taken from ?token=... the first time (so a pasted link just works), then
@@ -280,7 +280,7 @@ async function installUpdate(ver) {
   if (!await ask(`Download and install ACECM ${ver}? It is checked against the release signature first, then ACECM restarts.`, 'Update')) return;
   _updBusy = true;
   toast('Downloading ACECM ' + ver + '…');
-  const r = await api('update/apply', {});
+  const r = await apiLong('update/apply', {});
   _updBusy = false;
   if (!r.ok) { toast(r.error || 'Update failed', true); return; }
   toast('Installed - restarting');

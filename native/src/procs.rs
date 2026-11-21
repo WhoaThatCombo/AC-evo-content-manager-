@@ -181,6 +181,53 @@ mod imp {
         ok.then_some(pmc.WorkingSetSize as u64)
     }
 
+    /// A process held open by HANDLE, so its pid cannot be reused while we
+    /// watch it (a bare pid can name another process after it exits).
+    pub struct Held {
+        h: HANDLE,
+        pub pid: u32,
+    }
+
+    // the handle is a kernel object reference, usable from any thread
+    unsafe impl Send for Held {}
+
+    impl Held {
+        pub fn open(pid: u32) -> Option<Held> {
+            use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+            let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
+            if h.is_null() { None } else { Some(Held { h, pid }) }
+        }
+
+        pub fn alive(&self) -> bool {
+            let mut code = 0u32;
+            unsafe { GetExitCodeProcess(self.h, &mut code) != 0 && code == 259 }
+        }
+
+        /// Private commit (what the process has reserved in RAM + pagefile)
+        /// - unlike the working set, NOT capped by physical memory.
+        pub fn commit(&self) -> Option<u64> {
+            use windows_sys::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX;
+            let mut pmc: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+            pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+            let ok = unsafe { K32GetProcessMemoryInfo(self.h, &mut pmc as *mut _ as *mut PROCESS_MEMORY_COUNTERS, pmc.cb) } != 0;
+            ok.then_some(pmc.PrivateUsage as u64)
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.h) };
+        }
+    }
+
+    /// Installed physical memory in bytes.
+    pub fn physical_ram() -> Option<u64> {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then_some(m.ullTotalPhys)
+    }
+
     /// PIDs with a TCP (IPv4) LISTEN socket on `port`.
     pub fn tcp_listen_pids(port: u16) -> Vec<u32> {
         let mut size = 0u32;
@@ -234,11 +281,16 @@ fn norm(name: &str) -> String {
     if n.ends_with(".exe") { n } else { n + ".exe" }
 }
 
+/// Does exe name `exe` equal one of `names` (with or without .exe)?
+/// Exact, never a prefix: "AssettoCorsaEVO" must not match the server.
+pub fn name_matches(names: &[&str], exe: &str) -> bool {
+    let e = exe.to_ascii_lowercase();
+    names.iter().any(|n| norm(n) == e)
+}
+
 /// PIDs whose exe name matches any of `names` (with or without .exe).
 pub fn pids_named(names: &[&str]) -> Vec<u32> {
-    let want: Vec<String> = names.iter().map(|n| norm(n)).collect();
-    snapshot().into_iter().filter(|p| want.contains(&p.name.to_ascii_lowercase()))
-        .map(|p| p.pid).collect()
+    snapshot().into_iter().filter(|p| name_matches(names, &p.name)).map(|p| p.pid).collect()
 }
 
 /// PIDs whose exe name STARTS with any prefix (AssettoCorsaEVOServer*).
@@ -285,6 +337,24 @@ pub fn game_running() -> bool {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_name_never_matches_the_server() {
+        let game = ["AssettoCorsaEVO"];
+        assert!(name_matches(&game, "AssettoCorsaEVO.exe"));
+        assert!(name_matches(&game, "assettocorsaevo.EXE"));
+        assert!(!name_matches(&game, "AssettoCorsaEVOServer.exe"));
+        assert!(!name_matches(&game, "AssettoCorsaEVOServer.stock.exe"));
+        assert!(name_matches(&["AssettoCorsaEVOServer", "AssettoCorsaEVOServer.stock"], "AssettoCorsaEVOServer.stock.exe"));
+    }
+
+    #[test]
+    fn holds_and_measures_a_process() {
+        let me = Held::open(std::process::id()).unwrap();
+        assert!(me.alive());
+        assert!(me.commit().unwrap_or(0) > 0);
+        assert!(physical_ram().unwrap_or(0) > (1 << 30));
+    }
 
     #[test]
     fn sees_itself() {

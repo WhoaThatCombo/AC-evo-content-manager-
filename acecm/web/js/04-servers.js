@@ -170,7 +170,8 @@ async function serversPage() {
         toast(r.error || 'Could not start', true);
         return;
       }
-      toast('Starting — this takes about 30 seconds');
+      // a start that could not apply this profile's damage % says so
+      toast(r.warning ? 'Starting — but ' + r.warning : 'Starting — this takes about 30 seconds', !!r.warning);
       // the live feed hands the button back the moment the server is up
       // (paintServerPills); this is only the backstop if it never comes up
       start._tick = tick;
@@ -954,7 +955,9 @@ function editor(prof, trk, opts, extra) {
   const row = el('div', 'row');
   const save = el('button', 'primary', 'Save');
   save.onclick = async () => {
-    await api('profiles/save', prof); editing = null; toast('Saved'); serversPage();
+    const r = await api('profiles/save', prof);
+    if (!r || r.ok === false || r.error) return; // not saved: api() showed why
+    editing = null; toast('Saved'); serversPage();
   };
   const cancel = el('button', null, 'Cancel');
   cancel.onclick = () => { editing = null; serversPage(); };

@@ -192,7 +192,15 @@ pub fn apply(p: &Value, force: bool) -> Value {
     if writes.iter().any(|(off, new)| off + new.len() > data.len()) {
         return json!({"ok": false, "error": "a site writes past the end of the file"});
     }
-    if let Err(e) = crate::safefs::backup_once(Path::new(&target), Path::new(&bak)) {
+    // ⚠ the file is clean here, so a backup that differs from it belongs to
+    // an older build: replace it, or Restore would downgrade the exe
+    let stale = Path::new(&bak).is_file() && std::fs::read(&bak).map(|b| b != pe.data).unwrap_or(true);
+    let made = if stale {
+        crate::safefs::copy_atomic(Path::new(&target), Path::new(&bak)).map(|_| true)
+    } else {
+        crate::safefs::backup_once(Path::new(&target), Path::new(&bak))
+    };
+    if let Err(e) = made {
         return json!({"ok": false, "error": e.to_string()});
     }
     let n = writes.len();
@@ -203,6 +211,22 @@ pub fn apply(p: &Value, force: bool) -> Value {
         return json!({"ok": false, "error": e.to_string()});
     }
     json!({"ok": true, "backup": bak, "sites": n})
+}
+
+/// Does `bak` with the patch applied equal the current `target`?
+fn backup_is_this_build(p: &Value, bak: &str, target: &str) -> bool {
+    let (Ok(pe), Ok(mut b)) = (Pe::open(target), std::fs::read(bak)) else { return false };
+    if b.len() != pe.data.len() {
+        return false;
+    }
+    for s in p.get("sites").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        let (Some(off), Ok(new)) = (site_off(&pe, &s), unhex(&sv(&s, "write"))) else { return false };
+        if off + new.len() > b.len() {
+            return false;
+        }
+        b[off..off + new.len()].copy_from_slice(&new);
+    }
+    b == pe.data
 }
 
 pub fn restore(p: &Value) -> Value {
@@ -218,13 +242,15 @@ pub fn restore(p: &Value) -> Value {
     if state != "applied" && Path::new(&bak).is_file() {
         return json!({"ok": false, "error": "the file has changed since the patch was applied (a game update?), so its backup is out of date - nothing was restored"});
     }
-    if Path::new(&bak).is_file() {
+    // the backup only when patching it gives exactly the current file (it
+    // is this build's original); otherwise the expected bytes go back
+    if Path::new(&bak).is_file() && backup_is_this_build(p, &bak, &target) {
         return match crate::safefs::copy_atomic(Path::new(&bak), Path::new(&target)) {
             Ok(_) => json!({"ok": true, "restored_from": bak}),
             Err(e) => json!({"ok": false, "error": e.to_string()}),
         };
     }
-    // no backup: put the expected bytes back, which is equally correct
+    // no (usable) backup: put the expected bytes back, which is equally correct
     let Ok(pe) = Pe::open(&target) else { return json!({"ok": false, "error": "target not found"}) };
     let mut data = pe.data.clone();
     let mut n = 0;

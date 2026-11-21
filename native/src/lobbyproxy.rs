@@ -2,7 +2,9 @@
 //! of acevo_backend.py and join_push.py). Run as its own process:
 //! `acecm --tool acevo_proxy`, exactly where the Python one ran.
 //!
-//!     game --TLS ws--> this proxy :448 --TLS ws--> wss://b.gk.sd:6990/...
+//! ```text
+//! game --TLS ws--> this proxy :448 --TLS ws--> wss://b.gk.sd:6990/...
+//! ```
 //!
 //! Everything is relayed untouched (account, garage, the genuine browser),
 //! except:
@@ -587,6 +589,72 @@ fn build_join(target: &str, shape: &str, tcp: Option<i64>, udp: Option<i64>, pas
     Some((wrap(&cmds, "MultiplayerServerListCommands"), url))
 }
 
+/// The join URL with its password blanked, for logs and replies (the proxy
+/// log is readable through /api/backend/log and ends up in bug reports).
+fn redact_join(url: &str) -> String {
+    match url.split_once('|') {
+        Some((head, rest)) => {
+            let tail = rest.split_once(' ').map(|(_, t)| format!(" {t}")).unwrap_or_default();
+            format!("{head}|***{tail}")
+        }
+        None => url.to_string(),
+    }
+}
+
+/// Env var the parent puts the control port's per-launch secret in.
+pub const CONTROL_SECRET_ENV: &str = "ACECM_CONTROL_SECRET";
+/// Header a control-port caller sends it in.
+pub const CONTROL_SECRET_HEADER: &str = "x-acecm-control";
+
+/// The per-launch secret for the control port, made once per process. The
+/// parent passes it to the proxy (CONTROL_SECRET_ENV) and sends it with
+/// every control request (CONTROL_SECRET_HEADER).
+pub fn control_secret() -> String {
+    static S: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        let mut b = [0u8; 24];
+        let _ = getrandom::fill(&mut b);
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }).clone()
+}
+
+/// ⚠ The control port is on loopback, so any WEB PAGE could reach it (a
+/// no-cors POST /join sent the player to the page's server; DNS rebinding
+/// read /servers). Our own callers never send an Origin and always name
+/// loopback in Host; when the parent gave this process a secret, it must be
+/// presented too.
+pub fn control_ok(h: &axum::http::HeaderMap, secret: Option<&str>) -> bool {
+    let hv = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_ascii_lowercase();
+    if h.contains_key("origin") || !hv("sec-fetch-site").is_empty() {
+        return false;
+    }
+    let host = hv("host");
+    let name = if host.starts_with('[') {
+        format!("{}]", host.split(']').next().unwrap_or(""))
+    } else {
+        host.rsplit_once(':').map(|(n, _)| n.to_string()).unwrap_or(host.clone())
+    };
+    if !["127.0.0.1", "localhost", "[::1]"].contains(&name.as_str()) {
+        return false;
+    }
+    match secret.filter(|s| !s.is_empty()) {
+        Some(s) => {
+            let got = h.get(CONTROL_SECRET_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
+            got.len() == s.len() && got.bytes().zip(s.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0
+        }
+        None => true,
+    }
+}
+
+async fn control_gate(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let secret = std::env::var(CONTROL_SECRET_ENV).ok();
+    if !control_ok(req.headers(), secret.as_deref()) {
+        return (axum::http::StatusCode::FORBIDDEN, axum::Json(json!({"ok": false, "error": "forbidden"}))).into_response();
+    }
+    next.run(req).await
+}
+
 fn jnum(v: Option<&Value>) -> Option<i64> {
     match v { Some(Value::Number(n)) => n.as_i64(), Some(Value::String(s)) => s.parse().ok(), _ => None }
 }
@@ -615,6 +683,7 @@ async fn control(sh: Arc<Shared>, port: u16) {
             let pw = b.get("password").and_then(|v| v.as_str()).unwrap_or("").to_string();
             match build_join(&sid, &shape, tcp, udp, &pw) {
                 Some((raw, url)) => {
+                    let url = redact_join(&url);
                     println!("  PUSH go_to_server [{shape}] {}B -> {url}", raw.len());
                     let n = raw.len();
                     let _ = tx.send(Message::Binary(raw.into()));
@@ -628,7 +697,8 @@ async fn control(sh: Arc<Shared>, port: u16) {
             let path = std::path::absolute(lobby_json()).unwrap_or(lobby_json());
             axum::Json(json!({"lobby": path.to_string_lossy(), "client_connected": sh.client.lock().unwrap().is_some(),
                               "stats": sh.stats.lock().unwrap().clone(), "servers_captured": list.len(), "servers_at": at}))
-        }}));
+        }}))
+        .layer(axum::middleware::from_fn(control_gate));
     match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(l) => { println!("control: http://127.0.0.1:{port}/  (POST /join {{\"id\":...}})"); let _ = axum::serve(l, app).await; }
         Err(e) => println!("control port {port}: {e}"),
@@ -664,4 +734,45 @@ pub fn run() -> i32 {
             tokio::spawn(handle(sh.clone(), tcp, peer, acceptor.clone(), upstream.clone()));
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn hdrs(kv: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in kv {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn control_port_gate() {
+        // ACECM itself (reqwest: no Origin, loopback Host)
+        assert!(control_ok(&hdrs(&[("host", "127.0.0.1:8093")]), None));
+        // a web page: no-cors POST carries an Origin
+        assert!(!control_ok(&hdrs(&[("host", "127.0.0.1:8093"), ("origin", "https://evil.example")]), None));
+        assert!(!control_ok(&hdrs(&[("host", "127.0.0.1:8093"), ("sec-fetch-site", "cross-site")]), None));
+        // DNS rebinding: a foreign Host
+        assert!(!control_ok(&hdrs(&[("host", "evil.example:8093")]), None));
+        // with a per-launch secret it must be presented
+        assert!(!control_ok(&hdrs(&[("host", "127.0.0.1:8093")]), Some("s3cret")));
+        assert!(!control_ok(&hdrs(&[("host", "127.0.0.1:8093"), (CONTROL_SECRET_HEADER, "wrong!")]), Some("s3cret")));
+        assert!(control_ok(&hdrs(&[("host", "127.0.0.1:8093"), (CONTROL_SECRET_HEADER, "s3cret")]), Some("s3cret")));
+        assert_eq!(control_secret(), control_secret());
+        assert_eq!(control_secret().len(), 48);
+    }
+
+    #[test]
+    fn join_password_redacted() {
+        let u = join_url("1.2.3.4", Some(9700), Some(9701), "hunter2");
+        assert!(u.contains("hunter2"));
+        let r = redact_join(&u);
+        assert!(!r.contains("hunter2"));
+        assert_eq!(r, "join:1.2.3.4:9700|*** :9701");
+        assert_eq!(redact_join("join:1.2.3.4:9700 :9700"), "join:1.2.3.4:9700 :9700");
+    }
 }

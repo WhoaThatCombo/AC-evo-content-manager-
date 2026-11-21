@@ -314,7 +314,7 @@ pub fn launch_game(extra_args: &[String]) -> Value {
     let mut cmd: Vec<String> = Vec::new();
     let mut argv_full = vec![format!("-backend={url}"), format!("--backend={url}")];
     argv_full.extend(extra.iter().cloned());
-    if truthy(cfg.get("direct_launch_refused")) {
+    if refusal_holds(cfg.get("direct_launch_refused"), &exe_stamp(&exe), now_secs()) {
         tried_direct = json!("skipped (refused before)");
     } else if want_flags && !is_elevated() {
         setenv(&mut env, "SteamAppId", &appid);
@@ -343,9 +343,9 @@ pub fn launch_game(extra_args: &[String]) -> Value {
         if via.is_empty() {
             // ⚠ only a REFUSAL is a fact about this machine worth keeping
             if !launch_error {
-                let _ = config::save(&json!({"direct_launch_refused": true}));
+                let _ = config::save(&json!({"direct_launch_refused": format!("{}|{}", now_secs(), exe_stamp(&exe))}));
             }
-            logs::info(format!("direct launch {} - falling back to Steam, and not trying again (flags will not reach the game)",
+            logs::info(format!("direct launch {} - falling back to Steam, and not trying again for a day or until the game updates (flags will not reach the game)",
                 tried_direct.as_str().unwrap_or("")));
         }
     }
@@ -378,4 +378,44 @@ pub fn launch_game(extra_args: &[String]) -> Value {
            "flags_delivered": via == "exe",
            "direct_launch": tried_direct,
            "flags_env": flags_env})
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Size + mtime of the game exe: a game update changes it.
+fn exe_stamp(exe: &str) -> String {
+    std::fs::metadata(exe).map(|m| {
+        let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+        format!("{}:{t}", m.len())
+    }).unwrap_or_default()
+}
+
+/// Is a recorded direct-launch refusal still in force? It is stored as
+/// "<unix secs>|<exe stamp>" and lapses after a day or when the exe
+/// changes. ⚠ One early exit (a crash, Steam logged out) used to switch
+/// direct launch off for good; the old plain `true` is treated as lapsed.
+fn refusal_holds(v: Option<&Value>, stamp: &str, now: u64) -> bool {
+    let Some(s) = v.and_then(|v| v.as_str()) else { return false };
+    let Some((at, exe)) = s.split_once('|') else { return false };
+    let Ok(at) = at.parse::<u64>() else { return false };
+    exe == stamp && now.saturating_sub(at) < 24 * 3600
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_lapses() {
+        let now = 1_000_000;
+        let v = json!(format!("{}|5:7", now - 60));
+        assert!(refusal_holds(Some(&v), "5:7", now));
+        assert!(!refusal_holds(Some(&v), "6:9", now), "a new exe tries again");
+        assert!(!refusal_holds(Some(&v), "5:7", now + 2 * 24 * 3600), "a day later tries again");
+        assert!(!refusal_holds(Some(&json!(true)), "5:7", now), "the old sticky flag lapses");
+        assert!(!refusal_holds(Some(&json!(false)), "5:7", now));
+        assert!(!refusal_holds(None, "5:7", now));
+    }
 }

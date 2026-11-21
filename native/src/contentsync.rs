@@ -118,16 +118,27 @@ pub fn destination(rel: &str) -> Result<PathBuf, String> {
 }
 
 // ------------------------------------------------------------------ http --
+// ⚠ no redirects: a content host must not bounce our GETs to addresses of
+// its choosing (other machines on the joiner's network)
 fn client(timeout: f64) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder().timeout(Duration::from_secs_f64(timeout))
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent("ACECM").build().unwrap()
 }
+
+/// The most JSON a host's answer may be (a manifest of a big track is a few MB).
+const MAX_JSON: u64 = 64 << 20;
 
 /// GET JSON, keeping the host's own words when it fails.
 pub fn get_json(url: &str, timeout: f64) -> Result<Value, String> {
     let r = client(timeout).get(url).send().map_err(|e| format!("<urlopen error {e}>"))?;
     let code = r.status().as_u16();
-    let body = r.text().map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    r.take(MAX_JSON + 1).read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    if raw.len() as u64 > MAX_JSON {
+        return Err(format!("the host's answer is larger than {} MB - refused", MAX_JSON >> 20));
+    }
+    let body = String::from_utf8_lossy(&raw).into_owned();
     if code >= 400 {
         let detail = match serde_json::from_str::<Value>(&body) {
             Ok(v) => { let e = sv(&v, "error"); if e.is_empty() { sv(&v, "detail") } else { e } }
@@ -444,6 +455,71 @@ fn stale_files(man: &Value) -> Vec<String> {
     out
 }
 
+// -------------------------------------------------------------- receipts --
+// ⚠ A manifest is the HOST's word, and a host can name any mod or track.
+// So a host may only delete or overwrite files that an earlier sync from
+// that SAME host put here (its receipt). Anything else already on disk - a
+// mod from a zip, a track from another server - is left alone unless the
+// user saw it listed in the confirmation and said yes (`approve`).
+
+static RECEIPT_LOCK: Mutex<()> = Mutex::new(());
+/// (host, paths) the user approved replacing / deleting in the last
+/// confirmation - for that host only.
+static APPROVED: Mutex<Option<(String, Vec<String>)>> = Mutex::new(None);
+
+fn receipts_path() -> PathBuf {
+    crate::paths::data().join("content_receipts.json")
+}
+
+/// `host:port` of a base URL, lower case: whose receipt it is.
+pub fn host_key(base: &str) -> String {
+    base[base.find("://").map(|i| i + 3).unwrap_or(0)..].split(['/', '?', '#']).next().unwrap_or("").to_lowercase()
+}
+
+fn pkey(p: &Path) -> String {
+    normalize(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())).to_string_lossy().to_lowercase()
+}
+
+fn read_receipts() -> Map<String, Value> {
+    std::fs::read(receipts_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// The files a sync from `host` installed here.
+fn receipt(host: &str) -> HashSet<String> {
+    read_receipts().get(host).and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+/// Remember that `host` installed `paths`.
+fn add_receipt(host: &str, paths: &[PathBuf]) {
+    if host.is_empty() || paths.is_empty() {
+        return;
+    }
+    let _g = RECEIPT_LOCK.lock().unwrap();
+    let mut all = read_receipts();
+    let mut set: std::collections::BTreeSet<String> = all.get(host).and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    set.extend(paths.iter().map(|p| pkey(p)));
+    all.insert(host.to_string(), json!(set));
+    let _ = std::fs::create_dir_all(crate::paths::data());
+    if let Err(e) = std::fs::write(receipts_path(), serde_json::to_vec(&Value::Object(all)).unwrap_or_default()) {
+        logs::warn(format!("could not save the content receipt: {e}"));
+    }
+}
+
+/// The paths the user just approved `base` replacing or deleting (the
+/// install request's `confirm` list); replaces any earlier approval.
+pub fn approve(base: &str, paths: &[String]) {
+    *APPROVED.lock().unwrap() = Some((host_key(base), paths.iter().map(|p| pkey(Path::new(p))).collect()));
+}
+
+fn approved(host: &str) -> HashSet<String> {
+    match APPROVED.lock().unwrap().as_ref() {
+        Some((h, v)) if h == host => v.iter().cloned().collect(),
+        _ => HashSet::new(),
+    }
+}
+
 /// Delete files stale_files() named. Never anything outside the tracks folder.
 pub fn remove_stale(paths: &[String]) -> Value {
     let root = normalize(&std::path::absolute(tracks_dir()).unwrap_or_default());
@@ -521,6 +597,10 @@ pub fn plan(base: &str, server_id: &str) -> Value {
     }
     let (mut need, mut have) = (Vec::new(), 0usize);
     let mut bytes: u64 = 0;
+    // what this host may touch without asking (see the receipts above)
+    let (mine, ok_by_user) = { let hk = host_key(base); (receipt(&hk), approved(&hk)) };
+    let allowed = |p: &Path| { let k = pkey(p); mine.contains(&k) || ok_by_user.contains(&k) };
+    let (mut replace, mut confirm_replace) = (Vec::new(), Vec::new());
     for f in man.get("files").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
         let path = sv(&f, "path");
         let (Ok(dest), Ok(url)) = (destination(&path), registry_file_url(base, server_id, &path)) else { continue };
@@ -530,7 +610,13 @@ pub fn plan(base: &str, server_id: &str) -> Value {
             && (sha.is_empty() || registry::file_digest(&dest).as_deref() == Some(sha.as_str()));
         if same {
             have += 1;
+        } else if dest.exists() && !allowed(&dest) {
+            // someone else's file: only with the user's explicit yes
+            confirm_replace.push(dest.to_string_lossy().into_owned());
         } else {
+            if dest.exists() {
+                replace.push(dest.to_string_lossy().into_owned());
+            }
             bytes += size.unwrap_or(0);
             let mut e = f.as_object().cloned().unwrap_or_default();
             e.insert("dest".into(), json!(dest.to_string_lossy()));
@@ -545,12 +631,17 @@ pub fn plan(base: &str, server_id: &str) -> Value {
     let saved: i64 = acemods.iter().map(|a| a.get("raw_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as i64
         - a.get("size").and_then(|v| v.as_u64()).unwrap_or(0) as i64).sum();
     let download = (bytes as i64 - saved.max(0)).max(0) as u64;
+    let (stale, confirm_remove): (Vec<String>, Vec<String>) = stale_files(&man).into_iter().partition(|p| allowed(Path::new(p)));
     json!({"ok": true, "server": man.get("server").cloned().unwrap_or(json!({})),
            "need": need, "have": have,
            "acemods": acemods, "download_bytes": download,
            "needs_register": unregistered_tracks(&man),
            "bytes": bytes,
-           "stale": stale_files(&man),
+           // deleted / overwritten (this host installed them, or the user said yes)
+           "stale": stale, "replace": replace,
+           // would be overwritten / deleted, but were not installed by this
+           // host: skipped unless the install request lists them in `confirm`
+           "confirm_replace": confirm_replace, "confirm_remove": confirm_remove,
            "missing_on_host": man.get("missing_locally").filter(|v| !v.is_null()).cloned().unwrap_or(json!([]))})
 }
 
@@ -678,7 +769,10 @@ pub fn fetch(entry: &Value, progress: Option<Progress>) -> Result<PathBuf, Strin
         std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
     }
     let tmp = PathBuf::from(format!("{}.part", dest.display()));
-    let size = entry.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    // ⚠ the declared size is the cap: an entry without one is refused
+    // (it would otherwise stream until the disk is full)
+    let size = entry.get("size").and_then(|v| v.as_u64())
+        .ok_or_else(|| format!("{}: the host did not declare its size", sv(entry, "path")))?;
     let url = sv(entry, "url");
     if !url.contains("/api/registry/file") {
         return Err("refusing a content URL that is not this host's share".into());
@@ -699,7 +793,7 @@ pub fn fetch(entry: &Value, progress: Option<Progress>) -> Result<PathBuf, Strin
         done += n as u64;
         // ⚠ never more than the manifest declared (a hostile host could
         // otherwise stream until the disk is full)
-        if size > 0 && done > size {
+        if done > size {
             drop(f);
             return Err(fail(format!("{} is larger than the host declared", sv(entry, "path"))));
         }
@@ -709,7 +803,7 @@ pub fn fetch(entry: &Value, progress: Option<Progress>) -> Result<PathBuf, Strin
         }
     }
     drop(f);
-    if size > 0 && done != size {
+    if done != size {
         return Err(fail(format!("{} arrived incomplete ({done} of {size} bytes)", sv(entry, "path"))));
     }
     digest_check(&tmp, entry)?;
@@ -756,7 +850,8 @@ pub fn fetch_track_pack(base: &str, sid: &str, folder: &str, files: &[Value], pr
     let netloc = base[base.find("://").map(|i| i + 3).unwrap_or(0)..].split(['/', '?', '#']).next().unwrap_or("").to_string();
     let url = format!("{}://{netloc}/api/registry/pack?id={}&track={}", u.scheme(), quote(sid), quote(&folder));
     let dest_dir = under(&tracks_dir(), &[&folder])?;
-    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    // only the tracks folder: the track folder itself appears on swap_in
+    std::fs::create_dir_all(dest_dir.parent().unwrap_or(&dest_dir)).map_err(|e| e.to_string())?;
     let tmp = PathBuf::from(format!("{}.tar.part", dest_dir.to_string_lossy().trim_end_matches(['\\', '/'])));
     // ⚠ one byte first: settles 404, the real total and the checksum without
     // committing to a gigabyte down one connection
@@ -775,6 +870,11 @@ pub fn fetch_track_pack(base: &str, sid: &str, folder: &str, files: &[Value], pr
         }
     }
     drop(pr);
+    // the host's declared total must fit (a pack is written in full before
+    // the extraction budget is checked)
+    if let Some(why) = (total > 0).then(|| crate::install::room_for(&tmp, total)).flatten() {
+        return Err(why);
+    }
     let mut ranged_ok = false;
     if total >= RANGED_MIN {
         match ranged_to_file(&url, total, &tmp, progress, RANGED_PARTS) {
@@ -791,7 +891,16 @@ pub fn fetch_track_pack(base: &str, sid: &str, folder: &str, files: &[Value], pr
             return Err(format!("HTTP Error {}", r.status().as_u16()));
         }
         want = r.headers().get("X-ACECM-SHA256").and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_string();
-        let len = r.content_length().unwrap_or(0);
+        // ⚠ the cap: the length the host declared (body or the probe's
+        // Content-Range). A pack of unknown length is not streamed to disk -
+        // the per-file path, where every file has a declared size, takes over.
+        let len = r.content_length().filter(|&l| l > 0).unwrap_or(total);
+        if len == 0 {
+            return Err("404".into());
+        }
+        if let Some(why) = crate::install::room_for(&tmp, len) {
+            return Err(why);
+        }
         let res = (|| -> Result<(), String> {
             let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
             let mut buf = vec![0u8; READ_CHUNK];
@@ -801,11 +910,17 @@ pub fn fetch_track_pack(base: &str, sid: &str, folder: &str, files: &[Value], pr
                 if n == 0 {
                     break;
                 }
-                f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
                 done += n as u64;
+                if done > len {
+                    return Err(format!("the pack for {folder} is larger than the host declared"));
+                }
+                f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
                 if let Some(p) = progress {
                     p(done, len);
                 }
+            }
+            if done != len {
+                return Err(format!("the pack for {folder} arrived incomplete ({done} of {len} bytes)"));
             }
             Ok(())
         })();
@@ -824,19 +939,29 @@ pub fn fetch_track_pack(base: &str, sid: &str, folder: &str, files: &[Value], pr
         return Err(sv(&bad, "error"));
     }
     // ⚠ this path never goes through destination(): the same two guards -
-    // containment and the content-type allowlist - are applied per member
-    let ex = crate::install::extract_tar_safe(&tmp, &dest_dir, &folder);
+    // containment and the content-type allowlist - are applied per member.
+    // Unpacked into a staging folder and swapped in whole, so a failed or
+    // short pack never leaves a half-replaced track behind.
+    let st = match crate::install::staging_dir(&tracks_dir()) {
+        Ok(st) => st,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    let ex = crate::install::extract_tar_safe(&tmp, &st, &folder);
     let _ = std::fs::remove_file(&tmp);
-    ex?;
-    if !files.is_empty() {
+    let checked = ex.and_then(|_| {
         let missing = files.iter().filter(|f| {
             let d = sv(f, "dest");
             let p = if d.is_empty() { destination(&sv(f, "path")).unwrap_or_default() } else { PathBuf::from(d) };
-            !p.is_file()
+            p.strip_prefix(&dest_dir).map(|rel| !st.join(rel).is_file()).unwrap_or(false)
         }).count();
-        if missing > 0 {
-            return Err(format!("pack for {folder} missed {missing} file(s)"));
-        }
+        if missing > 0 { Err(format!("pack for {folder} missed {missing} file(s)")) } else { Ok(()) }
+    });
+    if let Err(e) = checked.and_then(|_| crate::install::swap_in(&st, &dest_dir)) {
+        let _ = std::fs::remove_dir_all(&st);
+        return Err(e);
     }
     Ok(dest_dir)
 }
@@ -878,6 +1003,20 @@ pub fn install_files(need: &[Value], status: &Mutex<Map<String, Value>>, registe
 /// again; a package that fails leaves its files to the normal path.
 pub fn install_files_with(need: &[Value], acemods: &[Value], status: &Mutex<Map<String, Value>>, register: &[String]) -> Vec<String> {
     let set = |k: &str, v: Value| { status.lock().unwrap().insert(k.into(), v); };
+    // manifest path -> (destination, host): what goes in the receipts after
+    let where_to: Vec<(String, PathBuf, String)> = need.iter()
+        .filter_map(|e| Some((sv(e, "path"), entry_dest(e).ok()?, host_key(&entry_base(e))))).collect();
+    let record = |installed: &[String]| {
+        let mut by_host: BTreeMap<&str, Vec<PathBuf>> = BTreeMap::new();
+        for (rel, dest, host) in &where_to {
+            if installed.contains(rel) {
+                by_host.entry(host.as_str()).or_default().push(dest.clone());
+            }
+        }
+        for (host, paths) in by_host {
+            add_receipt(host, &paths);
+        }
+    };
     let mut need: Vec<Value> = need.to_vec();
     let mut register: Vec<String> = register.to_vec();
     let mut moved: u64 = 0;
@@ -935,12 +1074,18 @@ pub fn install_files_with(need: &[Value], acemods: &[Value], status: &Mutex<Map<
     for (folder, files) in &tracks {
         let (sid, base) = (entry_sid(&files[0]), entry_base(&files[0]));
         let mut packed = false;
-        if !sid.is_empty() && !base.is_empty() && files.len() >= 8 {
+        // ⚠ a pack unpacks the host's WHOLE track folder: only over files this
+        // host installed (or the user approved); otherwise file by file, which
+        // touches only what the plan listed
+        if !sid.is_empty() && !base.is_empty() && files.len() >= 8 && pack_may_overwrite(folder, &host_key(&base)) {
             set("detail", json!(format!("track pack {folder} ({} files)", files.len())));
             let base_n = moved;
             let tick = |done: u64, _size: u64| { status.lock().unwrap().insert("done".into(), json!(base_n + done)); };
             match fetch_track_pack(&base, &sid, folder, files, Some(&tick)) {
-                Ok(_) => {
+                Ok(dir) => {
+                    // everything in the folder is now the host's (it was
+                    // all the host's or approved before the pack, see above)
+                    add_receipt(&host_key(&base), &files_under(&dir));
                     moved += files.iter().map(|f| f.get("size").and_then(|v| v.as_u64()).unwrap_or(0)).sum::<u64>();
                     set("done", json!(moved));
                     installed.extend(files.iter().map(|f| sv(f, "path")));
@@ -999,6 +1144,7 @@ pub fn install_files_with(need: &[Value], acemods: &[Value], status: &Mutex<Map<
         // ⚠ as_completed().result() re-raised the first failure: the job
         // fails rather than reporting a partial install as done
         if let Some(e) = errors.into_inner().unwrap().into_iter().next() {
+            record(&installed);
             set("files", json!(installed));
             status.lock().unwrap().insert("_error".into(), json!(e));
             return installed;
@@ -1019,8 +1165,37 @@ pub fn install_files_with(need: &[Value], acemods: &[Value], status: &Mutex<Map<
     if !warns.is_empty() {
         set("warning", json!(format!("downloaded, but could not add to the game's track list: {} - close Assetto Corsa EVO and press Get content again", warns.join("; "))));
     }
+    record(&installed);
     set("files", json!(installed));
     installed
+}
+
+/// May a track pack from `host` unpack over `folder`? Only when every file
+/// already in it is one this host installed or the user approved.
+fn pack_may_overwrite(folder: &str, host: &str) -> bool {
+    let Ok(root) = under(&tracks_dir(), &[folder]) else { return false };
+    if !root.is_dir() {
+        return true;
+    }
+    let (mine, ok_by_user) = (receipt(host), approved(host));
+    files_under(&root).iter().all(|p| { let k = pkey(p); mine.contains(&k) || ok_by_user.contains(&k) })
+}
+
+/// Every file below `root` (no links followed).
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    let (mut out, mut stack) = (Vec::new(), vec![root.to_path_buf()]);
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            if t.is_dir() {
+                stack.push(e.path());
+            } else if t.is_file() {
+                out.push(e.path());
+            }
+        }
+    }
+    out
 }
 
 /// What this machine can load (the /api/browser/local answer).

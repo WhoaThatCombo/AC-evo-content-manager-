@@ -166,13 +166,22 @@ async function copyText(text, label) {
   }
 }
 
+/* api() for handlers that run long (archive rewrites, downloads, installs):
+   api() gives up after 12 s while the server keeps working, and the page
+   then reported a still-running job as failed - or as done. */
 async function apiLong(path, body, ms) {
   const opt = body ? { method: 'POST', body: JSON.stringify(body) } : {};
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms || 30 * 60 * 1000);
+  const tok = adminToken();
+  const headers = tok ? { 'X-ACECM-Token': tok } : {};
   try {
-    const r = await fetch('/api/' + path, { ...opt, signal: ctrl.signal });
+    const r = await fetch('/api/' + path, { ...opt, headers, signal: ctrl.signal });
     const j = await r.json().catch(() => ({ error: 'bad response' }));
+    if (r.status === 401 && j && j.need_token) {
+      if (askForToken()) return apiLong(path, body, ms);
+      return j;
+    }
     if (j && j.error && !j.need_confirm) toast(j.error, true);
     return j;
   } catch (e) {
@@ -703,8 +712,8 @@ function libRow(item, shareUrl, acemod) {
         + 'Stock tracks are not touched.'
       : `Delete car "${item.name}" from client and server?`;
     if (!await ask(what)) return;
-    const r = await api('library/remove',
-                        { kind: item.kind, name: item.name });
+    const r = await apiLong('library/remove',
+                            { kind: item.kind, name: item.name });
     toast(r && r.ok ? 'Removed ' + item.name : (r.error || 'Delete failed'),
           !(r && r.ok));
     contentPage();
@@ -834,8 +843,8 @@ async function contentPage() {
             + 'overwritten, and it is published so players can download it.'))
           return;
         toast('Deploying — this rewrites a 300 MB archive, please wait…');
-        const r = await api('trackdeploy/deploy',
-                            { path: t.path, native: 1 });
+        const r = await apiLong('trackdeploy/deploy',
+                                { path: t.path, native: 1 });
         toast(r.ok ? `Deployed as "${r.display_name}" — ${r.modes} game modes`
                    : (r.error || 'Deploy failed'), !r.ok);
         contentPage();
@@ -852,7 +861,7 @@ async function contentPage() {
   rest.onclick = async () => {
     if (!await ask('Restore the server archive from the backup taken before deploy?'))
       return;
-    const r = await api('trackdeploy/restore', {});
+    const r = await apiLong('trackdeploy/restore', {});
     toast(r.ok ? 'Archive restored' : (r.error || 'Restore failed'), !r.ok);
     contentPage();
   };
@@ -861,7 +870,7 @@ async function contentPage() {
   redec.title = 'A Kunos content update replaces content.kspkg wholesale, '
     + 'which erases tracks.table rows for every custom track even though the '
     + "track's own files survive. This re-registers whatever got wiped, "
-    + 'without needing EvoForge.';
+    + 'with no other tool needed.';
   redec.onclick = async () => {
     toast('Checking for tracks wiped by the last update…');
     const dry = await api('trackdeploy/redeclare', { dry_run: 1 });
@@ -879,7 +888,8 @@ async function contentPage() {
         + 'Re-register them now? This rewrites a 300 MB archive.'))
       return;
     toast('Redeclaring — please wait…');
-    const r = await api('trackdeploy/redeclare', {});
+    const r = await apiLong('trackdeploy/redeclare', {});
+    if (r.error) { toast(r.error, true); contentPage(); return; }
     const okN = (r.redeclared || []).length;
     const failN = (r.failed || []).length;
     toast(failN === 0
@@ -908,7 +918,8 @@ async function contentPage() {
         + `${dry.candidates.join(', ')}\n\nRe-register them now?`))
       return;
     toast('Redeclaring on the client — please wait…');
-    const r = await api('trackdeploy/redeclare_client', {});
+    const r = await apiLong('trackdeploy/redeclare_client', {});
+    if (r.error) { toast(r.error, true); return; }
     const okN = (r.redeclared || []).length;
     const failN = (r.failed || []).length;
     toast(failN === 0
@@ -938,7 +949,7 @@ async function contentPage() {
   const sSrv = el('button', 'primary', 'Sync to server');
   sSrv.title = 'Copy client mods onto the dedicated server';
   sSrv.onclick = async () => {
-    const r = await api('mods/sync', { direction: 'to_server' });
+    const r = await apiLong('mods/sync', { direction: 'to_server' });
     toast(r.ok
       ? `Copied ${(r.copied || []).length} file(s), ${r.problems_after} problem(s) left`
       : (r.error || (r.errors || []).join('; ') || 'Sync failed'), !r.ok);
@@ -946,7 +957,7 @@ async function contentPage() {
   };
   const sCli = el('button', null, 'Sync to client');
   sCli.onclick = async () => {
-    const r = await api('mods/sync', { direction: 'to_client' });
+    const r = await apiLong('mods/sync', { direction: 'to_client' });
     toast(r.ok
       ? `Copied ${(r.copied || []).length} file(s), ${r.problems_after} problem(s) left`
       : (r.error || (r.errors || []).join('; ') || 'Sync failed'), !r.ok);
@@ -954,7 +965,7 @@ async function contentPage() {
   };
   const sBoth = el('button', null, 'Fill gaps both ways');
   sBoth.onclick = async () => {
-    const r = await api('mods/sync', { direction: 'both' });
+    const r = await apiLong('mods/sync', { direction: 'both' });
     toast(r.ok
       ? `Copied ${(r.copied || []).length} file(s), ${r.problems_after} problem(s) left`
       : (r.error || (r.errors || []).join('; ') || 'Sync failed'), !r.ok);

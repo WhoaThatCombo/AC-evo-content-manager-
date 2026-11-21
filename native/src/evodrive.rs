@@ -412,8 +412,11 @@ pub fn setups(car: &str, label: &str) -> Value {
             return json!({"ok": true, "source": "evoview", "setups": list});
         }
     }
-    let Some(home) = std::env::var_os("USERPROFILE") else { return json!({"ok": true, "source": "folder", "setups": []}) };
-    let root = Path::new(&home).join("Saved Games").join("ACE").join("Car Setups");
+    let ace = crate::gamesettings::settings_dir();
+    if ace.is_empty() {
+        return json!({"ok": true, "source": "folder", "setups": []});
+    }
+    let root = Path::new(&ace).join("Car Setups");
     let want = squash(label);
     let mut list = vec![];
     let mut stack = vec![root.clone()];

@@ -196,11 +196,51 @@ pub fn write_archive(src: &Path, dst: &Path, changes: &[(String, Vec<u8>)]) -> R
               "records": records.len(), "size": size}))
 }
 
+fn journal_path(archive: &Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}.bak_tables.pending", archive.display()))
+}
+
+/// Put the saved tail back at `start` and cut the file to `len`, on disk.
+fn put_back(archive: &Path, start: u64, len: u64, tail: &[u8]) -> Result<(), String> {
+    let mut f = OpenOptions::new().write(true).open(archive).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    f.write_all(tail).map_err(|e| e.to_string())?;
+    f.set_len(len).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())
+}
+
+/// Finish a write_inplace() that never completed (ACECM killed, a crash, a
+/// power cut): while <archive>.bak_tables.pending exists the index may be
+/// half-written, so the saved tail goes back. Ok(true) = restored.
+/// ⚠ Called at startup and at the top of every in-place write.
+pub fn recover_pending(archive: &Path) -> Result<bool, String> {
+    let j = journal_path(archive);
+    if !j.is_file() {
+        return Ok(false);
+    }
+    let _lock = crate::archlock::lock()?;
+    // another process may have finished (and removed it) while we waited
+    let Ok(raw) = std::fs::read(&j) else { return Ok(false) };
+    let v: Value = serde_json::from_slice(&raw).map_err(|e| format!("unreadable {}: {e}", j.display()))?;
+    let start = v.get("start").and_then(|x| x.as_u64()).ok_or("journal without a start")?;
+    let len = v.get("len").and_then(|x| x.as_u64()).ok_or("journal without a length")?;
+    let bak = format!("{}.bak_tables", archive.display());
+    let tail = std::fs::read(&bak).map_err(|e| format!("cannot read {bak}: {e}"))?;
+    if start + tail.len() as u64 != len {
+        return Err(format!("{bak} does not match the interrupted write to {} - verify the files in Steam", archive.display()));
+    }
+    put_back(archive, start, len, &tail)?;
+    let _ = std::fs::remove_file(&j);
+    Ok(true)
+}
+
 /// Replace or add entries by rewriting only the index tail, in place. The
 /// previous 64 MiB tail is saved as <archive>.bak_tables first, and put back
-/// if anything fails.
+/// if anything fails. A journal beside it marks the write as in progress
+/// until the new index is on disk (see recover_pending).
 pub fn write_inplace(archive: &Path, changes: &[(String, Vec<u8>)]) -> Result<Value, String> {
     let _lock = crate::archlock::lock()?;
+    recover_pending(archive)?;
     if !is_encrypted(archive).map_err(|e| e.to_string())? {
         return Err(format!("{} is not an encrypted archive - refusing to write", archive.display()));
     }
@@ -214,7 +254,10 @@ pub fn write_inplace(archive: &Path, changes: &[(String, Vec<u8>)]) -> Result<Va
         f.read_to_end(&mut tail).map_err(|e| e.to_string())?;
     }
     let bak = format!("{}.bak_tables", archive.display());
-    std::fs::write(&bak, &tail).map_err(|e| e.to_string())?;
+    crate::safefs::write_atomic(Path::new(&bak), &tail).map_err(|e| e.to_string())?;
+    let journal = journal_path(archive);
+    crate::safefs::write_atomic(&journal, json!({"start": start, "len": orig}).to_string().as_bytes())
+        .map_err(|e| e.to_string())?;
     let mut run = || -> Result<(Vec<String>, Vec<String>, usize), String> {
         let mut f = OpenOptions::new().read(true).write(true).open(archive).map_err(|e| e.to_string())?;
         f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
@@ -222,20 +265,22 @@ pub fn write_inplace(archive: &Path, changes: &[(String, Vec<u8>)]) -> Result<Va
         let table = build_table(&mut records)?;
         f.write_all(&table).map_err(|e| e.to_string())?;
         f.set_len(end + TABLE).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
         Ok((added, replaced, records.len()))
     };
     match run() {
         Ok((added, replaced, n)) => {
+            let _ = std::fs::remove_file(&journal);
             let size = std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
             Ok(json!({"added": added, "replaced": replaced, "repaired": repaired,
                       "records": n, "size": size, "backup": bak,
                       "undo": {"start": start, "len": orig}}))
         }
         Err(e) => {
-            if let Ok(mut f) = OpenOptions::new().write(true).open(archive) {
-                let _ = f.seek(SeekFrom::Start(start));
-                let _ = f.write_all(&tail);
-                let _ = f.set_len(orig);
+            // ⚠ the journal stays when the rollback did not land, so the
+            // next start (or write) tries again
+            if put_back(archive, start, orig, &tail).is_ok() {
+                let _ = std::fs::remove_file(&journal);
             }
             Err(e)
         }
@@ -253,10 +298,11 @@ pub fn undo_inplace(archive: &Path, written: &Value) -> Result<(), String> {
     if start + tail.len() as u64 != len {
         return Err("the saved table does not fit this archive any more".into());
     }
-    let mut f = OpenOptions::new().write(true).open(archive).map_err(|e| e.to_string())?;
-    f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
-    f.write_all(&tail).map_err(|e| e.to_string())?;
-    f.set_len(len).map_err(|e| e.to_string())?;
+    let journal = journal_path(archive);
+    crate::safefs::write_atomic(&journal, json!({"start": start, "len": len}).to_string().as_bytes())
+        .map_err(|e| e.to_string())?;
+    put_back(archive, start, len, &tail)?;
+    let _ = std::fs::remove_file(&journal);
     Ok(())
 }
 
@@ -293,6 +339,34 @@ mod tests {
         t[..BUCKET].copy_from_slice(first);
         std::fs::write(&p, t).unwrap();
         p
+    }
+
+    #[test]
+    fn recovers_an_interrupted_write() {
+        let p = crate::safefs::test_dir().join(format!("acecm_journal_test_{}.kspkg", std::process::id()));
+        let bak = std::path::PathBuf::from(format!("{}.bak_tables", p.display()));
+        let tail = vec![7u8; 300];
+        let mut orig = vec![1u8; 100];
+        orig.extend(&tail);
+        // half-written: a payload over the old index, then no table
+        let mut broken = vec![1u8; 100];
+        broken.extend(vec![9u8; 500]);
+        std::fs::write(&p, &broken).unwrap();
+        std::fs::write(&bak, &tail).unwrap();
+        assert!(!recover_pending(&p).unwrap(), "no journal, nothing to do");
+        assert_eq!(std::fs::read(&p).unwrap(), broken);
+        std::fs::write(journal_path(&p), json!({"start": 100, "len": 400}).to_string()).unwrap();
+        assert!(recover_pending(&p).unwrap());
+        assert_eq!(std::fs::read(&p).unwrap(), orig);
+        assert!(!journal_path(&p).exists());
+        // a journal that does not fit its backup is refused, not applied
+        std::fs::write(&p, &broken).unwrap();
+        std::fs::write(journal_path(&p), json!({"start": 100, "len": 999}).to_string()).unwrap();
+        assert!(recover_pending(&p).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), broken);
+        for f in [p.clone(), journal_path(&p), bak] {
+            let _ = std::fs::remove_file(f);
+        }
     }
 
     #[test]

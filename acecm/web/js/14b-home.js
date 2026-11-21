@@ -137,6 +137,8 @@ async function homePage() {
         btn.disabled = false;
         btn.textContent = 'Start';
         toast(res.error || 'could not start', true);
+      } else if (res.warning) {
+        toast('Starting — but ' + res.warning, true);
       }
       liveKick();
     };

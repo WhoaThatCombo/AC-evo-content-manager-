@@ -32,8 +32,8 @@ pub fn settings_dir() -> String {
     if !d.is_empty() {
         return d;
     }
-    let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
-    home.join("Saved Games").join("ACE").to_string_lossy().into_owned()
+    // the known-folder Saved Games (moved or redirected), not %USERPROFILE%
+    Path::new(&detect::saved_games()).join("ACE").to_string_lossy().into_owned()
 }
 
 /// lowercase top-level message name -> real name.
@@ -205,7 +205,7 @@ fn stamp() -> String {
 /// `<file>.<stamp>.bak`, never an existing one: two edits in one second
 /// overwrote the first backup (restore_backup even overwrote the backup it
 /// was about to restore).
-fn history_path(path: &Path) -> PathBuf {
+pub(crate) fn history_path(path: &Path) -> PathBuf {
     let st = stamp();
     let mut p = PathBuf::from(format!("{}.{st}.bak", path.display()));
     let mut n = 2;
@@ -230,11 +230,18 @@ pub fn write(rel: &str, values: &Value) -> Value {
     }
     let Some(desc) = protos::find(&name) else { return json!({"ok": false, "error": "no schema"}) };
     let opts = prost_reflect::DeserializeOptions::new().deny_unknown_fields(true);
-    let obj = match prost_reflect::DynamicMessage::deserialize_with_options(desc, values.clone(), &opts) {
+    let obj = match prost_reflect::DynamicMessage::deserialize_with_options(desc.clone(), values.clone(), &opts) {
         Ok(m) => m,
         Err(e) => return json!({"ok": false, "error": format!("invalid values: {e}")}),
     };
-    let blob = obj.encode_to_vec();
+    let mut blob = obj.encode_to_vec();
+    // ⚠ fields the file has but our schema does not know (a game update
+    // ahead of it) are carried over, not dropped (top level)
+    if let Some(old) = std::fs::read(&path).ok().and_then(|b| prost_reflect::DynamicMessage::decode(desc, b.as_slice()).ok()) {
+        for f in old.unknown_fields() {
+            f.encode(&mut blob);
+        }
+    }
     // ⚠ both backups BEFORE the write, and a failed one stops it (Python
     // raised here; ignoring it overwrote settings with no way back)
     let bak = PathBuf::from(format!("{}.bak_acecm", path.display()));
@@ -353,6 +360,12 @@ pub fn restore(rel: &str) -> Value {
     }
     if game_running() {
         return json!({"ok": false, "error": "close the game first"});
+    }
+    // keep the current state too, as restore_backup does
+    if path.exists() {
+        if let Err(e) = crate::safefs::copy_atomic(&path, &history_path(&path)) {
+            return json!({"ok": false, "error": format!("could not keep the current file first ({e})")});
+        }
     }
     if let Err(e) = crate::safefs::copy_atomic(&bak, &path) {
         return json!({"ok": false, "error": e.to_string()});

@@ -1,9 +1,11 @@
 //! Fetch content from a directory server's own share - ported from
 //! evoshare.py. Unauthenticated:
 //!
+//! ```text
 //!     GET <base>evoforge.json     manifest {content[], max, active, ...}
 //!     GET <base>index/<file>      gzipped json index of the pack
 //!     GET <base>content/<file>    the .kspkg itself, Range-resumable
+//! ```
 //!
 //! The index carries absolute byte spans, so only what is missing is pulled.
 //! Entry bytes are ordinary kspkg payload: decrypt each at offset 0, never a
@@ -24,6 +26,24 @@ use crate::{contentsync, kspkg, logs};
 const TIMEOUT: u64 = 8;
 const GAP_TOLERANCE: u64 = 1 << 20;
 const CHUNK: usize = 1 << 20;
+/// ⚠ Every byte here comes from someone else's server: caps on what is held
+/// in memory (manifest, index before / after gunzip, one entry) and on a car
+/// whose size the share did not declare.
+const MAX_MANIFEST: u64 = 8 << 20;
+const MAX_INDEX: u64 = 64 << 20;
+const MAX_INDEX_JSON: u64 = 256 << 20;
+const MAX_ENTRY: u64 = 1 << 30;
+const MAX_CAR: u64 = 16 << 30;
+
+/// Read at most `cap` bytes; more is an error, not a silent truncation.
+fn read_capped(r: impl Read, cap: u64, what: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    r.take(cap + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    if out.len() as u64 > cap {
+        return Err(format!("the share's {what} is larger than {} MB - refused", cap >> 20));
+    }
+    Ok(out)
+}
 
 static STATE: Mutex<Option<Map<String, Value>>> = Mutex::new(None);
 
@@ -58,8 +78,8 @@ fn get(u: &str, rng: Option<(u64, u64)>, timeout: u64) -> Result<reqwest::blocki
 
 /// What this share publishes.
 pub fn manifest(base: &str) -> Value {
-    let d = match get(&url(base, &["evoforge.json"]), None, TIMEOUT).and_then(|r| r.text().map_err(|e| e.to_string()))
-        .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string())) {
+    let d = match get(&url(base, &["evoforge.json"]), None, TIMEOUT).and_then(|r| read_capped(r, MAX_MANIFEST, "manifest"))
+        .and_then(|t| serde_json::from_slice::<Value>(&t).map_err(|e| e.to_string())) {
         Ok(d) => d,
         Err(e) => return json!({"ok": false, "error": e}),
     };
@@ -75,17 +95,15 @@ pub fn manifest(base: &str) -> Value {
 
 /// The pack's entry table (served gzipped).
 pub fn index(base: &str, fname: &str) -> Value {
-    let mut raw = Vec::new();
-    match get(&url(base, &["index", fname]), None, TIMEOUT) {
-        Ok(mut r) => { if let Err(e) = r.read_to_end(&mut raw) { return json!({"ok": false, "error": e.to_string()}) } }
+    let mut raw = match get(&url(base, &["index", fname]), None, TIMEOUT).and_then(|r| read_capped(r, MAX_INDEX, "index")) {
+        Ok(b) => b,
         Err(e) => return json!({"ok": false, "error": e}),
-    }
+    };
     if raw.starts_with(&[0x1f, 0x8b]) {
-        let mut out = Vec::new();
-        if let Err(e) = flate2::read::GzDecoder::new(&raw[..]).read_to_end(&mut out) {
-            return json!({"ok": false, "error": format!("bad gzip: {e}")});
-        }
-        raw = out;
+        raw = match read_capped(flate2::read::GzDecoder::new(&raw[..]), MAX_INDEX_JSON, "unpacked index") {
+            Ok(b) => b,
+            Err(e) => return json!({"ok": false, "error": format!("bad gzip: {e}")}),
+        };
     }
     let d: Value = match serde_json::from_slice(&raw) {
         Ok(d) => d,
@@ -280,6 +298,10 @@ fn run(base: &str, fname: &str, folder: &str) -> Result<(), String> {
         if s > u32::MAX as u64 || o.checked_add(s).is_none() {
             return Err("the share's index is damaged".into());
         }
+        // each entry is held whole in memory to decrypt it
+        if s > MAX_ENTRY {
+            return Err(format!("{} is larger than {} MB - refused", sv(&it, "rel"), MAX_ENTRY >> 20));
+        }
         match runs.last_mut() {
             Some(r) if o.saturating_sub(r.1) <= GAP_TOLERANCE && o + 0 >= r.0 => { r.1 = r.1.max(o + s); r.2.push(it); }
             _ => runs.push((o, o + s, vec![it])),
@@ -387,6 +409,10 @@ fn run_car(base: &str, fname: &str) -> Result<(), String> {
             }
             if want > 0 && got + n as u64 > want {
                 return Err("the car is larger than the share declared".into());
+            }
+            // a share that declared no size still does not get the whole disk
+            if got + n as u64 > MAX_CAR {
+                return Err(format!("the car is larger than {} GB - refused", MAX_CAR >> 30));
             }
             f.write_all(&chunk[..n]).map_err(|e| e.to_string())?;
             got += n as u64;

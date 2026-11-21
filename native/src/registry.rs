@@ -248,7 +248,7 @@ fn track_files(folder: &str) -> Vec<(String, PathBuf)> {
         return Vec::new();
     }
     let roots = [
-        home().join("Saved Games").join("ACE").join("mods").join("content").join("tracks").join(folder),
+        Path::new(&crate::trackimport::tracks_dir()).join(folder),
         paths::data().join("track_packages").join(folder),
         Path::new(&crate::detect::effective_server_dir()).join("track_packages").join(folder),
         home().join("Downloads").join(folder),
@@ -266,7 +266,7 @@ fn track_root(folder: &str) -> Option<PathBuf> {
         return None;
     }
     [
-        home().join("Saved Games").join("ACE").join("mods").join("content").join("tracks").join(folder),
+        Path::new(&crate::trackimport::tracks_dir()).join(folder),
         paths::data().join("track_packages").join(folder),
         Path::new(&crate::detect::effective_server_dir()).join("track_packages").join(folder),
         home().join("Downloads").join(folder),
@@ -275,6 +275,14 @@ fn track_root(folder: &str) -> Option<PathBuf> {
 
 fn find_entry(sid: &str) -> Option<Value> {
     load().into_iter().find(|e| sv(e, "id") == sid)
+}
+
+/// May anyone download entry `sid`'s files? ⚠ `public: false` must mean
+/// "not served to strangers" (the share routes only hid it from the list);
+/// such an entry needs the admin token (or this PC). An unknown id answers
+/// true so the routes give their usual 404.
+pub fn is_public(sid: &str) -> bool {
+    find_entry(sid).map(|e| e.get("public").map(|p| p.as_bool().unwrap_or(true)).unwrap_or(true)).unwrap_or(true)
 }
 
 /// Every file a server requires. `digests=false` when only sizes matter.

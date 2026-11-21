@@ -137,7 +137,11 @@ pub fn forget_lists() {
 /// Real car model names harvested from the server log ("on car <model>,").
 /// The two id spaces are NOT mapped to each other here.
 pub fn models_seen() -> Value {
-    let log = crate::serverproc::server_log("");
+    // each profile has its own log now: read the most recently written one
+    let mut logs: Vec<std::path::PathBuf> = crate::profiles::load().iter().map(crate::serverproc::profile_log).collect();
+    logs.push(crate::serverproc::server_log(""));
+    let log = logs.into_iter().filter_map(|p| std::fs::metadata(&p).and_then(|m| m.modified()).ok().map(|t| (t, p)))
+        .max_by_key(|(t, _)| *t).map(|(_, p)| p).unwrap_or_default();
     let Ok(b) = std::fs::read(&log) else { return json!({"models": [], "note": "no server log yet"}) };
     let txt = String::from_utf8_lossy(&b);
     let mut seen = std::collections::BTreeSet::new();

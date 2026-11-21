@@ -20,15 +20,26 @@ pub fn saved_cars_dir() -> String {
     }
     let root = Path::new(&detect::saved_games()).join("ACE").join("ProfileData");
     let Ok(rd) = std::fs::read_dir(&root) else { return String::new() };
-    let mut names: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    names.sort();
-    for n in names {
-        let d = root.join(&n).join("OpenData").join("SavedCars");
-        if d.is_dir() {
-            return d.to_string_lossy().into_owned();
+    // ⚠ the profile played most recently, not the first by name (two
+    // accounts on one PC: the other garage was edited)
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for e in rd.flatten() {
+        let d = e.path().join("OpenData").join("SavedCars");
+        if !d.is_dir() {
+            continue;
+        }
+        let t = newest_mtime(&d).unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().map(|(bt, bp)| t > *bt || (t == *bt && d < *bp)).unwrap_or(true) {
+            best = Some((t, d));
         }
     }
-    String::new()
+    best.map(|(_, d)| d.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// The newest modification time of a folder or anything directly in it.
+fn newest_mtime(d: &Path) -> Option<std::time::SystemTime> {
+    let own = std::fs::metadata(d).and_then(|m| m.modified()).ok();
+    std::fs::read_dir(d).ok()?.flatten().filter_map(|e| e.metadata().and_then(|m| m.modified()).ok()).chain(own).max()
 }
 
 /// Every sub-message, depth-first (set fields only, like ListFields).
@@ -573,6 +584,10 @@ pub fn apply_color(car_file: &str, slot: &str, color_path: &str, dry_run: bool) 
     if dry_run {
         return json!({"ok": true, "dry_run": true, "bytes": blob.len(), "color": info, "guid": uuid_str(&new)});
     }
+    // ⚠ the game saves its own copy of the garage on exit
+    if crate::procs::game_running() {
+        return json!({"ok": false, "needs_close": true, "error": "close the game first - it saves your garage on exit and would undo this"});
+    }
     let bak = format!("{car_file}.bak_livery");
     if let Err(e) = crate::safefs::backup_once(Path::new(car_file), Path::new(&bak)) {
         return json!({"ok": false, "error": format!("could not back the car up first ({e}) - nothing was changed")});
@@ -635,6 +650,9 @@ pub fn populate(dry_run: bool) -> Value {
     let todo: Vec<String> = src_of.keys().cloned().collect();
     if dry_run {
         return json!({"ok": true, "dry_run": true, "would_add": todo, "already": have, "count": todo.len()});
+    }
+    if !todo.is_empty() && crate::procs::game_running() {
+        return json!({"ok": false, "needs_close": true, "error": "close the game first - it saves your garage on exit and would undo this"});
     }
     let (mut made, mut failed) = (Vec::new(), Vec::new());
     for model in &todo {

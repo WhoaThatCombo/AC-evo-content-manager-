@@ -320,9 +320,15 @@ async function modStrip(p) {
   go.onclick = async () => {
     if (!path.value.trim()) { toast('Give a path first', true); return; }
     toast('Installing…');
-    const r = await api('mods/install', { path: path.value.trim() });
-    toast(r.ok === false ? (r.error || 'Install failed')
-                         : 'Installed — check both sides below', r.ok === false);
+    const body = { path: path.value.trim() };
+    let r = await apiLong('mods/install', body);
+    // already installed: ask, then install over it (as a dropped file does)
+    if (r && r.need_confirm) {
+      if (!await overwritePrompt(r)) { toast('Install cancelled'); return; }
+      r = await apiLong('mods/install', { ...body, overwrite: true });
+    }
+    const ok = r && r.ok !== false && !r.error;
+    toast(ok ? 'Installed — check both sides below' : (r.error || 'Install failed'), !ok);
     carsPage();
   };
   add.append(path, go);

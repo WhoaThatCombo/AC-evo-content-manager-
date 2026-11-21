@@ -49,7 +49,7 @@ fn home() -> PathBuf {
 }
 
 fn import_root() -> PathBuf {
-    home().join("Saved Games").join("ACE").join("mods").join("content").join("tracks")
+    PathBuf::from(trackimport::tracks_dir())
 }
 
 /// Track folders players have imported loose (third-party tools write these).
@@ -204,16 +204,40 @@ fn build_note(bak: &str) -> PathBuf {
 /// for ever (the copy now goes to a temp name and is renamed when whole).
 fn backup(kspkg: &Path) -> Result<Value, String> {
     let bak = format!("{}.bak_pretrack", kspkg.display());
+    // ⚠ a backup from an older server build can never be restored (Restore
+    // refuses it), so after an update it is replaced, not kept for ever
+    if Path::new(&bak).is_file() && backup_from_other_build(&bak) {
+        crate::safefs::copy_atomic(kspkg, Path::new(&bak))
+            .map_err(|e| format!("could not refresh the backup of {} ({e}) - nothing was changed", kspkg.display()))?;
+        let _ = crate::safefs::write_atomic(&build_note(&bak), server_build().as_bytes());
+        return Ok(json!({"backup": bak, "made": true, "replaced_stale": true}));
+    }
     match crate::safefs::backup_once(kspkg, Path::new(&bak)) {
         Ok(made) => {
             if made {
                 // the build the backup belongs to (Restore checks it)
-                let _ = std::fs::write(build_note(&bak), server_build());
+                let _ = crate::safefs::write_atomic(&build_note(&bak), server_build().as_bytes());
             }
             Ok(json!({"backup": bak, "made": made}))
         }
         Err(e) => Err(format!("could not back up {} first ({e}) - nothing was changed", kspkg.display())),
     }
+}
+
+/// The note says another build than the server we have now ("" = unknown).
+fn backup_note_differs(bak: &str) -> bool {
+    let was = std::fs::read_to_string(build_note(bak)).unwrap_or_default();
+    let now = server_build();
+    !was.trim().is_empty() && !now.is_empty() && was.trim() != now
+}
+
+/// A different server exe SIZE: an update. (An mtime-only change is also
+/// what an exe patch leaves, and must not throw a good backup away.)
+fn backup_from_other_build(bak: &str) -> bool {
+    let was = std::fs::read_to_string(build_note(bak)).unwrap_or_default();
+    let now = server_build();
+    let len = |s: &str| s.trim().split(':').next().unwrap_or("").to_string();
+    !was.trim().is_empty() && !now.is_empty() && len(&was) != len(&now)
 }
 
 fn merge(a: &mut Value, b: Value) {
@@ -537,6 +561,9 @@ pub fn redeclare_tracks_into(kspkg: &Path, dry_run: bool, check_running: bool) -
             continue;
         }
         match read_track_folder(&import_root().join(folder), Some(folder)) {
+            // ⚠ by FOLDER, not name: Deploy may have registered it under the
+            // client's name, and a second row for one folder is a duplicate
+            Ok(info) if tracktables::rows_for_folder(&tk, &info.folder).map(|r| !r.is_empty()).unwrap_or(false) => continue,
             Ok(info) => missing.push(json!({"folder": folder, "display_name": display,
                                             "own_folder": info.own_folder, "layout": info.layout, "ok": null})),
             Err(e) => missing.push(json!({"folder": folder, "display_name": display, "ok": false, "error": e})),
@@ -577,6 +604,7 @@ pub fn state() -> Value {
     json!({"kspkg": k.to_string_lossy(), "exists": exists,
            "size_mb": if exists { json!(size) } else { json!(0) },
            "backup": Path::new(&format!("{}.bak_pretrack", k.display())).is_file(),
+           "backup_stale": backup_note_differs(&format!("{}.bak_pretrack", k.display())),
            "server_running": server_running(),
            "note": "ACECM patches the server it runs, not the Steam copy"})
 }
@@ -594,9 +622,8 @@ pub fn restore() -> Value {
     }
     // ⚠ a backup from BEFORE a game update would downgrade content.kspkg
     // under a newer server (version mismatch for every joiner)
-    if let Ok(was) = std::fs::read_to_string(build_note(&bak)) {
-        let now = server_build();
-        if !was.trim().is_empty() && !now.is_empty() && was.trim() != now {
+    {
+        if backup_note_differs(&bak) {
             return json!({"ok": false, "stale_backup": true,
                 "error": "the dedicated server was updated after this backup was taken, so restoring it would put back the OLD game files. Nothing was restored - use Steam's 'Verify integrity of game files' on the dedicated server to get the stock archive back."});
         }
@@ -674,10 +701,12 @@ pub fn redeclare_client_tracks(dry_run: bool) -> Value {
     let Some(pkg) = client_kspkg() else {
         return json!({"ok": false, "error": "client content.kspkg not found"});
     };
+    // ⚠ lock first, then a fresh look: the lock can wait behind another writer
+    let _lock = match crate::archlock::lock() { Ok(g) => g, Err(e) => return json!({"ok": false, "error": e}) };
+    procs::invalidate_snapshot();
     if procs::game_running() {
         return json!({"ok": false, "needs_close": true, "error": "close the game before redeclaring client tracks - content.kspkg is locked while it is running"});
     }
-    let _lock = match crate::archlock::lock() { Ok(g) => g, Err(e) => return json!({"ok": false, "error": e}) };
     let Some(tk) = read_entry(Path::new(&pkg), r"system\tracks.table") else {
         return json!({"ok": false, "error": r"client archive has no system\tracks.table"});
     };

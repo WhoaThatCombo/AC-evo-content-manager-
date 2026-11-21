@@ -9,13 +9,13 @@
 //! re-enables penalties: the state is always READ, never assumed.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use crate::kspkg::{self, BUCKET, TABLE};
+use crate::kspkg;
 
 const TARGET1: &str = r"system\defaults\timeattack.penaltyinvestigations";
 const TARGET2: &str = r"content\data\practice.seasondefinition";
@@ -150,38 +150,24 @@ fn read_entry(pkg: &Path, rel: &str) -> Result<Option<(Vec<u8>, u32)>, String> {
     Ok(Some((buf, e.size)))
 }
 
-/// Write `content` where the table was, then the table after it with this
-/// entry's size/offset updated - exactly penalties_tool's scheme.
+/// Replace one EXISTING entry (payload where the table was, the table after
+/// it) through kspkg_write: encryption check, tail backup + crash journal,
+/// then verify and read back, undoing the write if either fails.
 fn write_entry(pkg: &Path, rel: &str, content: &[u8]) -> Result<(), String> {
     let _lock = crate::archlock::lock()?;
-    let total = std::fs::metadata(pkg).map_err(|e| e.to_string())?.len();
-    if total < TABLE {
-        return Err("too small to be an archive".into());
+    if kspkg::find_entry(pkg, rel).map_err(|e| e.to_string())?.is_none() {
+        return Err(format!("{rel} not found in archive"));
     }
-    let table_start = total - TABLE;
-    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(pkg).map_err(|e| e.to_string())?;
-    f.seek(SeekFrom::Start(table_start)).map_err(|e| e.to_string())?;
-    let mut table = vec![0u8; TABLE as usize];
-    f.read_exact(&mut table).map_err(|e| e.to_string())?;
-    // buckets are 256-aligned, so every one decrypts at phase 0: compare the
-    // ENCRYPTED needle instead of decrypting a quarter-million buckets
-    let mut needle = rel.as_bytes().to_vec();
-    needle.push(0);
-    let mut enc = needle.clone();
-    kspkg::decrypt(&mut enc, 0);
-    let idx = table.chunks_exact(BUCKET).position(|b| b.starts_with(&enc)).ok_or(format!("{rel} not found in archive"))?;
-    let mut bucket = table[idx * BUCKET..(idx + 1) * BUCKET].to_vec();
-    kspkg::decrypt(&mut bucket, 0);
-    bucket[240..244].copy_from_slice(&(content.len() as u32).to_le_bytes());
-    bucket[248..256].copy_from_slice(&table_start.to_le_bytes());
-    kspkg::decrypt(&mut bucket, 0);
-    table[idx * BUCKET..(idx + 1) * BUCKET].copy_from_slice(&bucket);
-    let mut data = content.to_vec();
-    kspkg::decrypt(&mut data, 0);
-    f.seek(SeekFrom::Start(table_start)).map_err(|e| e.to_string())?;
-    f.write_all(&data).map_err(|e| e.to_string())?;
-    f.write_all(&table).map_err(|e| e.to_string())?;
-    f.set_len(table_start + data.len() as u64 + TABLE).map_err(|e| e.to_string())?;
+    let written = crate::kspkg_write::write_inplace(pkg, &[(rel.to_string(), content.to_vec())])?;
+    let ver = crate::kspkg_write::verify(pkg);
+    if ver["ok"] != true {
+        let undone = crate::kspkg_write::undo_inplace(pkg, &written);
+        return Err(format!("archive failed verification ({ver}); rolled back: {}", undone.is_ok()));
+    }
+    if read_entry(pkg, rel)?.map(|(d, _)| d).as_deref() != Some(content) {
+        let undone = crate::kspkg_write::undo_inplace(pkg, &written);
+        return Err(format!("readback of {rel} does not match; rolled back: {}", undone.is_ok()));
+    }
     Ok(())
 }
 
@@ -202,7 +188,7 @@ pub fn patch(pkg: &Path) -> Result<Vec<String>, String> {
         None => status.push(format!("{TARGET1} not found - skipped")),
         Some((_, 0)) => status.push(format!("{TARGET1} already empty")),
         Some((d1, s1)) => {
-            std::fs::write(folder.join(BAK1), &d1).map_err(|e| e.to_string())?;
+            crate::safefs::write_atomic(&folder.join(BAK1), &d1).map_err(|e| e.to_string())?;
             write_entry(pkg, TARGET1, b"")?;
             status.push(format!("cleared {TARGET1} ({s1} -> 0 bytes)"));
         }
@@ -214,7 +200,7 @@ pub fn patch(pkg: &Path) -> Result<Vec<String>, String> {
                 if nested_is_empty(&d2, &NESTED_PATH)? {
                     return Ok(format!("{TARGET2} triggers already cleared"));
                 }
-                std::fs::write(folder.join(BAK2), &d2).map_err(|e| e.to_string())?;
+                crate::safefs::write_atomic(&folder.join(BAK2), &d2).map_err(|e| e.to_string())?;
                 write_entry(pkg, TARGET2, &clear_nested(&d2, &NESTED_PATH)?)?;
                 Ok(format!("cleared embedded triggers in {TARGET2}"))
             })();
@@ -282,6 +268,10 @@ pub fn set_penalties(side: &str, off: bool) -> Value {
     let Some(pkg) = pkg.filter(|p| p.is_file()) else {
         return json!({"ok": false, "error": format!("{side} content.kspkg not found")});
     };
+    // ⚠ lock FIRST, then look with a fresh snapshot: the lock can wait
+    // minutes behind another writer, and a game started meanwhile counts
+    let _lock = match crate::archlock::lock() { Ok(g) => g, Err(e) => return json!({"ok": false, "error": e}) };
+    crate::procs::invalidate_snapshot();
     if side == "server" && !crate::serverproc::server_pids().is_empty() {
         return json!({"ok": false, "error": "stop the server before changing penalties - it holds content.kspkg open"});
     }

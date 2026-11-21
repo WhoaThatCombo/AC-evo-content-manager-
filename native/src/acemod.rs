@@ -39,6 +39,14 @@ fn plain(n: &str) -> bool {
     !n.is_empty() && n.len() <= 120 && n.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.')) && n != "." && n != ".." && !n.starts_with('.')
 }
 
+/// A folder-relative name from a package manifest that stays in its folder
+/// (the converter applies the same rule before it writes anything).
+fn safe_rel(p: &str) -> bool {
+    !p.is_empty()
+        && !p.starts_with(['/', '\\'])
+        && p.split(['/', '\\']).all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains([':', '\0']))
+}
+
 fn stem(kind: &str, name: &str) -> String {
     format!("{kind}_{name}")
 }
@@ -479,6 +487,13 @@ pub fn peek(p: &Path) -> Result<Value, String> {
     } else {
         blobs.iter().filter_map(|b| Some((b.get("path")?.as_str()?.replace('\\', "/"), b.get("size")?.clone()))).collect()
     };
+    // every name must stay inside the install folder (a car's sidecars are bare names)
+    if let Some(bad) = files.keys().find(|k| if kind == "car" { !plain(k) } else { !safe_rel(k) }) {
+        return Err(format!("unsafe file name in the package: {bad:?}"));
+    }
+    if kind == "track" && blobs.iter().any(|b| b.get("path").and_then(|v| v.as_str()).is_none()) {
+        return Err("damaged .acemod manifest (file without a name)".into());
+    }
     let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let out = m.get("out_size").and_then(|v| v.as_u64()).unwrap_or(0) + extra_bytes;
     let made = m.get("base_from").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -528,4 +543,48 @@ pub fn check_track(dir: &Path) -> Result<(), String> {
     l.retain(|x| !x.trim().is_empty());
     logs::warn(format!("acemod check-track {}: {}", dir.display(), l.join(" | ")));
     Err(format!("the track failed the pre-install check - not installed ({})", l.first().cloned().unwrap_or_default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pkg(man: Value) -> PathBuf {
+        use std::io::Read;
+        let js = serde_json::to_vec(&man).unwrap();
+        let mut z = Vec::new();
+        liblzma::read::XzEncoder::new(&js[..], 1).read_to_end(&mut z).unwrap();
+        let mut b = b"ACEMOD\x01\n".to_vec();
+        b.extend_from_slice(&(z.len() as u32).to_le_bytes());
+        b.extend_from_slice(&z);
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let p = crate::safefs::test_dir().join(format!("acecm_peek_{}_{}.acemod", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+        std::fs::write(&p, b).unwrap();
+        p
+    }
+
+    #[test]
+    fn safe_rel_rule() {
+        assert!(safe_rel("tracks/x/a.bin") && safe_rel(r"a\b.c"));
+        for bad in ["", "..", "a/../b", "/x", r"\x", r"\\srv\x", "C:x", "C:/x", "a:b", "a\0b", "a//b", "./a"] {
+            assert!(!safe_rel(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn peek_rejects_traversal_names() {
+        let track = |p: &str| json!({"kind": "dir", "name": "t", "out_size": 1, "blobs": [{"path": p, "size": 1, "how": "raw"}]});
+        let ok = pkg(track(r"ai\fast_lane.ai"));
+        assert!(peek(&ok).is_ok());
+        for bad in ["../../x.bat", "C:/Users/x.bat", r"a\..\..\x", "/x", "a:b"] {
+            let p = pkg(track(bad));
+            assert!(peek(&p).is_err(), "{bad}");
+            let _ = std::fs::remove_file(p);
+        }
+        let car = pkg(json!({"kind": "kspkg", "name": "c", "out_size": 1, "blobs": [], "extras": [["../c.json", 1, 0]]}));
+        assert!(peek(&car).is_err());
+        for p in [ok, car] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }

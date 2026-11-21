@@ -572,7 +572,7 @@ async function convertPage() {
   instNow.onclick = async () => {
     if (!lastId || !await ask('Put ' + lastId + ' in the game?\n\nThis adds it to the game\'s track list (content.kspkg, backed up first). Assetto Corsa EVO must be closed.', 'Install')) return;
     instNow.disabled = true;
-    const r = await api('convert/track_install', { id: lastId, replace: replaceIds });
+    const r = await apiLong('convert/track_install', { id: lastId, replace: replaceIds });
     instNow.disabled = false;
     if (r.ok) { toast('Installed ' + lastId); convertPage(); } else toast(r.error || 'could not install', true);
   };

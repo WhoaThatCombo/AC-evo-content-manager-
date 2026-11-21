@@ -62,15 +62,65 @@ pub fn path() -> PathBuf {
     paths::root().join("config.json")
 }
 
+/// The file's settings: a JSON object (a UTF-8 BOM from Notepad allowed).
+fn parse(b: &[u8]) -> Result<Map<String, Value>, String> {
+    let b = b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(b);
+    match serde_json::from_slice::<Value>(b) {
+        Ok(Value::Object(m)) => Ok(m),
+        Ok(_) => Err("not a JSON object".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// None when config.json is missing or fine; why it is unusable otherwise.
+pub fn problem() -> Option<String> {
+    problem_at(&path())
+}
+
+fn problem_at(p: &std::path::Path) -> Option<String> {
+    if let Some(Value::Object(_)) = crate::jsoncache::read(p) {
+        return None;
+    }
+    match std::fs::read(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!("cannot read {}: {e}", p.display())),
+        Ok(b) => parse(&b).err().map(|e| format!("{} does not parse ({e})", p.display())),
+    }
+}
+
 /// DEFAULTS, overlaid with the file (unknown keys in the file are kept).
+/// ⚠ An unparseable file runs on defaults but is never saved over (save).
 pub fn load() -> Map<String, Value> {
+    load_at(&path())
+}
+
+fn load_at(p: &std::path::Path) -> Map<String, Value> {
     let mut cfg = defaults();
-    if let Some(Value::Object(file)) = crate::jsoncache::read(&path()) {
-        for (k, v) in file {
-            cfg.insert(k, v);
-        }
+    let file = match crate::jsoncache::read(p) {
+        Some(Value::Object(m)) => Some(m),
+        // the slow path only for a file the cache could not take (a BOM)
+        _ => std::fs::read(p).ok().and_then(|b| parse(&b).ok()),
+    };
+    for (k, v) in file.unwrap_or_default() {
+        cfg.insert(k, v);
     }
     cfg
+}
+
+/// Keep the unusable file as config.json.bad-<time> (once per content).
+fn keep_bad_copy(p: &std::path::Path) -> Option<PathBuf> {
+    let b = std::fs::read(p).ok()?;
+    let name = p.file_name()?.to_string_lossy().into_owned();
+    let dir = p.parent()?;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if n.starts_with(&format!("{name}.bad-")) && std::fs::read(e.path()).ok().as_deref() == Some(&b[..]) {
+            return Some(e.path());
+        }
+    }
+    let bad = dir.join(format!("{name}.bad-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+    crate::safefs::write_atomic(&bad, &b).ok()?;
+    Some(bad)
 }
 
 pub fn get_str(cfg: &Map<String, Value>, key: &str) -> String {
@@ -83,12 +133,26 @@ pub fn public_cfg(cfg: &Map<String, Value>) -> Value {
     let set = !get_str(cfg, "update_token").is_empty();
     out.insert("update_token".into(), json!(""));
     out.insert("update_token_set".into(), json!(set));
+    if let Some(why) = problem() {
+        out.insert("config_error".into(), json!(format!("{why} - ACECM is running on default settings and will not save over the file until it is fixed (or deleted)")));
+    }
     Value::Object(out)
 }
 
 /// Persist a settings change - only keys we know about.
+/// ⚠ Refused while config.json exists but does not parse: load() runs on
+/// defaults then, and saving "defaults + this change" (several savers run
+/// on their own) wiped every path and port the user had set.
 pub fn save(patch: &Value) -> std::io::Result<Value> {
-    let mut cfg = load();
+    save_at(&path(), patch)
+}
+
+fn save_at(p: &std::path::Path, patch: &Value) -> std::io::Result<Value> {
+    if let Some(why) = problem_at(p) {
+        let kept = keep_bad_copy(p).map(|b| format!("; a copy was kept as {}", b.display())).unwrap_or_default();
+        return Err(std::io::Error::other(format!("{why} - not saving over it{kept}. Fix the file (or delete it to start from defaults), then try again")));
+    }
+    let mut cfg = load_at(p);
     let known = defaults();
     if let Value::Object(p) = patch {
         for (k, v) in p {
@@ -102,19 +166,55 @@ pub fn save(patch: &Value) -> std::io::Result<Value> {
             cfg.insert(k.clone(), v.clone());
         }
     }
-    write(&cfg)?;
+    write(p, &cfg)?;
     Ok(public_cfg(&cfg))
 }
 
-fn write(cfg: &Map<String, Value>) -> std::io::Result<()> {
-    let p = path();
+fn write(p: &std::path::Path, cfg: &Map<String, Value>) -> std::io::Result<()> {
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }
-    // write-then-rename: a reader (the Python backend) never sees half a file
-    let tmp = p.with_extension("json.part");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&Value::Object(cfg.clone()))?)?;
-    let r = std::fs::rename(&tmp, &p);
-    crate::jsoncache::forget(&p);
+    // temp + fsync + rename: a reader never sees half a file, two writers
+    // never share one temp name, and a power cut leaves the old file
+    let r = crate::safefs::write_atomic(p, serde_json::to_string_pretty(&Value::Object(cfg.clone()))?.as_bytes());
+    crate::jsoncache::forget(p);
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_file_is_kept_not_overwritten() {
+        let dir = crate::safefs::test_dir().join(format!("cfg_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.json");
+        // missing: saves fine
+        assert!(problem_at(&p).is_none());
+        save_at(&p, &json!({"server_dir": "D:/srv"})).unwrap();
+        assert_eq!(get_str(&load_at(&p), "server_dir"), "D:/srv");
+        // a hand-edit typo: loads as defaults, every save is refused, the file survives
+        let broken = b"{\"server_dir\": \"D:/srv\", \"game_dir\": \"E:/evo\",}".to_vec();
+        std::fs::write(&p, &broken).unwrap();
+        assert!(problem_at(&p).is_some());
+        assert_eq!(get_str(&load_at(&p), "server_dir"), "");
+        let e = save_at(&p, &json!({"remote_admin": true})).unwrap_err().to_string();
+        assert!(e.contains("not saving"), "{e}");
+        assert_eq!(std::fs::read(&p).unwrap(), broken);
+        let bads: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("config.json.bad-")).collect();
+        assert_eq!(bads.len(), 1);
+        assert_eq!(std::fs::read(bads[0].path()).unwrap(), broken);
+        // a second refusal does not pile up copies
+        let _ = save_at(&p, &json!({"remote_admin": true}));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("config.json.bad-")).count(), 1);
+        // a Notepad BOM is fine
+        std::fs::write(&p, b"\xEF\xBB\xBF{\"server_dir\": \"X:/s\"}").unwrap();
+        assert!(problem_at(&p).is_none());
+        assert_eq!(get_str(&load_at(&p), "server_dir"), "X:/s");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

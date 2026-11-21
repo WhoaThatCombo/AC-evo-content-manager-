@@ -29,8 +29,14 @@ fn running() -> bool {
     JOB.lock().unwrap().get("state").and_then(|v| v.as_str()) == Some("running")
 }
 
-fn begin(detail: &str, total: u64) {
+/// Claim the one job slot: false when a job is already running.
+/// ⚠ Test-and-set under ONE lock: "is it running?" then "begin" let two
+/// requests both start.
+fn begin(detail: &str, total: u64) -> bool {
     let mut g = JOB.lock().unwrap();
+    if g.get("state").and_then(|v| v.as_str()) == Some("running") {
+        return false;
+    }
     // a new job starts clean: no leftover warning or error from the last one
     g.remove("warning");
     g.remove("_error");
@@ -38,6 +44,22 @@ fn begin(detail: &str, total: u64) {
     for (k, v) in [("state", json!("running")), ("detail", json!(detail)), ("done", json!(0)), ("total", json!(total)), ("files", json!([]))] {
         g.insert(k.into(), v);
     }
+    true
+}
+
+const BUSY: &str = "a content job is already running";
+
+/// Run a job body on its own thread; a panic ends the job as an error
+/// instead of leaving it "running" for ever (every later job refused).
+fn spawn_job(f: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || {
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            let msg = p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "panic".into());
+            logs::warn(format!("content job panicked: {msg}"));
+            update(json!({"state": "error", "detail": format!("the job failed unexpectedly: {msg}")}));
+        }
+    });
 }
 
 fn sv(v: &Value, k: &str) -> String {
@@ -96,9 +118,11 @@ pub fn install_content(body: &Value) -> Value {
     // ⚠ files here but the track not in the game's list is NOT "you already
     // have everything" - only the tables need writing
     if need.is_empty() && !reg.is_empty() {
-        begin("adding to the game's track list", 0);
+        if !begin("adding to the game's track list", 0) {
+            return json!({"ok": false, "error": BUSY});
+        }
         let r2 = reg.clone();
-        std::thread::spawn(move || {
+        spawn_job(move || {
             contentsync::install_files(&[], &JOB, &r2);
             install::after_content_change();
             let warn = sv(&status(), "warning");
@@ -123,9 +147,11 @@ pub fn install_content(body: &Value) -> Value {
     if let Some(why) = install::room_for_all(&targets) {
         return json!({"ok": false, "error": why});
     }
-    begin("starting", bytes);
+    if !begin("starting", bytes) {
+        return json!({"ok": false, "error": BUSY});
+    }
     let n = need.len();
-    std::thread::spawn(move || {
+    spawn_job(move || {
         contentsync::install_files_with(&need, &acemods, &JOB, &reg);
         let err = JOB.lock().unwrap().get("_error").and_then(|e| e.as_str()).map(String::from);
         if let Some(e) = err {
@@ -161,9 +187,11 @@ pub fn tracks_restore() -> Value {
     if crate::procs::game_running() {
         // same answer the job would reach, without starting it
     }
-    begin("restoring imported tracks", miss.len() as u64);
+    if !begin("restoring imported tracks", miss.len() as u64) {
+        return json!({"ok": false, "error": BUSY});
+    }
     let n = miss.len();
-    std::thread::spawn(move || {
+    spawn_job(move || {
         if crate::procs::game_running() {
             update(json!({"state": "error", "detail": "close the game first - restoring tracks writes content.kspkg, which is locked while it runs"}));
             return;
@@ -200,8 +228,10 @@ pub fn push_send(body: &Value) -> Value {
         return json!({"ok": false, "error": "a content job is already running"});
     }
     let (base, tok) = (sv(body, "base"), sv(body, "token"));
-    begin("sending", 0);
-    std::thread::spawn(move || {
+    if !begin("sending", 0) {
+        return json!({"ok": false, "error": BUSY});
+    }
+    spawn_job(move || {
         let r = push::send(&prof, &base, &tok, true, Some(tick_job()));
         if r.get("ok") == Some(&json!(true)) {
             let sent: Vec<String> = r["sent"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(String::from)).collect();
@@ -230,8 +260,10 @@ pub fn push_server_build(body: &Value) -> Value {
     }
     let (base, tok) = (sv(body, "base"), sv(body, "token"));
     let plan = push::server_build_plan();
-    begin("packing the server build", plan.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0));
-    std::thread::spawn(move || {
+    if !begin("packing the server build", plan.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0)) {
+        return json!({"ok": false, "error": BUSY});
+    }
+    spawn_job(move || {
         let tick: push::Tick = std::sync::Arc::new(|sent: u64, total: u64| {
             update(json!({"done": sent, "total": total,
                           "detail": if sent * 2 < total { "packing the server build" } else { "sending the server build" }}));
@@ -274,28 +306,112 @@ pub fn apply_server_build(did: &str) -> Value {
         return bad;
     }
     let root_abs = std::path::absolute(&root).unwrap_or_else(|_| root.clone().into());
+    // ⚠ unpack BESIDE the server folder (same volume), then move the files
+    // in: unpacking in place left a half-updated build on any error
+    let staging = match staging_beside(&root_abs) {
+        Ok(s) => s,
+        Err(e) => { install::drop_cleanup(did); return json!({"ok": false, "error": e}); }
+    };
     let (mut wrote, mut skipped) = (0usize, Vec::new());
     let r = crate::archive::each_file(&src, |name, _sz, rd| {
-        let dest = contentsync::under(&root_abs.to_string_lossy(), &name.split(['/', '\\']).filter(|p| !p.is_empty()).collect::<Vec<_>>());
+        let dest = contentsync::under(&staging.to_string_lossy(), &name.split(['/', '\\']).filter(|p| !p.is_empty()).collect::<Vec<_>>());
         let Ok(dest) = dest else { skipped.push(name.to_string()); return Ok(true) };
         if let Some(p) = dest.parent() {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
         let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
         std::io::copy(rd, &mut out).map_err(|e| e.to_string())?;
+        out.sync_all().map_err(|e| e.to_string())?;
         wrote += 1;
         Ok(true)
     });
     install::drop_cleanup(did);
     if let Err(e) = r {
+        let _ = std::fs::remove_dir_all(&staging);
         logs::warn(format!("applying a server build: {e}"));
-        return json!({"ok": false, "error": format!("could not unpack: {e}")});
+        return json!({"ok": false, "error": format!("could not unpack: {e} - the server folder was not changed")});
+    }
+    let moved = move_tree_in(&staging, &root_abs);
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Err(e) = moved {
+        logs::warn(format!("applying a server build: {e}"));
+        return json!({"ok": false, "error": e});
     }
     if !skipped.is_empty() {
         logs::warn(format!("server build: refused {} path(s) outside the server folder: {:?}", skipped.len(), &skipped[..skipped.len().min(3)]));
     }
     logs::info(format!("applied a server build: {wrote} file(s) into {root}"));
     json!({"ok": true, "applied": wrote, "root": root, "refused": skipped.len()})
+}
+
+/// An empty folder next to `root` (same volume: the final moves are renames).
+fn staging_beside(root: &Path) -> Result<std::path::PathBuf, String> {
+    let mut b = [0u8; 4];
+    let _ = getrandom::fill(&mut b);
+    let tag: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "server".into());
+    let s = root.with_file_name(format!("{name}.acecm-build-{tag}"));
+    std::fs::create_dir_all(&s).map_err(|e| format!("could not make a staging folder beside the server: {e}"))?;
+    Ok(s)
+}
+
+fn files_under(dir: &Path, rel: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    for e in std::fs::read_dir(dir.join(rel))? {
+        let e = e?;
+        let r = rel.join(e.file_name());
+        if e.file_type()?.is_dir() { files_under(dir, &r, out)? } else { out.push(r) }
+    }
+    Ok(())
+}
+
+/// Move every file of `staging` to the same place under `root`, all or
+/// nothing: each replaced file is kept as <name>.acecm-prev until every
+/// move worked, and put back if one fails.
+fn move_tree_in(staging: &Path, root: &Path) -> Result<(), String> {
+    let mut files = Vec::new();
+    files_under(staging, Path::new(""), &mut files).map_err(|e| format!("could not read the unpacked build: {e}"))?;
+    let mut done: Vec<(std::path::PathBuf, Option<std::path::PathBuf>)> = Vec::new();
+    let mut fail = None;
+    for rel in &files {
+        let dest = root.join(rel);
+        let prev = dest.with_file_name(format!("{}.acecm-prev", dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        let r = (|| -> std::io::Result<Option<std::path::PathBuf>> {
+            if let Some(p) = dest.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            let had = dest.exists();
+            if had {
+                let _ = std::fs::remove_file(&prev);
+                std::fs::rename(&dest, &prev)?;
+            }
+            if let Err(e) = std::fs::rename(staging.join(rel), &dest) {
+                if had {
+                    let _ = std::fs::rename(&prev, &dest);
+                }
+                return Err(e);
+            }
+            Ok(had.then(|| prev.clone()))
+        })();
+        match r {
+            Ok(p) => done.push((dest, p)),
+            Err(e) => { fail = Some(format!("could not put {} in place ({e}) - the previous build was put back", rel.display())); break; }
+        }
+    }
+    if let Some(e) = fail {
+        for (dest, prev) in done.into_iter().rev() {
+            let _ = std::fs::remove_file(&dest);
+            if let Some(p) = prev {
+                let _ = std::fs::rename(&p, &dest);
+            }
+        }
+        return Err(e);
+    }
+    for (_, prev) in done {
+        if let Some(p) = prev {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    Ok(())
 }
 
 /// Whatever long content job is running, for the bar the whole app shows.
@@ -328,4 +444,38 @@ pub fn progress() -> Value {
     }
     let st = { let s = sv(&job, "state"); if s.is_empty() { "idle".to_string() } else { s } };
     json!({"ok": true, "active": false, "state": st, "what": sv(&job, "detail")})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_build_moves_in_whole() {
+        let base = crate::safefs::test_dir().join(format!("jobs_build_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("server");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.exe"), b"old a").unwrap();
+        std::fs::write(root.join("keep.txt"), b"mine").unwrap();
+        let st = staging_beside(&root).unwrap();
+        std::fs::create_dir_all(st.join("sub")).unwrap();
+        std::fs::write(st.join("a.exe"), b"new a").unwrap();
+        std::fs::write(st.join("sub").join("b.bin"), b"new b").unwrap();
+        move_tree_in(&st, &root).unwrap();
+        assert_eq!(std::fs::read(root.join("a.exe")).unwrap(), b"new a");
+        assert_eq!(std::fs::read(root.join("sub").join("b.bin")).unwrap(), b"new b");
+        assert_eq!(std::fs::read(root.join("keep.txt")).unwrap(), b"mine");
+        assert!(!root.join("a.exe.acecm-prev").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn one_job_at_a_time() {
+        assert!(begin("first", 0));
+        assert!(!begin("second", 0));
+        update(json!({"state": "done"}));
+        assert!(begin("third", 0));
+        update(json!({"state": "idle"}));
+    }
 }

@@ -53,6 +53,14 @@ pub fn copy_atomic(src: &Path, dst: &Path) -> std::io::Result<()> {
     r
 }
 
+/// Scratch folder for tests that write files: $ACECM_TEST_DIR, else temp.
+#[cfg(test)]
+pub fn test_dir() -> PathBuf {
+    let d = std::env::var("ACECM_TEST_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
 /// Make `bak` from `src` unless it already exists. Ok(true) when made.
 /// ⚠ The caller must STOP on Err: writing the original after a failed
 /// backup is how a user ends up with no way back.

@@ -164,27 +164,47 @@ async function contentFrom(s) {
      still not usable, so counting only need meant answering "you already have
      everything" to someone who could not load the track. */
   const wanted = plans.filter(x => x.p.ok && ((x.p.need || []).length
-                                   || (x.p.needs_register || []).length));
+                                   || (x.p.needs_register || []).length
+                                   || (x.p.confirm_replace || []).length
+                                   || (x.p.confirm_remove || []).length));
   if (!wanted.length) {
     toast('You already have everything this host offers'); return;
   }
-  const files = wanted.reduce((a, x) => a + (x.p.need || []).length, 0);
+  /* ⚠ The host's manifest decides what gets overwritten and deleted. Name
+     every existing file that would be, so a host cannot quietly replace or
+     wipe a mod/track it never installed here. Files a previous sync from
+     this same host installed are listed too; the others are only touched
+     because they are sent back as `confirm`. */
+  const all = k => [...new Set(wanted.flatMap(x => x.p[k] || []))];
+  const confirm = [...all('confirm_replace'), ...all('confirm_remove')];
+  const replacing = [...all('replace'), ...all('confirm_replace')];
+  const removing = [...all('stale'), ...all('confirm_remove')];
+  const listOf = (title, a) => a.length
+    ? `\n\n${title} (${a.length}):\n` + a.slice(0, 20).map(p => '  ' + p).join('\n')
+      + (a.length > 20 ? `\n  …and ${a.length - 20} more` : '')
+    : '';
+  const changes = listOf('These existing files will be REPLACED', replacing)
+    + listOf('These existing files will be DELETED', removing)
+    + (confirm.length ? `\n\n${confirm.length} of them were not installed from this host.` : '');
+  const files = wanted.reduce((a, x) => a + (x.p.need || []).length
+                                    + (x.p.confirm_replace || []).length, 0);
   const fixing = wanted.reduce((a, x) => a + (x.p.needs_register || []).length, 0);
-  const mb = (wanted.reduce((a, x) => a + (x.p.bytes || 0), 0) / 1e6).toFixed(0);
+  const totalMb = (wanted.reduce((a, x) => a + (x.p.bytes || 0), 0) / 1e6).toFixed(0);
   // compressed packages (the host builds them; this ACECM rebuilds them
   // from the game): what actually comes down the wire
   const dl = wanted.reduce((a, x) => a + (x.p.download_bytes === undefined ? (x.p.bytes || 0) : x.p.download_bytes), 0);
-  const size = (+mb > 0 && dl / 1e6 < +mb - 1) ? mb + ' MB -> ' + (dl / 1e6).toFixed(0) + ' MB to download (compressed)' : mb + ' MB';
-  if (!files && fixing) {
+  const size = (+totalMb > 0 && dl / 1e6 < +totalMb - 1) ? totalMb + ' MB -> ' + (dl / 1e6).toFixed(0) + ' MB to download (compressed)' : totalMb + ' MB';
+  if (!files && fixing && !changes) {
     if (!await ask(fixing + ' track(s) are already downloaded but missing from '
         + "the game's track list.\n\nAdd them now? "
         + '(Assetto Corsa EVO must be closed.)')) return;
   } else if (!await ask(wanted.map(x => '• ' + x.e.name).join('\n')
       + `\n\nMissing ${files} file(s), ${size}.`
       + (fixing ? `\n${fixing} track(s) also need adding to the game.` : '')
+      + changes
       + `\n\nDownload from ${d.base} and install?`)) return;
   const r = await api('browser/install',
-                      { base: d.base, ids: wanted.map(x => x.e.id) });
+                      { base: d.base, ids: wanted.map(x => x.e.id), confirm });
   if (!r.ok) { toast(r.error || 'install failed', true); return; }
   // ⚠ This used to be one line of text in the page, which is why a download
   // that was working looked like nothing was happening: no bar, no rate, no

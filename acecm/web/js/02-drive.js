@@ -1541,10 +1541,11 @@ async function drivePage() {
       // ⚠ "still coming" and "there are none" are different things to say.
       // Showing the empty-state while the fetch is in flight read as though
       // the list had failed, a moment before it appeared.
-      trkList.append(el('div', 'empty',
+      // ⚠ el() sets innerHTML: the hint/error text comes from the lobby side
+      trkList.append(el('div', 'empty', esc(
         d.servers_pending ? 'Loading public servers…'
         : (meta.hint || meta.error
-           || 'No public list yet. Use Refresh list.')));
+           || 'No public list yet. Use Refresh list.'))));
       return;
     }
     const num = v => (typeof v === 'number' ? v : 0);

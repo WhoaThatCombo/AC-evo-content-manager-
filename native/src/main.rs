@@ -230,6 +230,19 @@ fn main() {
     acecm::startup::run(listen.port);
     // leaked Python onefile folders from before the native build
     std::thread::spawn(|| { let _ = installer::sweep_bundles(); });
+    // an archive write cut off by a crash or power cut left its journal:
+    // put the saved index back before anything reads or writes it
+    std::thread::spawn(|| {
+        let mut pkgs = vec![acecm::trackdeploy::server_kspkg()];
+        pkgs.extend(acecm::trackdeploy::client_kspkg().map(std::path::PathBuf::from));
+        for p in pkgs {
+            match acecm::kspkg_write::recover_pending(&p) {
+                Ok(true) => acecm::logs::warn(format!("restored the index of {} after an interrupted write", p.display())),
+                Ok(false) => {}
+                Err(e) => acecm::logs::warn(format!("could not recover {}: {e}", p.display())),
+            }
+        }
+    });
     // track share packs nobody used for days (GBs each), now and every 6 h
     std::thread::spawn(|| loop {
         acecm::registry::prune_track_packs();

@@ -31,6 +31,19 @@ pub fn json_resp(code: u16, v: &Value) -> Response {
         .into_response()
 }
 
+/// A UNC / device path (`\\host\share`, `//host`, `\\?\`, `\\.\`). Touching
+/// one makes Windows authenticate to that host with the user's NTLM
+/// credentials, so routes that take a raw path from a query refuse them
+/// (a mapped drive letter still works).
+pub fn is_unc(p: &str) -> bool {
+    let p = p.trim();
+    p.starts_with("\\\\") || p.starts_with("//") || p.starts_with("\\/") || p.starts_with("/\\")
+}
+
+fn unc_refused() -> Response {
+    json_resp(400, &json!({"ok": false, "error": "network (UNC) paths are not accepted here - map the share to a drive letter"}))
+}
+
 fn q_flag(query: &str, key: &str) -> bool {
     q_get(query, key).as_deref() == Some("1")
 }
@@ -229,7 +242,7 @@ async fn thumb(peer: IpAddr, req: Request, path: &str, query: &str) -> Result<Re
         let (c, v) = auth::deny_remote(&cfg);
         return Ok(json_resp(c, &v));
     }
-    if !auth::browser_ok(false, &peer, &h, query) {
+    if !auth::browser_ok(&cfg, false, &peer, &h, query) {
         let (c, v) = auth::deny_browser();
         return Ok(json_resp(c, &v));
     }
@@ -379,6 +392,11 @@ fn find_profile(id: &str) -> Option<Value> {
     crate::profiles::load().into_iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id))
 }
 
+/// find_profile() off the async threads (profiles.json is a file read).
+async fn profile_off_thread(id: String) -> Option<Value> {
+    tokio::task::spawn_blocking(move || find_profile(&id)).await.ok().flatten()
+}
+
 /// Run file-system work off the async threads.
 async fn blocking<F: FnOnce() -> Value + Send + 'static>(f: F) -> Value {
     tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| json!({"error": e.to_string()}))
@@ -472,9 +490,19 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         let (c, v) = auth::deny_remote(&cfg);
         return Ok(json_resp(c, &v));
     }
-    if gated && !auth::browser_ok(write, &peer, &h, &query) {
+    if gated && !auth::browser_ok(&cfg, write, &peer, &h, &query) {
         let (c, v) = auth::deny_browser();
         return Ok(json_resp(c, &v));
+    }
+    // ⚠ an unlisted share entry (public: false) is not served to strangers:
+    // only this PC or a holder of the admin token
+    if !write && matches!(path.as_str(), "/api/registry/manifest" | "/api/registry/file" | "/api/registry/acemod" | "/api/registry/pack")
+        && !auth::admin_ok(&cfg, &peer, &h, &query)
+    {
+        let id = q_get(&query, "id").unwrap_or_default();
+        if !tokio::task::spawn_blocking(move || crate::registry::is_public(&id)).await.unwrap_or(false) {
+            return Ok(json_resp(404, &json!({"ok": false, "error": "no such server"})));
+        }
     }
     // a drag-drop STREAMS the file: never read it as a JSON body
     if write && path == "/api/drop/part" {
@@ -520,7 +548,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (false, "/api/logs") => {
             let n = q_get(&query, "lines").and_then(|v| v.parse().ok()).unwrap_or(300);
             let f = q_get(&query, "file").unwrap_or_else(|| "acecm.log".into());
-            json_resp(200, &crate::logs::tail(n, &f))
+            json_resp(200, &blocking(move || crate::logs::tail(n, &f)).await)
         }
         (false, "/api/logs/files") => json_resp(200, &crate::logs::files()),
         // ---- AC1 car / track conversion (convert.rs, converttrack.rs)
@@ -539,7 +567,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (true, "/api/convert/import") => { let id = bs("id"); json_resp(200, &blocking(move || crate::convert::import_dropped(&id)).await) }
         (true, "/api/convert/settings") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::save_settings(&b)).await) }
         (true, "/api/convert/start") => { let b = body.clone(); json_resp(200, &blocking(move || crate::convert::start(&b)).await) }
-        (true, "/api/convert/cancel") => json_resp(200, &crate::convert::cancel()),
+        (true, "/api/convert/cancel") => json_resp(200, &blocking(crate::convert::cancel).await),
         (false, "/api/convert/earlier") => {
             let (k, f) = (q_get(&query, "kind").unwrap_or_default(), q_get(&query, "folder").unwrap_or_default());
             json_resp(200, &blocking(move || crate::convert::earlier_api(&k, &f)).await)
@@ -547,6 +575,9 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (false, "/api/convert/tracks") => json_resp(200, &blocking(crate::converttrack::tracks).await),
         (false, "/api/convert/track_info") => {
             let (t, src) = (q_get(&query, "track").unwrap_or_default(), q_get(&query, "source").unwrap_or_default());
+            if is_unc(&src) || is_unc(&t) {
+                return Ok(unc_refused());
+            }
             json_resp(200, &blocking(move || crate::converttrack::info(&t, &src)).await)
         }
         (true, "/api/convert/track_open") => { let b = body.clone(); json_resp(200, &blocking(move || crate::converttrack::open(&b)).await) }
@@ -596,6 +627,9 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         }
         (false, "/api/trackdeploy") => {
             let dir = q_get(&query, "dir");
+            if dir.as_deref().is_some_and(is_unc) {
+                return Ok(unc_refused());
+            }
             json_resp(200, &blocking(move || {
                 let mut v = crate::trackdeploy::state();
                 if let (Some(a), Value::Object(b)) = (v.as_object_mut(), crate::trackdeploy::packages(dir.as_deref())) {
@@ -677,7 +711,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         }).await),
         (false, "/api/server/status") => {
             let id = q_get(&query, "id").unwrap_or_default();
-            match find_profile(&id) {
+            match profile_off_thread(id).await {
                 Some(p) => json_resp(200, &blocking(move || crate::serverproc::status(&p)).await),
                 None => json_resp(404, &json!({"error": "no such profile"})),
             }
@@ -685,7 +719,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (false, "/api/server/log") => {
             let id = q_get(&query, "id").unwrap_or_default();
             let since = q_get(&query, "since").and_then(|v| v.parse().ok()).unwrap_or(0);
-            let p = find_profile(&id).unwrap_or(json!({}));
+            let p = profile_off_thread(id).await.unwrap_or(json!({}));
             json_resp(200, &blocking(move || crate::serverproc::log_tail(&p, 120, since)).await)
         }
         (true, "/api/profiles/save") => {
@@ -698,7 +732,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             json_resp(200, &json!({"ok": true}))
         }
         (true, "/api/server/start") => {
-            let Some(p) = find_profile(&bs("id")) else {
+            let Some(p) = profile_off_thread(bs("id")).await else {
                 return Ok(json_resp(404, &json!({"ok": false, "error": "no profile"})));
             };
             // ⚠ off the request: a start that deploys a track runs past the
@@ -863,8 +897,8 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (true, "/api/pit/bind") => {
             let id = match body.get("id") { None | Some(Value::Null) => json!(""), Some(v) => v.clone() };
             let mask = body.get("mask").and_then(|v| v.as_i64()).unwrap_or(0);
-            let r = config::save(&json!({"pit_btn_kind": bs("kind"), "pit_btn_id": id, "pit_btn_mask": mask, "pit_btn_label": bs("label")}));
-            json_resp(200, &r.unwrap_or_else(|e| json!({"ok": false, "error": e.to_string()})))
+            let patch = json!({"pit_btn_kind": bs("kind"), "pit_btn_id": id, "pit_btn_mask": mask, "pit_btn_label": bs("label")});
+            json_resp(200, &blocking(move || config::save(&patch).unwrap_or_else(|e| json!({"ok": false, "error": e.to_string()}))).await)
         }
         (false, "/api/car/specs") => {
             let (pid, mid) = (q_get(&query, "preset").unwrap_or_default(), q_get(&query, "id").unwrap_or_default());
@@ -970,7 +1004,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let (side, off) = (bs("side"), bb("off"));
             json_resp(200, &blocking(move || crate::penalties::set_penalties(&side, off)).await)
         }
-        (false, "/api/registry") => json_resp(200, &json!({"servers": crate::registry::load(), "template": crate::registry::template()})),
+        (false, "/api/registry") => json_resp(200, &blocking(|| json!({"servers": crate::registry::load(), "template": crate::registry::template()})).await),
         (false, "/api/gamesettings/export") => {
             let only: Vec<String> = query.split('&').filter_map(|kv| kv.split_once('=')).filter(|(k, _)| *k == "file")
                 .map(|(_, v)| q_get(&format!("x={v}"), "x").unwrap_or_default()).filter(|v| !v.is_empty()).collect();
@@ -1008,7 +1042,7 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             if !auth::is_loopback(&peer) { let (c, v) = auth::deny_remote(&cfg); json_resp(c, &v) }
             else {
                 let on = bb("on");
-                let _ = config::save(&json!({"remote_admin": on}));
+                blocking(move || { let _ = config::save(&json!({"remote_admin": on})); Value::Null }).await;
                 json_resp(200, &json!({"ok": true, "remote_admin": on, "token": if on { auth::token_create() } else { String::new() }}))
             }
         }
@@ -1052,6 +1086,9 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
         (false, "/api/share") => json_resp(200, &blocking(crate::contentsync::share_info).await),
         (false, "/api/mods/scan") => {
             let p = q_get(&query, "path").unwrap_or_default();
+            if is_unc(&p) {
+                return Ok(unc_refused());
+            }
             json_resp(200, &blocking(move || crate::install::scan_source(&p)).await)
         }
         (false, "/api/library") => json_resp(200, &blocking(crate::install::library).await),
@@ -1081,7 +1118,15 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
                 None => json!({"ok": false, "error": "no such server"}),
             }).await)
         }
-        (true, "/api/browser/install") => { let b = body.clone(); json_resp(200, &blocking(move || crate::jobs::install_content(&b)).await) }
+        (true, "/api/browser/install") => {
+            // the existing files the user saw listed and agreed to have
+            // replaced / deleted (contentsync receipts); nothing else is touched
+            let confirm: Vec<String> = body.get("confirm").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            crate::contentsync::approve(&bs("base"), &confirm);
+            let b = body.clone();
+            json_resp(200, &blocking(move || crate::jobs::install_content(&b)).await)
+        }
         (true, "/api/browser/scan") => {
             let only = match body.get("only_missing") { None => true, v => bb_of(v) };
             json_resp(200, &blocking(move || {
@@ -1165,10 +1210,14 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
             let shape = { let s = bs("shape"); if s.is_empty() { "bare".to_string() } else { s } };
             json_resp(200, &blocking(move || crate::backend::join(&id, &shape, Value::Null, Value::Null, "")).await)
         }
-        (true, "/api/config") => match config::save(&body) {
-            Ok(v) => json_resp(200, &v),
-            Err(e) => json_resp(500, &json!({"error": format!("OSError: {e}")})),
-        },
+        (true, "/api/config") => {
+            let b = body.clone();
+            match tokio::task::spawn_blocking(move || config::save(&b)).await {
+                Ok(Ok(v)) => json_resp(200, &v),
+                Ok(Err(e)) => json_resp(500, &json!({"error": format!("OSError: {e}")})),
+                Err(e) => json_resp(500, &json!({"error": e.to_string()})),
+            }
+        }
         _ => json_resp(404, &json!({"error": "not found"})),
     };
     Ok(out)
@@ -1177,4 +1226,17 @@ pub async fn handle(peer: IpAddr, req: Request) -> Result<Response, Request> {
 #[allow(dead_code)]
 pub fn empty() -> Body {
     Body::empty()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unc_paths_refused() {
+        for p in [r"\\attacker\x", "//attacker/x", r"\\?\C:\x", r"\\.\pipe\x", r"\/host\x", " \\\\host\\x"] {
+            assert!(super::is_unc(p), "{p}");
+        }
+        for p in [r"C:\mods", "D:/tracks", "Z:\\share", "", "mods"] {
+            assert!(!super::is_unc(p), "{p}");
+        }
+    }
 }

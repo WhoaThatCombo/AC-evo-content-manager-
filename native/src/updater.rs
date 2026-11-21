@@ -105,10 +105,19 @@ fn client(timeout: u64) -> reqwest::blocking::Client {
 fn request(url: &str, accept: &str, timeout: u64) -> reqwest::blocking::RequestBuilder {
     let mut r = client(timeout).get(url).header("Accept", accept);
     let t = token();
-    if !t.is_empty() {
+    // ⚠ the token is a GitHub credential: only ever sent to GitHub over
+    // https, never to an update_url host or a url some feed names
+    if !t.is_empty() && github_url(url) {
         r = r.header("Authorization", format!("Bearer {t}"));
     }
     r
+}
+
+fn github_url(url: &str) -> bool {
+    reqwest::Url::parse(url).ok().is_some_and(|u| {
+        u.scheme() == "https" && u.username().is_empty() && u.port().is_none()
+            && matches!(u.host_str(), Some("api.github.com" | "github.com"))
+    })
 }
 
 enum Fail {
@@ -645,6 +654,12 @@ fn apply_inner() -> Value {
         return json!({"ok": false, "error": "that release has no checksum — refusing to install"});
     }
     let latest = s("latest");
+    // ⚠ an older release is still genuinely signed: whoever controls the
+    // feed could otherwise swap in a build with a known hole (downgrade)
+    if !newer(&latest, VERSION) {
+        return json!({"ok": false, "error": format!("refusing the update: {} is not newer than this build ({VERSION})",
+            if latest.is_empty() { "the offered version" } else { latest.as_str() })});
+    }
     let Ok(exe) = std::env::current_exe() else { return json!({"ok": false, "error": "cannot find the running exe"}) };
     // ⚠ not beside the running exe: a previous failed swap can leave that
     // file locked
@@ -705,5 +720,28 @@ fn apply_inner() -> Value {
         crate::logs::info(format!("update to {latest} downloaded and verified; swap scheduled ({})", blog.display()));
         json!({"ok": true, "version": latest, "log": blog.to_string_lossy(),
                "note": "downloaded and verified; close ACECM to finish the update - it will relaunch itself. If the new build does not start, the previous one is put back."})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_only_to_github() {
+        assert!(github_url("https://api.github.com/repos/a/b/releases/latest"));
+        assert!(github_url("https://github.com/a/b/releases/download/v1/ACECM.exe"));
+        for u in ["http://api.github.com/x", "https://api.github.com.evil.example/x", "https://evil.example/api.github.com",
+                  "https://user@api.github.com/x", "https://api.github.com:8443/x", "https://example.com/update.json"] {
+            assert!(!github_url(u), "{u}");
+        }
+    }
+
+    #[test]
+    fn no_downgrade() {
+        assert!(newer("99.0.0", VERSION));
+        assert!(!newer(VERSION, VERSION));
+        assert!(!newer("0.1.0", VERSION));
+        assert!(!newer("", VERSION));
     }
 }

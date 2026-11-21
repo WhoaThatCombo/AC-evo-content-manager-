@@ -195,10 +195,12 @@ pub fn status() -> Value {
 pub fn set_damage(pct: f64) -> Value {
     let pct = pct.round_ties_even().clamp(0.0, 100.0) as i64;
     let Some(a) = archive() else { return json!({"ok": false, "error": "server content.kspkg not found"}) };
+    // ⚠ lock first, then a fresh look: the lock can wait behind another writer
+    let _lock = match crate::archlock::lock() { Ok(g) => g, Err(e) => return json!({"ok": false, "error": e}) };
+    crate::procs::invalidate_snapshot();
     if trackdeploy::server_running() {
         return json!({"ok": false, "error": "stop every server first - the server holds content.kspkg open"});
     }
-    let _lock = match crate::archlock::lock() { Ok(g) => g, Err(e) => return json!({"ok": false, "error": e}) };
     let mut changes: Vec<(String, Vec<u8>)> = vec![];
     let mut notes = vec![];
     for path in TEMPLATES {
