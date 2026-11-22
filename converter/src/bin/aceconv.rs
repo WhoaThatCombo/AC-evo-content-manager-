@@ -13,6 +13,11 @@ const USAGE: &str = "aceconv <command> ...
   check-track-decl [content.kspkg] [--skip a,b]  simulate every stock track's (layout, mode) lookup
                                             (+ its track-limit / ideal-line splines and spawn orientation)
   check-lighting <track dir>...             only the static-mesh lighting checks
+  game-check <car.kspkg | track dir | mods dir> [content.kspkg] [--saved <Saved Games\\ACE>] [--rules-only]
+                                            predict in-game load failures: each with the file, the reason
+                                            and how the game reacts (package table, shaders, surfaces,
+                                            spawns, mod clashes, + the validator unless --rules-only)
+  game-check --stock [content.kspkg]        the game rules on every stock car / track (must print none)
   make-donor [content.kspkg] [out dir]      build the donor car + template materials
   make-fmod-template [content.kspkg] [dir]  decompile the game banks into the sound template
   fmod-decompile <content.kspkg> <bank> <dir> [event filter]
@@ -36,6 +41,9 @@ const USAGE: &str = "aceconv <command> ...
                                             run with the game closed)
   car-phys <car.kspkg | stock car id> [content.kspkg]   the physics model, gearing, AI hints, PI as json
   car-phys --ac1 <ac1 car dir>...           physics stage only (no package): drivetrain read-back, one json line per car
+  source-fit <ac1 car dir>[=<stock twin id>]... [--content <content.kspkg>]
+                                            fit EVO tyres to the source's default compound; error
+                                            and whole-car limits (source, pre-fit rule, fit) as json
   track <ac1 track dir> <out dir> [--id <id>]  convert an AC1 track -> <out>\\<id>\\ (+ ui\\track_decl.json)
   track-scan <ac1 track dir>...             scan AC1 tracks: layouts, meshes, spawns, AI lines
   veg-catalogue [content.kspkg]             the factory plants the vegetation stage picks from
@@ -211,6 +219,53 @@ fn run() -> Result<()> {
                 std::process::exit(2);
             }
         }
+        "game-check" => {
+            let mut pos: Vec<&String> = Vec::new();
+            let (mut saved, mut full, mut stock) = (aceconv::car::usersettings::saved_dir(), true, false);
+            let mut i = 2;
+            while i < a.len() {
+                match a[i].as_str() {
+                    "--saved" => {
+                        saved = Some(PathBuf::from(a.get(i + 1).ok_or_else(|| anyhow!("--saved needs a value"))?));
+                        i += 1;
+                    }
+                    "--rules-only" => full = false,
+                    "--stock" => stock = true,
+                    _ => pos.push(&a[i]),
+                }
+                i += 1;
+            }
+            use aceconv::validate::gamecheck as gc;
+            let content_arg = if stock { pos.first().copied() } else { pos.get(1).copied() };
+            let game = aceconv::validate::Game::open(&content(content_arg))?;
+            let shaders = gc::stock_shaders(&game);
+            let ctx = gc::Ctx { game: &game, shaders, saved, full };
+            let o = if stock {
+                gc::stock(&ctx, &content(content_arg))
+            } else {
+                let target = PathBuf::from(pos.first().ok_or_else(|| anyhow!("game-check needs a path
+
+{USAGE}"))?);
+                let mut o = gc::Outcome::default();
+                if target.is_file() {
+                    gc::car_package(&target, &ctx, &mut o)?;
+                } else {
+                    let id = target.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                    if target.join(format!("{id}.scene")).is_file() {
+                        let installed = target.parent().and_then(|p| p.file_name()).map(|f| f.eq_ignore_ascii_case("tracks")).unwrap_or(false)
+                            && target.ancestors().any(|d| d.file_name().map(|f| f.eq_ignore_ascii_case("mods")).unwrap_or(false));
+                        gc::track_folder(&target, &ctx, installed, &mut o)?;
+                    } else {
+                        gc::mods_dir(&target, &ctx, &mut o)?;
+                    }
+                }
+                o
+            };
+            o.print();
+            if o.fails() > 0 {
+                std::process::exit(2);
+            }
+        }
         "make-donor" => {
             let c = content(a.get(2));
             match a.get(3) {
@@ -371,60 +426,30 @@ fn run() -> Result<()> {
                 println!("{}{d}", if dry { "would remove " } else { "removed " });
             }
         }
-        "kn5-lock" => {
-            // exit 0: this kn5 opens (plain, or decryptable); 1: locked, reason on stdout
-            match aceconv::ac1::kn5_decrypt::status(Path::new(arg(2)?)) {
-                Ok(()) => println!("ok"),
-                Err(e) => {
-                    println!("{e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        "kn5-decrypt" => {
-            // write the plain kn5 the converter reads (decrypted when CSP-encrypted)
-            let b = aceconv::ac1::kn5_decrypt::open(Path::new(arg(2)?))?;
-            std::fs::write(arg(3)?, &b[..])?;
-            println!("{} bytes", b.len());
-        }
-        "kn5-geocheck" => {
-            // decrypt each file and print its normals-vs-triangles score before/after
-            for p in &a[2..] {
-                match aceconv::ac1::kn5_decrypt::geometry_check(Path::new(p)) {
-                    Ok((v, Some(c))) => println!("v{v}	{:.3}	{:.3}	{:.1}	{}	{}	{p}", c.before, c.after, c.spread, c.meshes, if c.ok() { "ok" } else { "FAIL" }),
-                    Ok((v, None)) => println!("v{v}	-	-	-	0	plain	{p}"),
-                    Err(e) => println!("ERR	-	-	-	0	{e}	{p}"),
-                }
-            }
-        }
-        "car-lock" => {
-            // exit 0: the car's model opens (plain, or decryptable); 1: locked, reason on stdout
-            // the key check on the model the converter would load: no decrypt
-            let lock = aceconv::ac1::car::Car::model_path(Path::new(arg(2)?)).and_then(|p| {
-                let f = std::fs::File::open(&p)?;
-                // SAFETY: read-only map of a file nobody writes meanwhile
-                let map = unsafe { memmap2::Mmap::map(&f)? };
-                if aceconv::ac1::kn5_decrypt::detect(&map).is_some() {
-                    aceconv::ac1::kn5_decrypt::status(&p)
-                } else if aceconv::ac1::kn5::protected(&map) {
-                    anyhow::bail!("{}: protected by its author", p.display())
-                } else {
-                    Ok(())
-                }
-            });
-            match lock {
-                Ok(()) => println!("ok"),
-                Err(e) => {
-                    println!("{e:#}");
-                    std::process::exit(1);
-                }
-            }
-        }
         "car-frame" => {
             let car = aceconv::ac1::car::Car::open(Path::new(arg(2)?))?;
             let k = car.kn5()?;
             let f = aceconv::car::frame::Frame::build(&car, &k);
             println!("{}", serde_json::to_string_pretty(&f.json())?);
+        }
+        "source-fit" => {
+            let mut dirs = Vec::new();
+            let mut c = content(None);
+            let mut it = a[2..].iter();
+            while let Some(x) = it.next() {
+                if x == "--content" {
+                    c = PathBuf::from(it.next().ok_or_else(|| anyhow!("--content needs a value"))?);
+                } else {
+                    dirs.push(x.clone());
+                }
+            }
+            for d in dirs {
+                // <dir>=<stock EVO id>: also the stock twin's tyres on this chassis
+                let (d, twin) = match d.rsplit_once('=') { Some((a, b)) => (a.to_string(), Some(b.to_string())), None => (d, None) };
+                let v = aceconv::car::physics::fitreport::report_ac1(Path::new(&d), Some(&c), twin.as_deref())
+                    .unwrap_or_else(|e| serde_json::json!({"car": d, "error": format!("{e:#}")}));
+                println!("{}", serde_json::to_string(&v)?);
+            }
         }
         "car-phys" if a.get(2).map(|s| s == "--ac1").unwrap_or(false) => {
             // physics stage only, on AC1 car folders: one json line per car
@@ -526,9 +551,7 @@ fn run() -> Result<()> {
         }
         "track" => {
             let id = a.iter().position(|x| x == "--id").and_then(|i| a.get(i + 1)).cloned();
-            let layouts = a.iter().position(|x| x == "--layouts").and_then(|i| a.get(i + 1))
-                .map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
-            let opt = aceconv::track::build::Options { id, content: None, layouts };
+            let opt = aceconv::track::build::Options { id, content: None };
             let r = aceconv::track::build::convert(Path::new(arg(2)?), Path::new(arg(3)?), &opt)?;
             for l in &r.report {
                 println!("{l}");

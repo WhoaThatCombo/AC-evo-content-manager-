@@ -65,6 +65,15 @@ fn record(path: &str, kind: u16, size: u32, offset: u64) -> Result<[u8; BUCKET]>
 
 /// Write `files` (archive path with backslashes, bytes) to `out`.
 pub fn write(out: &Path, files: &mut [(String, Vec<u8>)]) -> Result<()> {
+    // the game finds a file by the hash of its lower-cased path: two paths
+    // that differ only in case are one file to it, and one of them would get
+    // the other's data
+    let mut seen: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
+    for (path, _) in files.iter() {
+        if let Some(prev) = seen.insert(entry_id(path), path) {
+            bail!("two files differ only in case: {prev} and {path}");
+        }
+    }
     let tmp = out.with_extension("kspkg.part");
     let f = std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
     let mut w = std::io::BufWriter::with_capacity(8 << 20, f);

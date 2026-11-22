@@ -312,7 +312,7 @@ OURS (with the stock evidence, measured by the clean tools):
 
 | decision | rule | evidence |
 |---|---|---|
-| tyre grip | template = the EVO class's stock tyre closest in size; Dy0 / Dx0 solved so mu(F_static) = 0.98 x AC1's (mu = D (Fz / Fz0)^(ls - 1)) | 26 twin axles: EVO / AC1 lateral mu at 3 kN median 0.978, mostly +-5 % |
+| tyre grip | template = the EVO class's stock tyre closest in size; its force-curve fields (Dy0, Dx0, lsExpY / X, friction_limit_angle + gain, falloff_level / slope f80 .. 85, brakeDXMod, Fz0 = static load) **fitted** (`car::physics::tyrefit`, Nelder-Mead) so the SCTM curve matches 0.98 x the source curve at 0.4 .. 1.9 x the static load, 0.5 .. 40 deg and both slip-ratio sides, 20 m/s; the AC1 curve is `ac1::tyre` (documented keys as documented, undocumented shape = the template's) | 26 twin axles: EVO / AC1 lateral mu at 3 kN median 0.978, mostly +-5 %; fit error per car in `aceconv source-fit` |
 | tyre class | by target mu: < 1.12 eco, < 1.32 road, < 1.40 supercar, else hypercar; AC1 names with "slick" (not semi) or >= 1.45 racing slicks; >= 1.70 F1 | stock class mu bands at 3 kN: eco 1.02 .. 1.14, road 1.17 .. 1.34, supercar 1.26 .. 1.33, hypercar 1.37 .. 1.48, slicks 1.46 .. 1.53 |
 | ride height | collar = sag - x, x = (drawn wheel y - CoG y) - BASEY - tyre static deflection; setup target height = (CoG height + pickup height) of the drawn model | stock: body offset from design follows sag - collar within +-3 cm |
 | travel | bump / droop at rest from AC1 (BUMPSTOP_UP - x_ac1, BUMPSTOP_DN + x_ac1, x_ac1 = sag - ROD_LENGTH), capped 0.09 / 0.05 m, at least abs(x) + 1.5 cm | stock Range p90 0.09 (bump), p50 0.045 (droop); evoview finds AC1's far droop stops hang the wheel into the arch |

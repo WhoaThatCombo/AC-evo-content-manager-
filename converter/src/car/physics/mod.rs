@@ -26,10 +26,14 @@ pub mod ctrl;
 pub mod drivetrain;
 pub mod dtcheck;
 pub mod engine;
+pub mod fitreport;
+pub mod handling;
 pub mod pbx;
+pub mod sctm;
 pub mod setup;
 pub mod stats;
 pub mod suspension;
+pub mod tyrefit;
 pub mod tyres;
 
 use anyhow::{anyhow, Result};
@@ -126,6 +130,11 @@ pub struct Ctx<'a> {
     pub cd_path: String,
     pub notes: Vec<String>,
     pub d: Derived,
+    /// the source car (tyres, suspension, masses) every stage that has
+    /// moved off the AC1 ini files reads
+    pub src: crate::source::SourceCar,
+    /// the tyre fits of each compound (front, rear), set by the tyre stage
+    pub fits: Vec<[tyres::Fitted; 2]>,
 }
 
 impl<'a> Ctx<'a> {
@@ -257,7 +266,8 @@ pub fn write(files: &mut Files, id: &str, stem: &str, car: &Car, frame: &Frame, 
     let cd_path = files.find_ci(&format!("{base}\\data\\cardata.car")).ok_or_else(|| anyhow!("the donor has no data\\cardata.car"))?;
     let cd = Msg::parse(files.get(&cd_path).unwrap())?;
     let game = content.filter(|p| p.is_file()).and_then(|p| Pkg::open(p).ok());
-    let mut c = Ctx { files, id: id.to_string(), stem: stem.to_string(), base, car, frame, game, cd, cd_path, notes: Vec::new(), d: Derived::default() };
+    let src = crate::source::ac1::read(car, frame);
+    let mut c = Ctx { files, id: id.to_string(), stem: stem.to_string(), base, car, frame, game, cd, cd_path, notes: Vec::new(), d: Derived::default(), src, fits: Vec::new() };
     chassis::general(&mut c)?;
     engine::write(&mut c)?;
     drivetrain::write(&mut c)?;

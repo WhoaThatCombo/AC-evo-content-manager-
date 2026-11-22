@@ -29,6 +29,7 @@ aceconv stockstats compare <car.kspkg | track dir> <stockstats.json>
 aceconv track <ac1 track dir> <out dir> [--id <id>]  AC1 track -> <out>\<id>\ (+ ui\track_decl.json)
 aceconv track-scan <ac1 track dir>...                 layouts, meshes, spawns, AI lines of AC1 tracks
 aceconv check-car <car.kspkg>  /  check-track <track dir>
+aceconv game-check <car.kspkg | track dir | mods dir>  predicted in-game load failures (file, reason, game reaction)
 aceconv make-donor  /  make-fmod-template  /  fmodbank <project> <out>
 aceconv unpack / pack / slim / pack-share / unpack-share
 aceconv car <ac1 car dir> <out dir> [--id <id>] [--donor <zip>] [--refmats <dir>] [--content <content.kspkg>]
@@ -42,7 +43,7 @@ aceconv car-id <folder>  /  track-id <folder>  /  legacy-id <mods dir> <cars|tra
 
 ## How results are checked
 
-Not by comparing with any other tool's output. A conversion is checked by the validator (`check-car`, `check-track`), against the statistics of the game's own content (`stockstats compare`), with the evoview viewer as a black-box checker, and in the game.
+Not by comparing with any other tool's output. A conversion is checked by the validator (`check-car`, `check-track`, and `game-check`, which predicts in-game load failures from the game's own failure paths and must stay silent on stock content: `game-check --stock`), against the statistics of the game's own content (`stockstats compare`), with the evoview viewer as a black-box checker, and in the game.
 
 ## Documentation
 

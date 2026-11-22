@@ -15,9 +15,9 @@ pub mod ac1 {
     pub mod car;
     pub mod ini;
     pub mod kn5;
-    pub mod kn5_decrypt;
     pub mod knh;
     pub mod ksanim;
+    pub mod tyre;
     pub mod ui;
 }
 pub mod batch;
@@ -28,6 +28,7 @@ pub mod ids;
 pub mod share;
 pub mod slim;
 pub mod sound;
+pub mod source;
 pub mod stats;
 pub mod track;
 pub mod validate;

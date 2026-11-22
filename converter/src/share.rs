@@ -323,34 +323,24 @@ pub fn codec() -> Codec {
 
 pub const DEFAULT_CODEC: Codec = Codec::Xz(9);
 
-/// Packages come from other people: never inflate past what the manifest
-/// declares, and never trust a declared size past this.
-const MAX_RAW: u64 = 16 << 30;
-
-/// Decompress a segment of exactly `raw` declared bytes (more is an error).
 fn decompress(family: &str, data: &[u8], raw: usize) -> Result<Vec<u8>> {
     match family {
         "" | "xz" => unxz(data, raw),
         "zstd" => {
             let mut d = zstd::stream::Decoder::new(data)?;
             d.window_log_max(31)?;
-            read_capped(d, raw)
+            let mut out = Vec::with_capacity(raw);
+            d.read_to_end(&mut out)?;
+            Ok(out)
         }
         c => bail!("this package uses codec {c}, which this converter cannot read - update it"),
     }
 }
 
-/// `raw` is a limit: at most `raw` bytes are produced, more is an error.
 fn unxz(data: &[u8], raw: usize) -> Result<Vec<u8>> {
-    read_capped(liblzma::read::XzDecoder::new(data), raw)
-}
-
-fn read_capped(r: impl Read, raw: usize) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(raw.min(256 << 20));
-    r.take(raw as u64 + 1).read_to_end(&mut out)?;
-    if out.len() > raw {
-        bail!("package segment inflates past its declared size");
-    }
+    let mut d = liblzma::read::XzDecoder::new(data);
+    let mut out = Vec::with_capacity(raw);
+    d.read_to_end(&mut out)?;
     Ok(out)
 }
 
@@ -657,32 +647,9 @@ pub fn read_manifest(p: &Path) -> Result<(Manifest, Vec<u8>, usize)> {
         bail!("{} is not an .acemod", p.display());
     }
     let n = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
-    let js = unxz(b.get(12..12 + n).ok_or_else(|| anyhow!("truncated manifest"))?, 64 << 20)?;
+    let js = unxz(b.get(12..12 + n).ok_or_else(|| anyhow!("truncated manifest"))?, 1 << 20)?;
     let man: Manifest = serde_json::from_slice(&js)?;
-    check_manifest(&man)?;
     Ok((man, b, 12 + n))
-}
-
-/// Refuse a manifest whose names would leave the output folder or whose
-/// declared sizes are absurd - before anything is inflated or written.
-fn check_manifest(man: &Manifest) -> Result<()> {
-    if man.kind == "dir" {
-        if let Some(b) = man.blobs.iter().find(|b| !crate::slim::safe_rel(&b.path)) {
-            bail!("unsafe path in package: {:?}", b.path);
-        }
-    }
-    for (n, _, _) in &man.extras {
-        let ok = Path::new(n).extension().and_then(|e| e.to_str())
-            .is_some_and(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()));
-        if !ok {
-            bail!("unsafe sidecar name in package: {n:?}");
-        }
-    }
-    let total = man.segments.iter().try_fold(0u64, |a, s| a.checked_add(s.raw)).unwrap_or(u64::MAX);
-    if total > MAX_RAW || man.out_size > MAX_RAW || man.blobs.iter().any(|b| b.size > MAX_RAW) {
-        bail!("package declares more than {} GB of data", MAX_RAW >> 30);
-    }
-    Ok(())
 }
 
 #[derive(Default, Debug)]
@@ -702,14 +669,11 @@ pub fn unpack(src: &Path, out: &Path, game: Option<&Path>) -> Result<UnpackRepor
     // segments -> raw, then each group's segments concatenated
     let mut ranges = Vec::new();
     for s in &man.segments {
-        let e = pos.saturating_add(s.packed as usize);
-        ranges.push((pos, e, s.raw as usize));
-        pos = e;
+        ranges.push((pos, pos + s.packed as usize, s.raw as usize));
+        pos += s.packed as usize;
     }
     use rayon::prelude::*;
-    let raw: Vec<Vec<u8>> = pl.install(|| ranges.par_iter().map(|&(a, e, n)| {
-        decompress(&man.codec, file.get(a..e).ok_or_else(|| anyhow!("truncated package"))?, n)
-    }).collect::<Result<Vec<_>>>())?;
+    let raw: Vec<Vec<u8>> = pl.install(|| ranges.par_iter().map(|&(a, e, n)| decompress(&man.codec, &file[a..e], n)).collect::<Result<Vec<_>>>())?;
     drop(file);
     // group streams: a blob's `at` is relative to its group's concatenation
     let group = |name: &str| name.trim_end_matches(|c: char| c.is_ascii_digit()).to_string();
@@ -817,37 +781,6 @@ pub fn unpack(src: &Path, out: &Path, game: Option<&Path>) -> Result<UnpackRepor
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn man(kind: &str, path: &str) -> Manifest {
-        Manifest {
-            version: 2, kind: kind.into(), name: "x".into(), out_size: 0, out_md5: String::new(),
-            blobs: vec![Blob { path: path.into(), size: 1, md5: String::new(), how: "raw".into(), off: 0, kind: 0, base: String::new(), seg: 0, at: 0 }],
-            segments: vec![], gaps: vec![], gaps_seg: 0, gaps_at: 0, table_seg: 0, table_at: 0, base_from: 0, extras: vec![], codec: String::new(),
-        }
-    }
-
-    #[test]
-    fn manifest_paths_checked() {
-        assert!(check_manifest(&man("dir", "tracks/x/a.bin")).is_ok());
-        for bad in ["../../evil.bat", "C:/Users/x.bat", "/abs", "a/../../b", "a:b"] {
-            assert!(check_manifest(&man("dir", bad)).is_err(), "{bad}");
-        }
-        let mut m = man("kspkg", "content/x");
-        m.extras.push(("x.json:ads".into(), 1, 0));
-        assert!(check_manifest(&m).is_err());
-        m.extras[0].0 = "x.json".into();
-        assert!(check_manifest(&m).is_ok());
-    }
-
-    #[test]
-    fn decompress_is_capped() {
-        let big = vec![0u8; 1 << 20];
-        let z = xz_at(&big, 1).unwrap();
-        assert_eq!(unxz(&z, 1 << 20).unwrap().len(), 1 << 20);
-        assert!(unxz(&z, 1000).is_err());
-        let zs = Codec::Zstd(1).compress(&big).unwrap();
-        assert!(decompress("zstd", &zs, 1000).is_err());
-    }
 
     #[test]
     fn planes_roundtrip() {

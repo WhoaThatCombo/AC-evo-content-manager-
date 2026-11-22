@@ -35,9 +35,9 @@
 use anyhow::Result;
 
 use super::pbx::{self, at, f, i};
-use super::{ac1_v3, Ctx, G};
-use crate::ac1::ini::Ini;
+use super::{Ctx, G};
 use crate::io::pb::{Msg, Val};
+use crate::source::{Axle, Geometry};
 
 /// Travel caps (OURS): the stock p90 of bumpStopUp Range and the p50 of
 /// bumpStopDown Range (0.09 / 0.045 m). AC1 BUMPSTOP_DN is often a far hard
@@ -51,107 +51,83 @@ const BUMP_DAMPING_UP: f64 = 400.0;
 const BUMP_DAMPING_DOWN: f64 = 500.0;
 const DROOP_MAX: f64 = 0.05;
 
-const DWB: [(&str, u32); 8] = [("WBCAR_TOP_FRONT", 1), ("WBCAR_TOP_REAR", 2), ("WBCAR_BOTTOM_FRONT", 3), ("WBCAR_BOTTOM_REAR", 4), ("WBTYRE_TOP", 5), ("WBTYRE_BOTTOM", 6), ("WBCAR_STEER", 7), ("WBTYRE_STEER", 8)];
-const STRUT: [(&str, u32); 7] = [("STRUT_CAR", 1), ("STRUT_TYRE", 2), ("WBCAR_BOTTOM_FRONT", 3), ("WBCAR_BOTTOM_REAR", 4), ("WBTYRE_BOTTOM", 5), ("WBCAR_STEER", 6), ("WBTYRE_STEER", 7)];
-
-fn points(s: &Ini, sec: &str, keys: &[(&str, u32)]) -> Option<Msg> {
+fn pts_msg(p: &[[f64; 3]]) -> Msg {
     let mut m = Msg::default();
-    for (k, n) in keys {
-        m.set(*n, pbx::v3(ac1_v3(s, sec, k)?));
+    for (k, v) in p.iter().enumerate() {
+        m.set(k as u32 + 1, pbx::v3(*v));
     }
-    Some(m)
+    m
 }
 
-/// The geometry message of one axle; the kind name for notes.
-fn geometry(c: &mut Ctx, s: &Ini, sec: &str) -> Msg {
-    let kind = s.get(sec, "TYPE").unwrap_or("DWB").trim().to_uppercase();
+/// The geometry message of one axle.
+fn geometry(c: &mut Ctx, a: &Axle, sec: &str) -> Msg {
     let mut g = Msg::default();
     let mut basic = Msg::default();
-    let hub = s.num(sec, "HUB_MASS").unwrap_or(40.0);
-    f(&mut basic, 3, if kind == "AXLE" { (hub * 0.3).max(20.0) } else { hub });
-    f(&mut basic, 4, s.num(sec, "TOE_OUT").unwrap_or(0.0));
-    f(&mut basic, 5, s.num(sec, "STATIC_CAMBER").unwrap_or(0.0));
-    f(&mut basic, 6, s.num(sec, "RIM_OFFSET").unwrap_or(0.0));
+    let is_axle = matches!(a.geometry, Geometry::Axle { .. });
+    f(&mut basic, 3, if is_axle { (a.hub_mass * 0.3).max(20.0) } else { a.hub_mass });
+    f(&mut basic, 4, a.toe_out);
+    f(&mut basic, 5, a.static_camber_deg);
+    f(&mut basic, 6, a.rim_offset);
     g.set(1, Val::Msg(basic));
-    match kind.as_str() {
-        "STRUT" => match points(s, sec, &STRUT) {
-            Some(p) => g.set(3, Val::Msg(p)),
-            None => c.note(format!("physics: [{sec}] STRUT without all its points")),
-        },
-        "AXLE" => {
-            let mut a = Msg::default();
-            let n = s.num("AXLE", "LINK_COUNT").unwrap_or(4.0) as usize;
-            f(&mut a, 1, s.num("AXLE", "ATTACH_REL_POS").unwrap_or(0.5));
-            let mut links = 0;
-            for k in 0..n {
-                if let (Some(cs), Some(ax)) = (ac1_v3(s, "AXLE", &format!("J{k}_CAR")), ac1_v3(s, "AXLE", &format!("J{k}_AXLE"))) {
-                    a.push(3, pbx::v3(cs));
-                    a.push(4, pbx::v3(ax));
-                    links += 1;
-                }
-            }
-            i(&mut a, 2, links);
-            f(&mut a, 5, hub);
-            f(&mut a, 6, s.num("AXLE", "LEAF_SPRING_LAT_K").unwrap_or(0.0));
-            f(&mut a, 7, s.num("AXLE", "TORQUE_REACTION").unwrap_or(0.0));
-            a.fields.sort_by_key(|x| x.num);
-            g.set(4, Val::Msg(a));
-        }
-        "ML" => {
+    match &a.geometry {
+        Geometry::DoubleWishbone(p) => g.set(2, Val::Msg(pts_msg(p))),
+        Geometry::Strut(p) => g.set(3, Val::Msg(pts_msg(p))),
+        Geometry::Axle { links, attach, leaf_lat_k, torque_reaction } => {
             let mut m = Msg::default();
-            for k in 0..5 {
-                if let (Some(cs), Some(ty)) = (ac1_v3(s, sec, &format!("JOINT{k}_CAR")), ac1_v3(s, sec, &format!("JOINT{k}_TYRE"))) {
-                    m.push(1, pbx::v3(cs));
-                    m.push(2, pbx::v3(ty));
-                }
+            f(&mut m, 1, *attach);
+            for (cs, ax) in links {
+                m.push(3, pbx::v3(*cs));
+                m.push(4, pbx::v3(*ax));
+            }
+            i(&mut m, 2, links.len() as i64);
+            f(&mut m, 5, a.hub_mass);
+            f(&mut m, 6, *leaf_lat_k);
+            f(&mut m, 7, *torque_reaction);
+            m.fields.sort_by_key(|x| x.num);
+            g.set(4, Val::Msg(m));
+        }
+        Geometry::MultiLink(j) => {
+            let mut m = Msg::default();
+            for (cs, ty) in j {
+                m.push(1, pbx::v3(*cs));
+                m.push(2, pbx::v3(*ty));
             }
             m.fields.sort_by_key(|x| x.num);
-            if m.fields.len() >= 10 {
-                g.set(5, Val::Msg(m));
-            } else if let Some(p) = points(s, sec, &DWB) {
-                c.note(format!("physics: [{sec}] ML joints incomplete; its double-wishbone points are used"));
-                g.set(2, Val::Msg(p));
-            } else {
-                c.note(format!("physics: [{sec}] ML joints incomplete"));
-            }
+            g.set(5, Val::Msg(m));
         }
-        _ => match points(s, sec, &DWB) {
-            Some(p) => g.set(2, Val::Msg(p)),
-            None => c.note(format!("physics: [{sec}] {kind} without all its points")),
-        },
+        Geometry::Unknown => c.note(format!("physics: [{sec}] {} without all its points", a.kind)),
     }
     g
 }
 
 pub fn write(c: &mut Ctx) -> Result<()> {
-    let s = c.ini("suspensions.ini").clone();
     let ci = c.ini("car.ini").clone();
     let m = c.d.mass_static;
     let share = [c.d.cg_front, 1.0 - c.d.cg_front];
     let cog = c.frame.cog;
+    let axles = c.src.axles.clone();
     let mut coil: Vec<Msg> = Vec::new();
     let mut geos: Vec<Msg> = Vec::new();
     let mut base_y = [0.0; 2];
     let mut track = [0.0; 2];
     for (a, sec) in ["FRONT", "REAR"].iter().enumerate() {
-        let k = s.num(sec, "SPRING_RATE").filter(|v| *v > 1000.0).unwrap_or(40000.0);
-        let hub = s.num(sec, "HUB_MASS").unwrap_or(40.0);
+        let ax = &axles[a];
+        let k = ax.spring;
         let load = m * G * share[a] / 2.0;
-        let sag = (load - hub * G).max(load * 0.5) / k;
-        let rod = s.num(sec, "ROD_LENGTH").unwrap_or(0.0);
-        let x_ac1 = sag - rod;
-        let by = s.num(sec, "BASEY").unwrap_or(-0.2);
+        let sag = (load - ax.hub_mass * G).max(load * 0.5) / k;
+        let x_ac1 = sag - ax.rod_length;
+        let by = ax.base_y;
         base_y[a] = by;
-        track[a] = s.num(sec, "TRACK").or(c.frame.track_width(a == 0)).unwrap_or(1.5);
-        // where the AC1 model draws the wheel, from the CoG
+        track[a] = ax.track;
+        // where the source model draws the wheel, from the CoG
         let cs = if a == 0 { ["LF", "RF"] } else { ["LR", "RR"] };
         let wy: Vec<f64> = cs.iter().filter_map(|k| c.frame.wheel_centres.get(*k)).map(|p| p[1]).collect();
         let w_vis = if wy.is_empty() { by } else { wy.iter().sum::<f64>() / wy.len() as f64 } - cog[1];
         let tdef = load / c.d.tyre_rate[a].max(1e5);
         let x = w_vis - by - tdef;
         let collar = sag - x;
-        let up = (s.num(sec, "BUMPSTOP_UP").unwrap_or(0.08) - x_ac1).clamp(0.01, BUMP_MAX).max(x.abs() + 0.015);
-        let dn = (s.num(sec, "BUMPSTOP_DN").unwrap_or(0.08) + x_ac1).clamp(0.01, DROOP_MAX).max(x.abs() + 0.015);
+        let up = (ax.bump_stop_up - x_ac1).clamp(0.01, BUMP_MAX).max(x.abs() + 0.015);
+        let dn = (ax.bump_stop_down + x_ac1).clamp(0.01, DROOP_MAX).max(x.abs() + 0.015);
         c.d.spring[a] = k;
         c.d.sag[a] = sag;
         c.d.rest_x[a] = x;
@@ -163,15 +139,14 @@ pub fn write(c: &mut Ctx) -> Result<()> {
         // CoiloverData
         let mut co = c.cd.sub(2).and_then(|x| x.sub(if a == 0 { 8 } else { 9 })).unwrap_or_default();
         f(&mut co, 1, k);
-        pbx::fo(&mut co, 2, s.num(sec, "PROGRESSIVE_SPRING_RATE").filter(|v| *v > 0.0));
-        let stop_rate = s.num(sec, "BUMP_STOP_RATE").filter(|v| *v > 0.0).unwrap_or(50000.0);
+        pbx::fo(&mut co, 2, ax.progressive);
         for (num, range, damping) in [(3u32, up, BUMP_DAMPING_UP), (4u32, dn, BUMP_DAMPING_DOWN)] {
             // damping only where the template's stop has one (stock cars omit it on some stops)
             let template_damped = co.sub(num).map(|b| b.get(6).is_some()).unwrap_or(false);
             let b = co.msg_mut(num)?;
             f(b, 1, range);
             f(b, 2, 0.01);
-            f(b, 3, stop_rate * 0.01);
+            f(b, 3, ax.bump_stop_rate * 0.01);
             f(b, 4, 1.5);
             f(b, 5, 0.02);
             pbx::fo(b, 6, template_damped.then_some(damping));
@@ -179,21 +154,19 @@ pub fn write(c: &mut Ctx) -> Result<()> {
         f(&mut co, 5, collar);
         {
             let d = co.msg_mut(6)?;
-            let g = |key: &str, dflt: f64| s.num(sec, key).filter(|v| *v > 0.0).unwrap_or(dflt);
-            let slow_b = g("DAMP_BUMP", 3000.0);
-            let slow_r = g("DAMP_REBOUND", 6000.0);
+            let dm = &ax.dampers;
             {
                 let fa = d.msg_mut(1)?;
-                f(fa, 1, g("DAMP_FAST_BUMP", slow_b * 0.5));
-                f(fa, 2, g("DAMP_FAST_REBOUND", slow_r * 0.5));
+                f(fa, 1, dm.fast_bump);
+                f(fa, 2, dm.fast_rebound);
             }
             {
                 let sl = d.msg_mut(2)?;
-                f(sl, 1, slow_b);
-                f(sl, 2, slow_r);
+                f(sl, 1, dm.bump);
+                f(sl, 2, dm.rebound);
             }
-            f(d, 3, g("DAMP_FAST_BUMPTHRESHOLD", 0.1));
-            f(d, 4, g("DAMP_FAST_REBOUNDTHRESHOLD", 0.1));
+            f(d, 3, dm.fast_bump_threshold);
+            f(d, 4, dm.fast_rebound_threshold);
             d.remove(13);
             d.remove(14);
         }
@@ -201,14 +174,14 @@ pub fn write(c: &mut Ctx) -> Result<()> {
         co.remove(8);
         co.fields.sort_by_key(|x| x.num);
         coil.push(co);
-        geos.push(geometry(c, &s, sec));
+        geos.push(geometry(c, ax, sec));
         c.note(format!(
             "physics: {sec} {} k {k:.0} N/m, sag {:.3} m, rest x {:+.3} m, collar {collar:.3} m, bump {up:.3} / droop {dn:.3} m, ride target {:.0} mm",
-            s.get(sec, "TYPE").unwrap_or("DWB").trim(), sag, x, c.d.target_height_mm[a]
+            ax.kind, sag, x, c.d.target_height_mm[a]
         ));
     }
     c.d.track = track;
-    let arb = [s.num("ARB", "FRONT").unwrap_or(0.0), s.num("ARB", "REAR").unwrap_or(0.0)];
+    let arb = [axles[0].arb, axles[1].arb];
     let sp = at(&mut c.cd, &[2])?;
     f(sp, 2, c.d.wheelbase);
     f(sp, 3, c.d.cg_front);
@@ -226,7 +199,7 @@ pub fn write(c: &mut Ctx) -> Result<()> {
         f(a, 1, v.max(0.0));
         a.set(2, Val::Msg(Msg::default()));
     }
-    // flex bars (twist beams) are the donor's: AC1 has none
+    // flex bars (twist beams) are the donor's: the source has none
     for num in [24u32, 25] {
         let mut fb = Msg::default();
         fb.set(2, Val::Msg(Msg::default()));

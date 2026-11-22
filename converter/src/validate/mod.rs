@@ -41,6 +41,7 @@ pub mod rigcheck;
 pub mod camcheck;
 pub mod decl;
 pub mod lines;
+pub mod gamecheck;
 
 use crate::io::kspkg::Pkg;
 use crate::io::pb::{Msg, Val};

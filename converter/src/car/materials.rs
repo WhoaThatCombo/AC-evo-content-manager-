@@ -495,10 +495,18 @@ impl<'a> Tex<'a> {
         c
     }
 
-    fn unique_path(&mut self, dir: &str, stem: &str) -> String {
+    /// A texture path free of both our own earlier picks and any file already
+    /// in the package (the donor template's), ignoring case: the game finds
+    /// files by the hash of the lower-cased path, so `EXT_Rim_AO.texture` and
+    /// `ext_rim_ao.texture` would be one file.
+    fn unique_path(&mut self, files: &Files, dir: &str, stem: &str) -> String {
         let mut p = format!("{dir}\\{stem}.texture");
         let mut n = 2;
-        while self.used_names.contains(&p.to_lowercase()) {
+        let taken = |p: &str| {
+            let mips = format!("{p}mips");
+            files.map.keys().any(|k| k.eq_ignore_ascii_case(p) || k.eq_ignore_ascii_case(&mips))
+        };
+        while self.used_names.contains(&p.to_lowercase()) || taken(&p) {
             p = format!("{dir}\\{stem}_{n}.texture");
             n += 1;
         }
@@ -637,7 +645,7 @@ impl<'a> Tex<'a> {
                 _ => format!("{}\\texture", self.base),
             },
         };
-        let p = self.unique_path(&dir, &slug(&dname));
+        let p = self.unique_path(files, &dir, &slug(&dname));
         let fmt = colour_format(&out, paint);
         let src = ac1_name(&dname, from_skin, skin.map(|s| s.0));
         self.put(files, &p, &out, fmt, true, &src);
@@ -665,7 +673,7 @@ impl<'a> Tex<'a> {
         let out = match role {
             Role::Color => {
                 let img = texture::resize_to(&img, self.cap(true, skin.map(|s| s.0)), true);
-                let p = self.unique_path(&dir, &stem);
+                let p = self.unique_path(files, &dir, &stem);
                 let fmt = colour_format(&img, false);
                 self.put(files, &p, &img, fmt, true, &src);
                 Some(p)
@@ -675,7 +683,7 @@ impl<'a> Tex<'a> {
                     None
                 } else {
                     let img = texture::resize_to(&img, self.cap(false, skin.map(|s| s.0)), false);
-                    let p = self.unique_path(&dir, &format!("{stem}_nm"));
+                    let p = self.unique_path(files, &dir, &format!("{stem}_nm"));
                     self.put(files, &p, &img, Fmt::Bc6h, false, &src);
                     Some(p)
                 }
@@ -684,7 +692,7 @@ impl<'a> Tex<'a> {
                 let img = texture::resize_to(&img, self.cap(false, skin.map(|s| s.0)), false);
                 let px: Vec<u8> = img.px.chunks_exact(4).flat_map(|c| [c[3], c[3], c[3], 255]).collect();
                 let a = Image { w: img.w, h: img.h, px };
-                let p = self.unique_path(&dir, &format!("{stem}_at"));
+                let p = self.unique_path(files, &dir, &format!("{stem}_at"));
                 self.put(files, &p, &a, Fmt::Bc4, false, &src);
                 Some(p)
             }
@@ -696,7 +704,7 @@ impl<'a> Tex<'a> {
                     [v, v, v, 255]
                 }).collect();
                 let a = Image { w: img.w, h: img.h, px };
-                let p = self.unique_path(&dir, &format!("{stem}_mask"));
+                let p = self.unique_path(files, &dir, &format!("{stem}_mask"));
                 self.put(files, &p, &a, Fmt::Bc4, false, &src);
                 Some(p)
             }
@@ -715,7 +723,7 @@ impl<'a> Tex<'a> {
                     let px = img.px.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2], 255]).collect();
                     Image { w: img.w, h: img.h, px }
                 };
-                let p = self.unique_path(&dir, &format!("{stem}_detail"));
+                let p = self.unique_path(files, &dir, &format!("{stem}_detail"));
                 self.put(files, &p, &img, Fmt::Bc1D, true, &src);
                 Some(p)
             }
@@ -726,7 +734,7 @@ impl<'a> Tex<'a> {
                 let img = texture::resize_to(&img, self.cap(false, skin.map(|s| s.0)), false);
                 let px: Vec<u8> = img.px.chunks_exact(4).flat_map(|c| [255 - c[3], 255 - c[3], 255 - c[3], 255]).collect();
                 let a = Image { w: img.w, h: img.h, px };
-                let p = self.unique_path(&dir, &format!("{stem}_splat"));
+                let p = self.unique_path(files, &dir, &format!("{stem}_splat"));
                 self.put(files, &p, &a, Fmt::Bc1, false, &src);
                 Some(p)
             }
@@ -740,7 +748,7 @@ impl<'a> Tex<'a> {
                     [v, v, v, 255]
                 }).collect();
                 let rimg = Image { w: img.w, h: img.h, px };
-                let p = self.unique_path(&dir, &format!("{stem}_r"));
+                let p = self.unique_path(files, &dir, &format!("{stem}_r"));
                 self.put(files, &p, &rimg, Fmt::Bc4, false, &src);
                 Some(p)
             }

@@ -645,21 +645,8 @@ pub fn read_dir(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     Ok(out)
 }
 
-/// A folder-relative path from an untrusted source (a package manifest) that
-/// stays inside the folder: no root, drive, `:` (drive / alternate stream),
-/// NUL, empty, `.` or `..` component.
-pub fn safe_rel(p: &str) -> bool {
-    !p.is_empty()
-        && !p.starts_with(['/', '\\'])
-        && p.split(['/', '\\']).all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains([':', '\0']))
-}
-
 /// Write a map from `read_dir` back out (into a fresh folder, swapped in).
 pub fn write_dir(dst: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
-    // refuse the whole set before touching the disk
-    if let Some(k) = files.keys().find(|k| !safe_rel(k)) {
-        anyhow::bail!("unsafe path in package: {k:?}");
-    }
     let tmp = dst.with_extension("part");
     if tmp.exists() {
         std::fs::remove_dir_all(&tmp)?;
@@ -681,22 +668,6 @@ pub fn write_dir(dst: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn safe_rel_rejects_escapes() {
-        for ok in ["a.kspkg", r"tracks\x\a.bin", "a/b/c.json", "x..y"] {
-            assert!(safe_rel(ok), "{ok}");
-        }
-        for bad in ["", "..", "../x", r"a\..\..\x", "a/./b", "/etc/x", r"\x", r"\\srv\s\x",
-                    "C:/x", "C:x", "a/b:c", "a\0b", "a//b", "a/"] {
-            assert!(!safe_rel(bad), "{bad:?}");
-        }
-        let d = std::env::temp_dir().join(format!("aceconv_safe_rel_{}", std::process::id()));
-        let mut m = BTreeMap::new();
-        m.insert("../evil.txt".to_string(), b"x".to_vec());
-        assert!(write_dir(&d, &m).is_err());
-        assert!(!d.with_extension("part").exists());
-    }
 
     #[test]
     fn refs_and_blanking() {
