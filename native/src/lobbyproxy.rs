@@ -150,7 +150,7 @@ fn advertise_ip(peer: Option<SocketAddr>, lb: &Map<String, Value>) -> String {
 async fn live_players(lb: &Map<String, Value>) -> usize {
     let port = lb_i(lb, "http_port", 0);
     let url = if port != 0 { format!("http://127.0.0.1:{port}/") } else { env("SERVER_HTTP", "http://127.0.0.1:8080/") };
-    let Ok(c) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build() else { return 0 };
+    let Ok(c) = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(2)).build() else { return 0 };
     let Ok(r) = c.get(url).send().await else { return 0 };
     let Ok(t) = r.text().await else { return 0 };
     serde_json::from_str::<Value>(&t).ok().and_then(|v| v.get("clients").and_then(|c| c.as_u64())).unwrap_or(0) as usize
@@ -650,6 +650,12 @@ async fn control_gate(req: axum::extract::Request, next: axum::middleware::Next)
     use axum::response::IntoResponse;
     let secret = std::env::var(CONTROL_SECRET_ENV).ok();
     if !control_ok(req.headers(), secret.as_deref()) {
+        // said in the log: a refused join was invisible before (a system
+        // proxy in the way, or a caller without the secret)
+        let h = req.headers();
+        let g = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
+        eprintln!("  control: refused {} {} (host {}, origin {}, secret {})", req.method(), req.uri().path(),
+            g("host"), g("origin"), if h.contains_key(CONTROL_SECRET_HEADER) { "wrong" } else { "missing" });
         return (axum::http::StatusCode::FORBIDDEN, axum::Json(json!({"ok": false, "error": "forbidden"}))).into_response();
     }
     next.run(req).await

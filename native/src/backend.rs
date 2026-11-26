@@ -636,7 +636,7 @@ pub fn join_state() -> Value {
     if procs::tcp_listen_pids(8093).is_empty() {
         return json!({"control": false, "error": "proxy not listening", "hint": "start the proxy backend to enable direct join"});
     }
-    let got = reqwest::blocking::Client::builder().timeout(Duration::from_millis(400)).build().ok()
+    let got = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_millis(400)).build().ok()
         .and_then(|c| ctl(c.get(format!("{CONTROL}/"))).send().ok())
         .and_then(|r| r.text().ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok());
     match got {
@@ -707,7 +707,7 @@ pub fn browser_chain() -> Value {
 pub fn join(server_id: &Value, shape: &str, tcp: Value, udp: Value, password: &str) -> Value {
     let udp = if udp.is_null() || udp == json!(0) { tcp.clone() } else { udp };
     let body = json!({"id": server_id, "shape": shape, "tcp": tcp, "udp": udp, "password": password});
-    let r = reqwest::blocking::Client::builder().timeout(Duration::from_secs(8)).build().ok()
+    let r = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(8)).build().ok()
         .map(|c| ctl(c.post(format!("{CONTROL}/join"))).header("Content-Type", "application/json")
             .body(profiles::py_dumps(&body)).send());
     match r {
@@ -850,7 +850,7 @@ pub fn lobby_prefetch_default() -> bool {
 pub fn server_list() -> Value {
     let cache = list_cache();
     if !procs::tcp_listen_pids(8093).is_empty() {
-        let got = reqwest::blocking::Client::builder().timeout(Duration::from_millis(1500)).build().ok()
+        let got = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_millis(1500)).build().ok()
             .and_then(|c| ctl(c.get(format!("{CONTROL}/servers"))).send().ok())
             .and_then(|r| r.text().ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok());
         if let Some(Value::Object(mut g)) = got {

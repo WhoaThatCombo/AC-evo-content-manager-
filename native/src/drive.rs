@@ -1053,6 +1053,7 @@ fn enter_and_join(pick: &Map<String, Value>, sv: &Value, joined: Option<&dyn Fn(
     let mut picked = Value::Null;
     let mut sent = false;
     let mut first_ineligible: Option<Instant> = None;
+    let mut first_missing: Option<Instant> = None;
     let until = Instant::now() + Duration::from_secs(50);
     while Instant::now() < until {
         if !game_running() {
@@ -1073,6 +1074,20 @@ fn enter_and_join(pick: &Map<String, Value>, sv: &Value, joined: Option<&dyn Fn(
             break;
         }
         if val.starts_with("not-in-list:") {
+            // ⚠ the game's page can leave the server out (its own filters,
+            // or a list trimmed before the pin matched): after a few seconds
+            // join it directly - the proxy pushes go_to_server from the
+            // full list, no row needed
+            let t0 = *first_missing.get_or_insert_with(Instant::now);
+            if t0.elapsed() >= Duration::from_secs(6) && !sid.is_empty() {
+                let r = crate::backend::join(&json!(sid), "bare", json!(tcp), Value::Null, &pw);
+                logs::info(format!("drive join: not on the game's page ({val}) - direct join: {}", py_repr(&r)));
+                if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                    picked = json!({"ok": true, "value": "direct"});
+                    sent = true;
+                    break;
+                }
+            }
             set(json!({"phase": "joining", "hint": "list is up — that server is not on this page yet"}));
         } else if matches!(val.as_str(), "waiting-list" | "loading" | "no-page") {
             set(json!({"phase": "joining", "hint": "waiting for the in-game server list"}));

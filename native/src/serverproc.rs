@@ -259,7 +259,7 @@ pub fn status(profile: &Value) -> Value {
         st["ambiguous"] = json!(true);
     }
     if st["running"] == true {
-        let c = reqwest::blocking::Client::builder().timeout(Duration::from_millis(350)).build().ok()
+        let c = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_millis(350)).build().ok()
             .and_then(|c| c.get(format!("http://127.0.0.1:{http}/")).send().ok())
             .and_then(|r| r.text().ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok())
             .and_then(|v| v.get("clients").cloned());

@@ -32,7 +32,7 @@ pub fn listening() -> bool {
 }
 
 pub fn list_views() -> Result<Vec<Value>, String> {
-    let r = reqwest::blocking::Client::builder().timeout(Duration::from_secs(8)).build()
+    let r = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(8)).build()
         .map_err(|e| e.to_string())?
         .get(format!("http://{HOST}:{}/json/list", port())).send().map_err(|e| e.to_string())?;
     let t = r.text().map_err(|e| e.to_string())?;

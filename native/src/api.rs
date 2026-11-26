@@ -320,7 +320,7 @@ pub fn set_backend(u: &str) {
 /// (blocking: call inside spawn_blocking).
 pub fn backend_get(path: &str) -> Value {
     let (Some(base), Some(sec)) = (BACKEND_URL.get(), SECRET.get()) else { return Value::Null };
-    reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10)).build().ok()
+    reqwest::blocking::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(10)).build().ok()
         .and_then(|c| c.get(format!("{base}{path}")).header("Host", "127.0.0.1")
             .header("X-ACECM-Peer", "127.0.0.1").header("X-ACECM-Proxy", sec).send().ok())
         .and_then(|r| r.text().ok()).and_then(|t| serde_json::from_str(&t).ok())
